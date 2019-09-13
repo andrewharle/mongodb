@@ -1,29 +1,31 @@
+
 /**
- *    Copyright 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -31,8 +33,11 @@
 #include <boost/optional.hpp>
 #include <string>
 
+#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/operation_context.h"
+#include "mongo/db/query/tailable_mode.h"
 
 namespace mongo {
 
@@ -52,6 +57,8 @@ public:
 
     QueryRequest(NamespaceString nss);
 
+    QueryRequest(CollectionUUID uuid);
+
     /**
      * Returns a non-OK status if any property of the QR has a bad value (e.g. a negative skip
      * value) or if there is a bad combination of options (e.g. awaitData is illegal without
@@ -61,7 +68,8 @@ public:
 
     /**
      * Parses a find command object, 'cmdObj'. Caller must indicate whether or not this lite
-     * parsed query is an explained query or not via 'isExplain'.
+     * parsed query is an explained query or not via 'isExplain'. Accepts a NSS with which
+     * to initialize the QueryRequest if there is no UUID in cmdObj.
      *
      * Returns a heap allocated QueryRequest on success or an error if 'cmdObj' is not well
      * formed.
@@ -69,6 +77,13 @@ public:
     static StatusWith<std::unique_ptr<QueryRequest>> makeFromFindCommand(NamespaceString nss,
                                                                          const BSONObj& cmdObj,
                                                                          bool isExplain);
+
+    /**
+     * If _uuid exists for this QueryRequest, use it to update the value of _nss via the
+     * UUIDCatalog associated with opCtx. This should only be called when we hold a DBLock
+     * on the database to which _uuid belongs, if the _uuid is present in the UUIDCatalog.
+     */
+    void refreshNSS(OperationContext* opCtx);
 
     /**
      * Converts this QR into a find command.
@@ -102,12 +117,6 @@ public:
      */
     static bool isValidSortOrder(const BSONObj& sortObj);
 
-    /**
-     * Returns true if the query described by "query" should execute
-     * at an elevated level of isolation (i.e., $isolated was specified).
-     */
-    static bool isQueryIsolated(const BSONObj& query);
-
     // Read preference is attached to commands in "wrapped" form, e.g.
     //   { $query: { <cmd>: ... } , <kWrappedReadPrefField>: { ... } }
     //
@@ -131,11 +140,8 @@ public:
     static const std::string metaTextScore;
 
     const NamespaceString& nss() const {
+        invariant(!_nss.isEmpty());
         return _nss;
-    }
-
-    const std::string& ns() const {
-        return _nss.ns();
     }
 
     const BSONObj& getFilter() const {
@@ -250,6 +256,14 @@ public:
         _comment = comment;
     }
 
+    const BSONObj& getUnwrappedReadPref() const {
+        return _unwrappedReadPref;
+    }
+
+    void setUnwrappedReadPref(BSONObj unwrappedReadPref) {
+        _unwrappedReadPref = unwrappedReadPref.getOwned();
+    }
+
     int getMaxScan() const {
         return _maxScan;
     }
@@ -298,14 +312,6 @@ public:
         _showRecordId = showRecordId;
     }
 
-    bool isSnapshot() const {
-        return _snapshot;
-    }
-
-    void setSnapshot(bool snapshot) {
-        _snapshot = snapshot;
-    }
-
     bool hasReadPref() const {
         return _hasReadPref;
     }
@@ -315,11 +321,20 @@ public:
     }
 
     bool isTailable() const {
-        return _tailable;
+        return _tailableMode == TailableModeEnum::kTailable ||
+            _tailableMode == TailableModeEnum::kTailableAndAwaitData;
     }
 
-    void setTailable(bool tailable) {
-        _tailable = tailable;
+    bool isTailableAndAwaitData() const {
+        return _tailableMode == TailableModeEnum::kTailableAndAwaitData;
+    }
+
+    void setTailableMode(TailableModeEnum tailableMode) {
+        _tailableMode = tailableMode;
+    }
+
+    TailableModeEnum getTailableMode() const {
+        return _tailableMode;
     }
 
     bool isSlaveOk() const {
@@ -344,14 +359,6 @@ public:
 
     void setNoCursorTimeout(bool noCursorTimeout) {
         _noCursorTimeout = noCursorTimeout;
-    }
-
-    bool isAwaitData() const {
-        return _awaitData;
-    }
-
-    void setAwaitData(bool awaitData) {
-        _awaitData = awaitData;
     }
 
     bool isExhaust() const {
@@ -396,14 +403,16 @@ public:
     /**
      * Parse the provided legacy query object and parameters to construct a QueryRequest.
      */
-    static StatusWith<std::unique_ptr<QueryRequest>> fromLegacyQueryForTest(NamespaceString nss,
-                                                                            const BSONObj& queryObj,
-                                                                            const BSONObj& proj,
-                                                                            int ntoskip,
-                                                                            int ntoreturn,
-                                                                            int queryOptions);
+    static StatusWith<std::unique_ptr<QueryRequest>> fromLegacyQuery(NamespaceString nss,
+                                                                     const BSONObj& queryObj,
+                                                                     const BSONObj& proj,
+                                                                     int ntoskip,
+                                                                     int ntoreturn,
+                                                                     int queryOptions);
 
 private:
+    static StatusWith<std::unique_ptr<QueryRequest>> parseFromFindCommand(
+        std::unique_ptr<QueryRequest> qr, const BSONObj& cmdObj, bool isExplain);
     Status init(int ntoskip,
                 int ntoreturn,
                 int queryOptions,
@@ -435,7 +444,8 @@ private:
      */
     void addMetaProjection();
 
-    const NamespaceString _nss;
+    NamespaceString _nss;
+    OptionalCollectionUUID _uuid;
 
     BSONObj _filter;
     BSONObj _proj;
@@ -448,6 +458,11 @@ private:
     BSONObj _readConcern;
     // The collation is parsed elsewhere.
     BSONObj _collation;
+
+    // The unwrapped readPreference object, if one was given to us by the mongos command processor.
+    // This object will be empty when no readPreference is specified or if the request does not
+    // originate from mongos.
+    BSONObj _unwrappedReadPref;
 
     bool _wantMore = true;
 
@@ -473,6 +488,8 @@ private:
     std::string _comment;
 
     int _maxScan = 0;
+
+    // A user-specified maxTimeMS limit, or a value of '0' if not specified.
     int _maxTimeMS = 0;
 
     BSONObj _min;
@@ -480,15 +497,13 @@ private:
 
     bool _returnKey = false;
     bool _showRecordId = false;
-    bool _snapshot = false;
     bool _hasReadPref = false;
 
     // Options that can be specified in the OP_QUERY 'flags' header.
-    bool _tailable = false;
+    TailableModeEnum _tailableMode = TailableModeEnum::kNormal;
     bool _slaveOk = false;
     bool _oplogReplay = false;
     bool _noCursorTimeout = false;
-    bool _awaitData = false;
     bool _exhaust = false;
     bool _allowPartialResults = false;
 

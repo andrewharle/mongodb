@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -101,7 +101,10 @@ class test_txn05(wttest.WiredTigerTestCase, suite_subprocess):
         self.check(self.session2, "isolation=read-uncommitted", current)
 
         # Opening a clone of the database home directory should run
-        # recovery and see the committed results.
+        # recovery and see the committed results.  Flush the log because
+        # the backup may not get all the log records if we are running
+        # without a sync option.  Use sync=off to force a write to the OS.
+        self.session.log_flush('sync=off')
         self.backup(self.backup_dir)
         backup_conn_params = 'log=(enabled,file_max=%s)' % self.logmax
         backup_conn = self.wiredtiger_open(self.backup_dir, backup_conn_params)
@@ -124,7 +127,7 @@ class test_txn05(wttest.WiredTigerTestCase, suite_subprocess):
             self.scenario_number % len(self.archive_list)]
         backup_conn_params = \
             'log=(enabled,file_max=%s,archive=%s)' % (self.logmax, self.archive)
-        orig_logs = fnmatch.filter(os.listdir(self.backup_dir), "*Log*")
+        orig_logs = fnmatch.filter(os.listdir(self.backup_dir), "*gerLog*")
         endcount = 2
         count = 0
         while count < endcount:
@@ -139,7 +142,7 @@ class test_txn05(wttest.WiredTigerTestCase, suite_subprocess):
                 time.sleep(1.0)
                 if count == 0:
                     first_logs = \
-                        fnmatch.filter(os.listdir(self.backup_dir), "*Log*")
+                        fnmatch.filter(os.listdir(self.backup_dir), "*gerLog*")
                 backup_conn.close()
             count += 1
         #
@@ -147,7 +150,7 @@ class test_txn05(wttest.WiredTigerTestCase, suite_subprocess):
         # have been archived if configured. Subsequent openings would not
         # archive because no checkpoint is written due to no modifications.
         #
-        cur_logs = fnmatch.filter(os.listdir(self.backup_dir), "*Log*")
+        cur_logs = fnmatch.filter(os.listdir(self.backup_dir), "*gerLog*")
         for o in orig_logs:
             # Creating the backup was effectively an unclean shutdown so
             # even after sleeping, we should never archive log files

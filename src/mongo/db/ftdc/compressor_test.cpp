@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -60,8 +62,10 @@ namespace mongo {
     ASSERT_TRUE(std::get<1>(st.getValue().get()) == \
                 FTDCCompressor::CompressorState::kCompressorFull);
 
+class FTDCCompressorTest : public FTDCTest {};
+
 // Sanity check
-TEST(FTDCCompressor, TestBasic) {
+TEST_F(FTDCCompressorTest, TestBasic) {
     FTDCConfig config;
     FTDCCompressor c(&config);
 
@@ -91,7 +95,7 @@ TEST(FTDCCompressor, TestBasic) {
 }
 
 // Test strings only
-TEST(FTDCCompressor, TestStrings) {
+TEST_F(FTDCCompressorTest, TestStrings) {
     FTDCConfig config;
     FTDCCompressor c(&config);
 
@@ -182,7 +186,7 @@ private:
 };
 
 // Test various schema changes
-TEST(FTDCCompressor, TestSchemaChanges) {
+TEST_F(FTDCCompressorTest, TestSchemaChanges) {
     TestTie c;
 
     auto st = c.addSample(BSON("name"
@@ -343,7 +347,7 @@ TEST(FTDCCompressor, TestSchemaChanges) {
 }
 
 // Test various schema changes with strings
-TEST(FTDCCompressorTest, TestStringSchemaChanges) {
+TEST_F(FTDCCompressorTest, TestStringSchemaChanges) {
     TestTie c(FTDCValidationMode::kWeak);
 
     auto st = c.addSample(BSON("str1"
@@ -451,7 +455,7 @@ TEST(FTDCCompressorTest, TestStringSchemaChanges) {
 }
 
 // Ensure changing between the various number formats is considered compatible
-TEST(FTDCCompressor, TestNumbersCompat) {
+TEST_F(FTDCCompressorTest, TestNumbersCompat) {
     TestTie c;
 
     auto st = c.addSample(BSON("name"
@@ -478,7 +482,7 @@ TEST(FTDCCompressor, TestNumbersCompat) {
 }
 
 // Test various date time types
-TEST(FTDCCompressor, TestDateTimeTypes) {
+TEST_F(FTDCCompressorTest, TestDateTimeTypes) {
     TestTie c;
     for (int i = 0; i < 10; i++) {
         BSONObjBuilder builder1;
@@ -492,7 +496,7 @@ TEST(FTDCCompressor, TestDateTimeTypes) {
 }
 
 // Test all types
-TEST(FTDCCompressor, Types) {
+TEST_F(FTDCCompressorTest, Types) {
     TestTie c;
 
     auto st = c.addSample(BSON("name"
@@ -565,7 +569,7 @@ TEST(FTDCCompressor, Types) {
 }
 
 // Test a full buffer
-TEST(FTDCCompressor, TestFull) {
+TEST_F(FTDCCompressorTest, TestFull) {
     // Test a large numbers of zeros, and incremental numbers in a full buffer
     for (int j = 0; j < 2; j++) {
         TestTie c;
@@ -619,7 +623,7 @@ BSONObj generateSample(std::random_device& rd, T generator, size_t count) {
 }
 
 // Test many metrics
-TEST(ZFTDCCompressor, TestManyMetrics) {
+TEST_F(FTDCCompressorTest, TestManyMetrics) {
     std::random_device rd;
     std::mt19937 gen(rd());
 

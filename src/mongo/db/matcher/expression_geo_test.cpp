@@ -1,25 +1,27 @@
 // expression_geo_test.cpp
 
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,7 +38,6 @@
 #include "mongo/db/json.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_geo.h"
-#include "mongo/db/matcher/matcher.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
@@ -47,8 +48,7 @@ TEST(ExpressionGeoTest, Geo1) {
     std::unique_ptr<GeoExpression> gq(new GeoExpression);
     ASSERT_OK(gq->parseFrom(query["loc"].Obj()));
 
-    GeoMatchExpression ge;
-    ASSERT(ge.init("a", gq.release(), query).isOK());
+    GeoMatchExpression ge("a", gq.release(), query);
 
     ASSERT(!ge.matchesBSON(fromjson("{a: [3,4]}")));
     ASSERT(ge.matchesBSON(fromjson("{a: [4,4]}")));
@@ -64,8 +64,7 @@ TEST(ExpressionGeoTest, GeoNear1) {
     std::unique_ptr<GeoNearExpression> nq(new GeoNearExpression);
     ASSERT_OK(nq->parseFrom(query["loc"].Obj()));
 
-    GeoNearMatchExpression gne;
-    ASSERT(gne.init("a", nq.release(), query).isOK());
+    GeoNearMatchExpression gne("a", nq.release(), query);
 
     // We can't match the data but we can make sure it was parsed OK.
     ASSERT_EQUALS(gne.getData().centroid->crs, SPHERE);
@@ -77,8 +76,8 @@ std::unique_ptr<GeoMatchExpression> makeGeoMatchExpression(const BSONObj& locQue
     std::unique_ptr<GeoExpression> gq(new GeoExpression);
     ASSERT_OK(gq->parseFrom(locQuery));
 
-    std::unique_ptr<GeoMatchExpression> ge = stdx::make_unique<GeoMatchExpression>();
-    ASSERT_OK(ge->init("a", gq.release(), locQuery));
+    std::unique_ptr<GeoMatchExpression> ge =
+        stdx::make_unique<GeoMatchExpression>("a", gq.release(), locQuery);
 
     return ge;
 }
@@ -87,8 +86,8 @@ std::unique_ptr<GeoNearMatchExpression> makeGeoNearMatchExpression(const BSONObj
     std::unique_ptr<GeoNearExpression> nq(new GeoNearExpression);
     ASSERT_OK(nq->parseFrom(locQuery));
 
-    std::unique_ptr<GeoNearMatchExpression> gne = stdx::make_unique<GeoNearMatchExpression>();
-    ASSERT_OK(gne->init("a", nq.release(), locQuery));
+    std::unique_ptr<GeoNearMatchExpression> gne =
+        stdx::make_unique<GeoNearMatchExpression>("a", nq.release(), locQuery);
 
     return gne;
 }

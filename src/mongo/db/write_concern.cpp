@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,7 +40,7 @@
 #include "mongo/db/commands/server_status_metric.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
-#include "mongo/db/repl/replication_coordinator_global.h"
+#include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/stats/timer_stats.h"
@@ -60,19 +62,18 @@ static Counter64 gleWtimeouts;
 static ServerStatusMetricField<Counter64> gleWtimeoutsDisplay("getLastError.wtimeouts",
                                                               &gleWtimeouts);
 
-MONGO_FP_DECLARE(hangBeforeWaitingForWriteConcern);
+MONGO_FAIL_POINT_DEFINE(hangBeforeWaitingForWriteConcern);
 
 bool commandSpecifiesWriteConcern(const BSONObj& cmdObj) {
     return cmdObj.hasField(WriteConcernOptions::kWriteConcernField);
 }
 
-StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* txn,
-                                                    const BSONObj& cmdObj,
-                                                    const std::string& dbName) {
+StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* opCtx,
+                                                    const BSONObj& cmdObj) {
     // The default write concern if empty is {w:1}. Specifying {w:0} is/was allowed, but is
     // interpreted identically to {w:1}.
     auto wcResult = WriteConcernOptions::extractWCFromCommand(
-        cmdObj, dbName, repl::ReplicationCoordinator::get(txn)->getGetLastErrorDefault());
+        cmdObj, repl::ReplicationCoordinator::get(opCtx)->getGetLastErrorDefault());
     if (!wcResult.isOK()) {
         return wcResult.getStatus();
     }
@@ -81,14 +82,14 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* txn,
 
     if (writeConcern.usedDefault) {
         if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
-            !txn->getClient()->isInDirectClient()) {
+            !opCtx->getClient()->isInDirectClient()) {
             // This is here only for backwards compatibility with 3.2 clusters which have commands
             // that do not specify write concern when writing to the config server.
             writeConcern = {
                 WriteConcernOptions::kMajority, WriteConcernOptions::SyncMode::UNSET, Seconds(30)};
         }
     } else {
-        Status wcStatus = validateWriteConcern(txn, writeConcern, dbName);
+        Status wcStatus = validateWriteConcern(opCtx, writeConcern);
         if (!wcStatus.isOK()) {
             return wcStatus;
         }
@@ -97,31 +98,14 @@ StatusWith<WriteConcernOptions> extractWriteConcern(OperationContext* txn,
     return writeConcern;
 }
 
-Status validateWriteConcern(OperationContext* txn,
-                            const WriteConcernOptions& writeConcern,
-                            StringData dbName) {
+Status validateWriteConcern(OperationContext* opCtx, const WriteConcernOptions& writeConcern) {
     if (writeConcern.syncMode == WriteConcernOptions::SyncMode::JOURNAL &&
-        !txn->getServiceContext()->getGlobalStorageEngine()->isDurable()) {
+        !opCtx->getServiceContext()->getStorageEngine()->isDurable()) {
         return Status(ErrorCodes::BadValue,
                       "cannot use 'j' option when a host does not have journaling enabled");
     }
 
-    // Remote callers of the config server (as in callers making network calls, not the internal
-    // logic) should never be making non-majority writes against the config server, because sharding
-    // is not resilient against rollbacks of metadata writes.
-    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer &&
-        dbName != NamespaceString::kLocalDb && !writeConcern.validForConfigServers()) {
-        // The only cases where we allow non-majority writes are from within the config servers
-        // themselves, because these wait for write concern explicitly.
-        if (!txn->getClient()->isInDirectClient()) {
-            return {ErrorCodes::BadValue,
-                    str::stream() << "w:'majority' is the only valid write concern when writing "
-                                     "to config servers, got: "
-                                  << writeConcern.toBSON()};
-        }
-    }
-
-    const auto replMode = repl::ReplicationCoordinator::get(txn)->getReplicationMode();
+    const auto replMode = repl::ReplicationCoordinator::get(opCtx)->getReplicationMode();
 
     if (replMode == repl::ReplicationCoordinator::modeNone && writeConcern.wNumNodes > 1) {
         return Status(ErrorCodes::BadValue, "cannot use 'w' > 1 when a host is not replicated");
@@ -175,15 +159,19 @@ void WriteConcernResult::appendTo(const WriteConcernOptions& writeConcern,
                !result->asTempObj()["waited"].eoo()));
 }
 
-Status waitForWriteConcern(OperationContext* txn,
+Status waitForWriteConcern(OperationContext* opCtx,
                            const OpTime& replOpTime,
                            const WriteConcernOptions& writeConcern,
                            WriteConcernResult* result) {
     LOG(2) << "Waiting for write concern. OpTime: " << replOpTime
            << ", write concern: " << writeConcern.toBSON();
-    auto replCoord = repl::ReplicationCoordinator::get(txn);
 
-    MONGO_FAIL_POINT_PAUSE_WHILE_SET(hangBeforeWaitingForWriteConcern);
+    auto const replCoord = repl::ReplicationCoordinator::get(opCtx);
+
+    if (!opCtx->getClient()->isInDirectClient()) {
+        // Respecting this failpoint for internal clients prevents stepup from working properly.
+        MONGO_FAIL_POINT_PAUSE_WHILE_SET(hangBeforeWaitingForWriteConcern);
+    }
 
     // Next handle blocking on disk
     Timer syncTimer;
@@ -197,12 +185,12 @@ Status waitForWriteConcern(OperationContext* txn,
         case WriteConcernOptions::SyncMode::NONE:
             break;
         case WriteConcernOptions::SyncMode::FSYNC: {
-            StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
+            StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
             if (!storageEngine->isDurable()) {
-                result->fsyncFiles = storageEngine->flushAllFiles(true);
+                result->fsyncFiles = storageEngine->flushAllFiles(opCtx, true);
             } else {
                 // We only need to commit the journal if we're durable
-                txn->recoveryUnit()->waitUntilDurable();
+                opCtx->recoveryUnit()->waitUntilDurable();
             }
             break;
         }
@@ -211,10 +199,10 @@ Status waitForWriteConcern(OperationContext* txn,
                 // Wait for ops to become durable then update replication system's
                 // knowledge of this.
                 OpTime appliedOpTime = replCoord->getMyLastAppliedOpTime();
-                txn->recoveryUnit()->waitUntilDurable();
+                opCtx->recoveryUnit()->waitUntilDurable();
                 replCoord->setMyLastDurableOpTimeForward(appliedOpTime);
             } else {
-                txn->recoveryUnit()->waitUntilDurable();
+                opCtx->recoveryUnit()->waitUntilDurable();
             }
             break;
     }
@@ -237,7 +225,7 @@ Status waitForWriteConcern(OperationContext* txn,
 
     // Replica set stepdowns and gle mode changes are thrown as errors
     repl::ReplicationCoordinator::StatusAndDuration replStatus =
-        replCoord->awaitReplication(txn, replOpTime, writeConcernWithPopulatedSyncMode);
+        replCoord->awaitReplication(opCtx, replOpTime, writeConcernWithPopulatedSyncMode);
     if (replStatus.status == ErrorCodes::WriteConcernFailed) {
         gleWtimeouts.increment();
         result->err = "timeout";
@@ -245,9 +233,9 @@ Status waitForWriteConcern(OperationContext* txn,
     }
 
     // Add stats
-    result->writtenTo = repl::getGlobalReplicationCoordinator()->getHostsWrittenTo(
-        replOpTime,
-        writeConcernWithPopulatedSyncMode.syncMode == WriteConcernOptions::SyncMode::JOURNAL);
+    result->writtenTo = replCoord->getHostsWrittenTo(replOpTime,
+                                                     writeConcernWithPopulatedSyncMode.syncMode ==
+                                                         WriteConcernOptions::SyncMode::JOURNAL);
     gleWtimeStats.recordMillis(durationCount<Milliseconds>(replStatus.duration));
     result->wTime = durationCount<Milliseconds>(replStatus.duration);
 

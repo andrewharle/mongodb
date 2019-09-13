@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,6 +34,7 @@
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
+#include "mongo/db/repl/optime.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
@@ -43,18 +46,19 @@ using stdx::make_unique;
 const char* OplogStart::kStageType = "OPLOG_START";
 
 // Does not take ownership.
-OplogStart::OplogStart(OperationContext* txn,
+OplogStart::OplogStart(OperationContext* opCtx,
                        const Collection* collection,
-                       MatchExpression* filter,
+                       Timestamp timestamp,
                        WorkingSet* ws)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _needInit(true),
       _backwardsScanning(false),
       _extentHopping(false),
       _done(false),
       _collection(collection),
       _workingSet(ws),
-      _filter(filter) {}
+      _filterBSON(BSON("$lte" << timestamp)),
+      _filter(repl::OpTime::kTimestampFieldName, _filterBSON.firstElement()) {}
 
 PlanStage::StageState OplogStart::doWork(WorkingSetID* out) {
     // We do our (heavy) init in a work(), where work is expected.
@@ -80,7 +84,7 @@ PlanStage::StageState OplogStart::doWork(WorkingSetID* out) {
         try {
             // If this throws WCE, it leave us in a state were the next call to work will retry.
             switchToExtentHopping();
-        } catch (const WriteConflictException& wce) {
+        } catch (const WriteConflictException&) {
             _subIterators.clear();
             *out = WorkingSet::INVALID_ID;
             return NEED_YIELD;
@@ -97,12 +101,11 @@ PlanStage::StageState OplogStart::workExtentHopping(WorkingSetID* out) {
         return PlanStage::IS_EOF;
     }
 
-    // we work from the back to the front since the back has the newest data.
+    // We work from the back to the front since the back has the newest data.
     try {
-        // TODO: should we ever check fetcherForNext()?
         if (auto record = _subIterators.back()->next()) {
             BSONObj obj = record->data.releaseToBson();
-            if (!_filter->matchesBSON(obj)) {
+            if (_filter.matchesBSON(obj)) {
                 _done = true;
                 WorkingSetID id = _workingSet->allocate();
                 WorkingSetMember* member = _workingSet->get(id);
@@ -113,7 +116,7 @@ PlanStage::StageState OplogStart::workExtentHopping(WorkingSetID* out) {
                 return PlanStage::ADVANCED;
             }
         }
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         *out = WorkingSet::INVALID_ID;
         return PlanStage::NEED_YIELD;
     }
@@ -151,7 +154,7 @@ PlanStage::StageState OplogStart::workBackwardsScan(WorkingSetID* out) {
     verify(member->hasObj());
     verify(member->hasRecordId());
 
-    if (!_filter->matchesBSON(member->obj.value())) {
+    if (_filter.matchesBSON(member->obj.value())) {
         _done = true;
         // RecordId is returned in *out.
         return PlanStage::ADVANCED;
@@ -165,7 +168,7 @@ bool OplogStart::isEOF() {
     return _done;
 }
 
-void OplogStart::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void OplogStart::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     if (_needInit) {
         return;
     }
@@ -175,7 +178,7 @@ void OplogStart::doInvalidate(OperationContext* txn, const RecordId& dl, Invalid
     }
 
     for (size_t i = 0; i < _subIterators.size(); i++) {
-        _subIterators[i]->invalidate(txn, dl);
+        _subIterators[i]->invalidate(opCtx, dl);
     }
 }
 

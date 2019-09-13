@@ -1,3 +1,7 @@
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop, requires_getmore]
+
 // Basic functional tests for the listCollections command.
 //
 // Note that storage engines are allowed to advertise internal collections to the user (in
@@ -72,8 +76,8 @@
     //
 
     var getListCollectionsCursor = function(options, subsequentBatchSize) {
-        var res = mydb.runCommand("listCollections", options);
-        return new DBCommandCursor(res._mongo, res, subsequentBatchSize);
+        return new DBCommandCursor(
+            mydb, mydb.runCommand("listCollections", options), subsequentBatchSize);
     };
 
     var cursorCountMatching = function(cursor, pred) {
@@ -282,10 +286,28 @@
     assert.commandWorked(mydb.createCollection("quux"));
 
     res = mydb.runCommand("listCollections", {cursor: {batchSize: 0}});
-    cursor = new DBCommandCursor(res._mongo, res, 2);
+    cursor = new DBCommandCursor(mydb, res, 2);
     cursor.close();
-    cursor = new DBCommandCursor(res._mongo, res, 2);
+    cursor = new DBCommandCursor(mydb, res, 2);
     assert.throws(function() {
         cursor.hasNext();
     });
+
+    //
+    // Test parsing of the 'includePendingDrops' flag. If included, its argument must be of
+    // 'boolean' type. Functional testing of the 'includePendingDrops' flag is done in
+    // "jstests/replsets".
+    //
+
+    // Bad argument types.
+    assert.commandFailedWithCode(mydb.runCommand("listCollections", {includePendingDrops: {}}),
+                                 ErrorCodes.TypeMismatch);
+    assert.commandFailedWithCode(mydb.runCommand("listCollections", {includePendingDrops: "s"}),
+                                 ErrorCodes.TypeMismatch);
+
+    // Valid argument types.
+    assert.commandWorked(mydb.runCommand("listCollections", {includePendingDrops: 1}));
+    assert.commandWorked(mydb.runCommand("listCollections", {includePendingDrops: true}));
+    assert.commandWorked(mydb.runCommand("listCollections", {includePendingDrops: false}));
+
 }());

@@ -2,9 +2,12 @@
 // from the input documents will tell the query planner to use a count scan, which is faster than an
 // index scan. In this test file, we check this behavior through explain().
 //
+// Cannot implicitly shard accessed collections because the explain output from a mongod when run
+// against a sharded collection is wrapped in a "shards" object with keys for each shard.
+//
 // This test assumes that an initial $match will be absorbed by the query system, which will not
 // happen if the $match is wrapped within a $facet stage.
-// @tags: [do_not_wrap_aggregations_in_facets]
+// @tags: [do_not_wrap_aggregations_in_facets,assumes_unsharded_collection]
 load('jstests/libs/analyze_plan.js');
 
 (function() {
@@ -29,7 +32,7 @@ load('jstests/libs/analyze_plan.js');
     var explained = coll.explain().aggregate(
         [{$match: {foo: {$gt: 0}}}, {$group: {_id: null, count: {$sum: 1}}}]);
 
-    assert(planHasStage(explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
+    assert(planHasStage(db, explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
 
     explained = coll.explain().aggregate([
         {$match: {foo: {$gt: 0}}},
@@ -37,13 +40,13 @@ load('jstests/libs/analyze_plan.js');
         {$group: {_id: null, count: {$sum: 1}}}
     ]);
 
-    assert(planHasStage(explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
+    assert(planHasStage(db, explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
 
     // Make sure a $count stage can use the COUNT_SCAN optimization.
     explained = coll.explain().aggregate([{$match: {foo: {$gt: 0}}}, {$count: "count"}]);
-    assert(planHasStage(explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
+    assert(planHasStage(db, explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
 
     // A $match that is not a single range cannot use the COUNT_SCAN optimization.
     explained = coll.explain().aggregate([{$match: {foo: {$in: [0, 1]}}}, {$count: "count"}]);
-    assert(!planHasStage(explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
+    assert(!planHasStage(db, explained.stages[0].$cursor.queryPlanner.winningPlan, "COUNT_SCAN"));
 }());

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -33,6 +33,12 @@
 	(F_ISSET(dhandle, WT_DHANDLE_DEAD) ||				\
 	!F_ISSET(dhandle, WT_DHANDLE_EXCLUSIVE | WT_DHANDLE_OPEN))
 
+/* Check if a handle could be reopened. */
+#define	WT_DHANDLE_CAN_REOPEN(dhandle)					\
+	(!WT_DHANDLE_INACTIVE(dhandle) &&				\
+	F_ISSET(dhandle, WT_DHANDLE_OPEN) &&				\
+	!F_ISSET(dhandle, WT_DHANDLE_DROPPED))
+
 /* The metadata cursor's data handle. */
 #define	WT_SESSION_META_DHANDLE(s)					\
 	(((WT_CURSOR_BTREE *)((s)->meta_cursor))->btree->dhandle)
@@ -48,11 +54,11 @@
 	if ((dhandle) == NULL)						\
 		(dhandle) = TAILQ_FIRST(head);				\
 	else {								\
-		    WT_DHANDLE_RELEASE(dhandle);			\
-		    (dhandle) = TAILQ_NEXT(dhandle, field);		\
+		WT_DHANDLE_RELEASE(dhandle);				\
+		(dhandle) = TAILQ_NEXT(dhandle, field);			\
 	}								\
 	if ((dhandle) != NULL)						\
-		    WT_DHANDLE_ACQUIRE(dhandle);			\
+		WT_DHANDLE_ACQUIRE(dhandle);				\
 } while (0)
 
 /*
@@ -64,10 +70,16 @@ struct __wt_data_handle {
 	TAILQ_ENTRY(__wt_data_handle) q;
 	TAILQ_ENTRY(__wt_data_handle) hashq;
 
+	const char *name;		/* Object name as a URI */
+	uint64_t name_hash;		/* Hash of name */
+	const char *checkpoint;		/* Checkpoint name (or NULL) */
+	const char **cfg;		/* Configuration information */
+
 	/*
-	 * Sessions caching a connection's data handle will have a non-zero
+	 * Sessions holding a connection's data handle will have a non-zero
 	 * reference count; sessions using a connection's data handle will
-	 * have a non-zero in-use count.
+	 * have a non-zero in-use count. Instances of cached cursors referencing
+	 * the data handle appear in session_cache_ref.
 	 */
 	uint32_t session_ref;		/* Sessions referencing this handle */
 	int32_t	 session_inuse;		/* Sessions using this handle */
@@ -75,15 +87,15 @@ struct __wt_data_handle {
 	time_t	 timeofdeath;		/* Use count went to 0 */
 	WT_SESSION_IMPL *excl_session;	/* Session with exclusive use, if any */
 
-	uint64_t name_hash;		/* Hash of name */
-	const char *name;		/* Object name as a URI */
-	const char *checkpoint;		/* Checkpoint name (or NULL) */
-	const char **cfg;		/* Configuration information */
-
-	bool compact_skip;		/* If the handle failed to compact */
-
 	WT_DATA_SOURCE *dsrc;		/* Data source for this handle */
 	void *handle;			/* Generic handle */
+
+	enum {
+		WT_DHANDLE_TYPE_BTREE,
+		WT_DHANDLE_TYPE_TABLE
+	} type;
+
+	bool compact_skip;		/* If the handle failed to compact */
 
 	/*
 	 * Data handles can be closed without holding the schema lock; threads
@@ -98,12 +110,15 @@ struct __wt_data_handle {
 	WT_DSRC_STATS *stat_array;
 
 	/* Flags values over 0xff are reserved for WT_BTREE_* */
-#define	WT_DHANDLE_DEAD		        0x01	/* Dead, awaiting discard */
-#define	WT_DHANDLE_DISCARD	        0x02	/* Discard on release */
-#define	WT_DHANDLE_DISCARD_FORCE	0x04	/* Force discard on release */
-#define	WT_DHANDLE_EXCLUSIVE	        0x08	/* Need exclusive access */
-#define	WT_DHANDLE_IS_METADATA		0x10	/* Metadata handle */
-#define	WT_DHANDLE_LOCK_ONLY	        0x20	/* Handle only used as a lock */
-#define	WT_DHANDLE_OPEN		        0x40	/* Handle is open */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_DHANDLE_DEAD		        0x01u	/* Dead, awaiting discard */
+#define	WT_DHANDLE_DISCARD	        0x02u	/* Close on release */
+#define	WT_DHANDLE_DISCARD_KILL		0x04u	/* Mark dead on release */
+#define	WT_DHANDLE_DROPPED	        0x08u	/* Handle is dropped */
+#define	WT_DHANDLE_EXCLUSIVE	        0x10u	/* Exclusive access */
+#define	WT_DHANDLE_IS_METADATA		0x20u	/* Metadata handle */
+#define	WT_DHANDLE_LOCK_ONLY	        0x40u	/* Handle only used as a lock */
+#define	WT_DHANDLE_OPEN		        0x80u	/* Handle is open */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint32_t flags;
 };

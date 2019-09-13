@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -59,7 +61,6 @@ public:
     static RemoteCommandRequest assertRemoteCommandNameEquals(StringData cmdName,
                                                               const RemoteCommandRequest& request);
 
-protected:
     virtual ~TaskExecutorTest();
 
     executor::NetworkInterfaceMock* getNet() {
@@ -73,12 +74,6 @@ protected:
      * Initializes both the NetworkInterfaceMock and TaskExecutor but does not start the executor.
      */
     void setUp() override;
-
-    /**
-     * Destroys the replication executor.
-     *
-     * Shuts down and joins the running executor.
-     */
     void tearDown() override;
 
     void launchExecutorThread();
@@ -86,6 +81,16 @@ protected:
     void joinExecutorThread();
 
 private:
+    /**
+     * Unused implementation of test function. This allows us to instantiate
+     * TaskExecutorTest on its own without the need to inherit from it in a test.
+     * This supports using TaskExecutorTest inside another test fixture and works around the
+     * limitation that tests cannot inherit from multiple test fixtures.
+     *
+     * It is an error to call this implementation of _doTest() directly.
+     */
+    void _doTest() override;
+
     virtual std::unique_ptr<TaskExecutor> makeTaskExecutor(
         std::unique_ptr<NetworkInterfaceMock> net) = 0;
 
@@ -93,12 +98,6 @@ private:
 
     NetworkInterfaceMock* _net;
     std::unique_ptr<TaskExecutor> _executor;
-
-    /**
-     * kPreStart -> kRunning -> kJoinRequired -> kJoining -> kShutdownComplete
-     */
-    enum LifecycleState { kPreStart, kRunning, kJoinRequired, kJoining, kShutdownComplete };
-    LifecycleState _executorState = LifecycleState::kPreStart;
 };
 
 }  // namespace executor

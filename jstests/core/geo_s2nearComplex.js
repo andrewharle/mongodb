@@ -1,3 +1,5 @@
+// @tags: [requires_getmore, requires_non_retryable_writes]
+
 var t = db.get_s2nearcomplex;
 t.drop();
 t.ensureIndex({geo: "2dsphere"});

@@ -1,13 +1,14 @@
-GeoNearRandomTest = function(name) {
+GeoNearRandomTest = function(name, dbToUse) {
     this.name = name;
-    this.t = db[name];
+    this.db = (dbToUse || db);
+    this.t = this.db[name];
     this.nPts = 0;
 
-    // reset state
+    // Reset state
     this.t.drop();
     Random.srand(1234);
 
-    print("starting test: " + name);
+    print("Starting getNear test: " + name);
 };
 
 GeoNearRandomTest.prototype.mkPt = function mkPt(scale, indexBounds) {
@@ -67,11 +68,11 @@ GeoNearRandomTest.prototype.testPt = function(pt, opts) {
 
     var cmd = {geoNear: this.t.getName(), near: pt, num: 1, spherical: opts.sphere};
 
-    var last = db.runCommand(cmd).results;
+    var last = this.db.runCommand(cmd).results;
     for (var i = 2; i <= opts.nToTest; i++) {
         // print(i); // uncomment to watch status
         cmd.num = i;
-        var ret = db.runCommand(cmd).results;
+        var ret = this.db.runCommand(cmd).results;
 
         try {
             this.assertIsPrefix(last, ret);
@@ -87,16 +88,15 @@ GeoNearRandomTest.prototype.testPt = function(pt, opts) {
         last = ret;
     }
 
-    if (!opts.sharded) {
-        last = last.map(function(x) {
-            return x.obj;
-        });
+    last = last.map(function(x) {
+        return x.obj;
+    });
 
-        var query = {loc: {}};
-        query.loc[opts.sphere ? '$nearSphere' : '$near'] = pt;
-        var near = this.t.find(query).limit(opts.nToTest).toArray();
+    var query = {loc: {}};
+    query.loc[opts.sphere ? '$nearSphere' : '$near'] = pt;
+    var near = this.t.find(query).limit(opts.nToTest).toArray();
 
-        this.assertIsPrefix(last, near);
-        assert.eq(last, near);
-    }
+    // Test that a query using $near/$nearSphere with a limit of 'nToTest' returns the same points
+    // (in order) as the geoNear command with num=nToTest.
+    assert.eq(last, near);
 };

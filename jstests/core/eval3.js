@@ -1,4 +1,11 @@
-// @tags: [requires_eval_command]
+// @tags: [
+//   # Cannot implicitly shard accessed collections because unsupported use of sharded collection
+//   # from db.eval.
+//   assumes_unsharded_collection,
+//   requires_eval_command,
+//   requires_non_retryable_commands,
+//   requires_fastcount,
+// ]
 
 t = db.eval3;
 t.drop();

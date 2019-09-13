@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,10 +34,14 @@
 #include <boost/optional.hpp>
 #include <boost/optional/optional_io.hpp>
 
+#include "mongo/db/catalog/collection_mock.h"
+#include "mongo/db/catalog/uuid_catalog.h"
+#include "mongo/db/dbmessage.h"
 #include "mongo/db/json.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/pipeline/aggregation_request.h"
 #include "mongo/db/query/query_request.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -236,22 +242,6 @@ TEST(QueryRequestTest, AllowTailableWithNaturalSort) {
     ASSERT_BSONOBJ_EQ(result.getValue()->getSort(), BSON("$natural" << 1));
 }
 
-TEST(QueryRequestTest, IsIsolatedReturnsTrueWithIsolated) {
-    ASSERT_TRUE(QueryRequest::isQueryIsolated(BSON("$isolated" << 1)));
-}
-
-TEST(QueryRequestTest, IsIsolatedReturnsTrueWithAtomic) {
-    ASSERT_TRUE(QueryRequest::isQueryIsolated(BSON("$atomic" << 1)));
-}
-
-TEST(QueryRequestTest, IsIsolatedReturnsFalseWithIsolated) {
-    ASSERT_FALSE(QueryRequest::isQueryIsolated(BSON("$isolated" << false)));
-}
-
-TEST(QueryRequestTest, IsIsolatedReturnsFalseWithAtomic) {
-    ASSERT_FALSE(QueryRequest::isQueryIsolated(BSON("$atomic" << false)));
-}
-
 //
 // Test compatibility of various projection and sort objects.
 //
@@ -443,7 +433,7 @@ TEST(QueryRequestTest, ParseFromCommandAllFlagsTrue) {
     ASSERT(!qr->isSlaveOk());
     ASSERT(qr->isOplogReplay());
     ASSERT(qr->isNoCursorTimeout());
-    ASSERT(qr->isAwaitData());
+    ASSERT(qr->isTailableAndAwaitData());
     ASSERT(qr->isAllowPartialResults());
 }
 
@@ -473,6 +463,7 @@ TEST(QueryRequestTest, ParseFromCommandAllNonOptionFields) {
         "projection: {c: 1},"
         "hint: {d: 1},"
         "readConcern: {e: 1},"
+        "$queryOptions: {$readPreference: 'secondary'},"
         "collation: {f: 1},"
         "limit: 3,"
         "skip: 5,"
@@ -494,6 +485,9 @@ TEST(QueryRequestTest, ParseFromCommandAllNonOptionFields) {
     ASSERT_EQUALS(0, expectedHint.woCompare(qr->getHint()));
     BSONObj expectedReadConcern = BSON("e" << 1);
     ASSERT_EQUALS(0, expectedReadConcern.woCompare(qr->getReadConcern()));
+    BSONObj expectedUnwrappedReadPref = BSON("$readPreference"
+                                             << "secondary");
+    ASSERT_EQUALS(0, expectedUnwrappedReadPref.woCompare(qr->getUnwrappedReadPref()));
     BSONObj expectedCollation = BSON("f" << 1);
     ASSERT_EQUALS(0, expectedCollation.woCompare(qr->getCollation()));
     ASSERT_EQUALS(3, *qr->getLimit());
@@ -589,6 +583,7 @@ TEST(QueryRequestTest, ParseFromCommandSkipWrongType) {
     ASSERT_NOT_OK(result.getStatus());
 }
 
+
 TEST(QueryRequestTest, ParseFromCommandLimitWrongType) {
     BSONObj cmdObj = fromjson(
         "{find: 'testns',"
@@ -618,6 +613,17 @@ TEST(QueryRequestTest, ParseFromCommandCommentWrongType) {
         "{find: 'testns',"
         "filter:  {a: 1},"
         "comment: 1}");
+    const NamespaceString nss("test.testns");
+    bool isExplain = false;
+    auto result = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
+    ASSERT_NOT_OK(result.getStatus());
+}
+
+TEST(QueryRequestTest, ParseFromCommandUnwrappedReadPrefWrongType) {
+    BSONObj cmdObj = fromjson(
+        "{find: 'testns',"
+        "filter:  {a: 1},"
+        "$queryOptions: 1}");
     const NamespaceString nss("test.testns");
     bool isExplain = false;
     auto result = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
@@ -686,17 +692,6 @@ TEST(QueryRequestTest, ParseFromCommandShowRecordIdWrongType) {
         "{find: 'testns',"
         "filter:  {a: 1},"
         "showRecordId: 3}");
-    const NamespaceString nss("test.testns");
-    bool isExplain = false;
-    auto result = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
-    ASSERT_NOT_OK(result.getStatus());
-}
-
-TEST(QueryRequestTest, ParseFromCommandSnapshotWrongType) {
-    BSONObj cmdObj = fromjson(
-        "{find: 'testns',"
-        "filter:  {a: 1},"
-        "snapshot: 3}");
     const NamespaceString nss("test.testns");
     bool isExplain = false;
     auto result = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
@@ -904,28 +899,6 @@ TEST(QueryRequestTest, ParseFromCommandMinMaxDifferentFieldsError) {
     ASSERT_NOT_OK(result.getStatus());
 }
 
-TEST(QueryRequestTest, ParseFromCommandSnapshotPlusSortError) {
-    BSONObj cmdObj = fromjson(
-        "{find: 'testns',"
-        "sort: {a: 3},"
-        "snapshot: true}");
-    const NamespaceString nss("test.testns");
-    bool isExplain = false;
-    auto result = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
-    ASSERT_NOT_OK(result.getStatus());
-}
-
-TEST(QueryRequestTest, ParseFromCommandSnapshotPlusHintError) {
-    BSONObj cmdObj = fromjson(
-        "{find: 'testns',"
-        "snapshot: true,"
-        "hint: {a: 1}}");
-    const NamespaceString nss("test.testns");
-    bool isExplain = false;
-    auto result = QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain);
-    ASSERT_NOT_OK(result.getStatus());
-}
-
 TEST(QueryRequestTest, ParseCommandForbidNonMetaSortOnFieldWithMetaProject) {
     BSONObj cmdObj;
 
@@ -1024,13 +997,12 @@ TEST(QueryRequestTest, DefaultQueryParametersCorrect) {
     ASSERT_EQUALS(0, qr->getMaxTimeMS());
     ASSERT_EQUALS(false, qr->returnKey());
     ASSERT_EQUALS(false, qr->showRecordId());
-    ASSERT_EQUALS(false, qr->isSnapshot());
     ASSERT_EQUALS(false, qr->hasReadPref());
     ASSERT_EQUALS(false, qr->isTailable());
     ASSERT_EQUALS(false, qr->isSlaveOk());
     ASSERT_EQUALS(false, qr->isOplogReplay());
     ASSERT_EQUALS(false, qr->isNoCursorTimeout());
-    ASSERT_EQUALS(false, qr->isAwaitData());
+    ASSERT_EQUALS(false, qr->isTailableAndAwaitData());
     ASSERT_EQUALS(false, qr->isExhaust());
     ASSERT_EQUALS(false, qr->isAllowPartialResults());
 }
@@ -1042,7 +1014,6 @@ TEST(QueryRequestTest, DefaultQueryParametersCorrect) {
 TEST(QueryRequestTest, ParseFromCommandForbidExtraField) {
     BSONObj cmdObj = fromjson(
         "{find: 'testns',"
-        "snapshot: true,"
         "foo: {a: 1}}");
     const NamespaceString nss("test.testns");
     bool isExplain = false;
@@ -1053,7 +1024,6 @@ TEST(QueryRequestTest, ParseFromCommandForbidExtraField) {
 TEST(QueryRequestTest, ParseFromCommandForbidExtraOption) {
     BSONObj cmdObj = fromjson(
         "{find: 'testns',"
-        "snapshot: true,"
         "foo: true}");
     const NamespaceString nss("test.testns");
     bool isExplain = false;
@@ -1102,14 +1072,14 @@ TEST(QueryRequestTest, ConvertToAggregationSucceeds) {
 
     auto ar = AggregationRequest::parseFromBSON(testns, agg.getValue());
     ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().isExplain());
+    ASSERT(!ar.getValue().getExplain());
     ASSERT(ar.getValue().getPipeline().empty());
-    ASSERT(ar.getValue().isCursorCommand());
+    ASSERT_EQ(ar.getValue().getBatchSize(), AggregationRequest::kDefaultBatchSize);
     ASSERT_EQ(ar.getValue().getNamespaceString(), testns);
     ASSERT_BSONOBJ_EQ(ar.getValue().getCollation(), BSONObj());
 }
 
-TEST(QueryRequestTest, ConvertToAggregationWithExplainSucceeds) {
+TEST(QueryRequestTest, ConvertToAggregationOmitsExplain) {
     QueryRequest qr(testns);
     qr.setExplain(true);
     auto agg = qr.asAggregationCommand();
@@ -1117,11 +1087,21 @@ TEST(QueryRequestTest, ConvertToAggregationWithExplainSucceeds) {
 
     auto ar = AggregationRequest::parseFromBSON(testns, agg.getValue());
     ASSERT_OK(ar.getStatus());
-    ASSERT(ar.getValue().isExplain());
+    ASSERT_FALSE(ar.getValue().getExplain());
     ASSERT(ar.getValue().getPipeline().empty());
-    ASSERT(ar.getValue().isCursorCommand());
     ASSERT_EQ(ar.getValue().getNamespaceString(), testns);
     ASSERT_BSONOBJ_EQ(ar.getValue().getCollation(), BSONObj());
+}
+
+TEST(QueryRequestTest, ConvertToAggregationWithHintSucceeds) {
+    QueryRequest qr(testns);
+    qr.setHint(fromjson("{a_1: -1}"));
+    const auto aggCmd = qr.asAggregationCommand();
+    ASSERT_OK(aggCmd);
+
+    auto ar = AggregationRequest::parseFromBSON(testns, aggCmd.getValue());
+    ASSERT_OK(ar.getStatus());
+    ASSERT_BSONOBJ_EQ(qr.getHint(), ar.getValue().getHint());
 }
 
 TEST(QueryRequestTest, ConvertToAggregationWithMinFails) {
@@ -1168,16 +1148,15 @@ TEST(QueryRequestTest, ConvertToAggregationWithReturnKeyFails) {
     ASSERT_NOT_OK(qr.asAggregationCommand());
 }
 
-TEST(QueryRequestTest, ConvertToAggregationWithHintFails) {
-    QueryRequest qr(testns);
-    qr.setHint(fromjson("{a_1: -1}"));
-    ASSERT_NOT_OK(qr.asAggregationCommand());
-}
-
-TEST(QueryRequestTest, ConvertToAggregationWithCommentFails) {
+TEST(QueryRequestTest, ConvertToAggregationWithCommentSucceeds) {
     QueryRequest qr(testns);
     qr.setComment("test");
-    ASSERT_NOT_OK(qr.asAggregationCommand());
+    const auto aggCmd = qr.asAggregationCommand();
+    ASSERT_OK(aggCmd);
+
+    auto ar = AggregationRequest::parseFromBSON(testns, aggCmd.getValue());
+    ASSERT_OK(ar.getStatus());
+    ASSERT_EQ(qr.getComment(), ar.getValue().getComment());
 }
 
 TEST(QueryRequestTest, ConvertToAggregationWithShowRecordIdFails) {
@@ -1186,15 +1165,9 @@ TEST(QueryRequestTest, ConvertToAggregationWithShowRecordIdFails) {
     ASSERT_NOT_OK(qr.asAggregationCommand());
 }
 
-TEST(QueryRequestTest, ConvertToAggregationWithSnapshotFails) {
-    QueryRequest qr(testns);
-    qr.setSnapshot(true);
-    ASSERT_NOT_OK(qr.asAggregationCommand());
-}
-
 TEST(QueryRequestTest, ConvertToAggregationWithTailableFails) {
     QueryRequest qr(testns);
-    qr.setTailable(true);
+    qr.setTailableMode(TailableModeEnum::kTailable);
     ASSERT_NOT_OK(qr.asAggregationCommand());
 }
 
@@ -1212,7 +1185,7 @@ TEST(QueryRequestTest, ConvertToAggregationWithNoCursorTimeoutFails) {
 
 TEST(QueryRequestTest, ConvertToAggregationWithAwaitDataFails) {
     QueryRequest qr(testns);
-    qr.setAwaitData(true);
+    qr.setTailableMode(TailableModeEnum::kTailableAndAwaitData);
     ASSERT_NOT_OK(qr.asAggregationCommand());
 }
 
@@ -1241,8 +1214,8 @@ TEST(QueryRequestTest, ConvertToAggregationWithPipeline) {
 
     auto ar = AggregationRequest::parseFromBSON(testns, agg.getValue());
     ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().isExplain());
-    ASSERT(ar.getValue().isCursorCommand());
+    ASSERT(!ar.getValue().getExplain());
+    ASSERT_EQ(ar.getValue().getBatchSize(), AggregationRequest::kDefaultBatchSize);
     ASSERT_EQ(ar.getValue().getNamespaceString(), testns);
     ASSERT_BSONOBJ_EQ(ar.getValue().getCollation(), BSONObj());
 
@@ -1266,8 +1239,7 @@ TEST(QueryRequestTest, ConvertToAggregationWithBatchSize) {
 
     auto ar = AggregationRequest::parseFromBSON(testns, agg.getValue());
     ASSERT_OK(ar.getStatus());
-    ASSERT(ar.getValue().isCursorCommand());
-    ASSERT(!ar.getValue().isExplain());
+    ASSERT(!ar.getValue().getExplain());
     ASSERT_EQ(ar.getValue().getNamespaceString(), testns);
     ASSERT_EQ(ar.getValue().getBatchSize(), 4LL);
     ASSERT_BSONOBJ_EQ(ar.getValue().getCollation(), BSONObj());
@@ -1285,8 +1257,8 @@ TEST(QueryRequestTest, ConvertToAggregationWithMaxTimeMS) {
 
     auto ar = AggregationRequest::parseFromBSON(testns, cmdObj);
     ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().isExplain());
-    ASSERT(ar.getValue().isCursorCommand());
+    ASSERT(!ar.getValue().getExplain());
+    ASSERT_EQ(ar.getValue().getBatchSize(), AggregationRequest::kDefaultBatchSize);
     ASSERT_EQ(ar.getValue().getNamespaceString(), testns);
     ASSERT_BSONOBJ_EQ(ar.getValue().getCollation(), BSONObj());
 }
@@ -1299,9 +1271,9 @@ TEST(QueryRequestTest, ConvertToAggregationWithCollationSucceeds) {
 
     auto ar = AggregationRequest::parseFromBSON(testns, agg.getValue());
     ASSERT_OK(ar.getStatus());
-    ASSERT(!ar.getValue().isExplain());
+    ASSERT(!ar.getValue().getExplain());
     ASSERT(ar.getValue().getPipeline().empty());
-    ASSERT(ar.getValue().isCursorCommand());
+    ASSERT_EQ(ar.getValue().getBatchSize(), AggregationRequest::kDefaultBatchSize);
     ASSERT_EQ(ar.getValue().getNamespaceString(), testns);
     ASSERT_BSONOBJ_EQ(ar.getValue().getCollation(), BSON("f" << 1));
 }
@@ -1312,10 +1284,11 @@ TEST(QueryRequestTest, ParseFromLegacyObjMetaOpComment) {
         "$comment: {b: 2, c: {d: 'ParseFromLegacyObjMetaOpComment'}}}");
     const NamespaceString nss("test.testns");
     unique_ptr<QueryRequest> qr(
-        assertGet(QueryRequest::fromLegacyQueryForTest(nss, queryObj, BSONObj(), 0, 0, 0)));
+        assertGet(QueryRequest::fromLegacyQuery(nss, queryObj, BSONObj(), 0, 0, 0)));
 
     // Ensure that legacy comment meta-operator is parsed to a string comment
     ASSERT_EQ(qr->getComment(), "{ b: 2, c: { d: \"ParseFromLegacyObjMetaOpComment\" } }");
+    ASSERT_BSONOBJ_EQ(qr->getFilter(), fromjson("{a: 1}"));
 }
 
 TEST(QueryRequestTest, ParseFromLegacyStringMetaOpComment) {
@@ -1324,9 +1297,88 @@ TEST(QueryRequestTest, ParseFromLegacyStringMetaOpComment) {
         "$comment: 'ParseFromLegacyStringMetaOpComment'}");
     const NamespaceString nss("test.testns");
     unique_ptr<QueryRequest> qr(
-        assertGet(QueryRequest::fromLegacyQueryForTest(nss, queryObj, BSONObj(), 0, 0, 0)));
+        assertGet(QueryRequest::fromLegacyQuery(nss, queryObj, BSONObj(), 0, 0, 0)));
 
     ASSERT_EQ(qr->getComment(), "ParseFromLegacyStringMetaOpComment");
+    ASSERT_BSONOBJ_EQ(qr->getFilter(), fromjson("{a: 1}"));
+}
+
+TEST(QueryRequestTest, ParseFromLegacyQuery) {
+    const auto kSkip = 1;
+    const auto kNToReturn = 2;
+
+    BSONObj queryObj = fromjson(R"({
+            query: {query: 1},
+            orderby: {sort: 1},
+            $hint: {hint: 1},
+            $explain: false,
+            $min: {x: 'min'},
+            $max: {x: 'max'},
+            $maxScan: 7
+         })");
+    const NamespaceString nss("test.testns");
+    unique_ptr<QueryRequest> qr(assertGet(QueryRequest::fromLegacyQuery(
+        nss, queryObj, BSON("proj" << 1), kSkip, kNToReturn, QueryOption_Exhaust)));
+
+    ASSERT_EQ(qr->nss(), nss);
+    ASSERT_BSONOBJ_EQ(qr->getFilter(), fromjson("{query: 1}"));
+    ASSERT_BSONOBJ_EQ(qr->getProj(), fromjson("{proj: 1}"));
+    ASSERT_BSONOBJ_EQ(qr->getSort(), fromjson("{sort: 1}"));
+    ASSERT_BSONOBJ_EQ(qr->getHint(), fromjson("{hint: 1}"));
+    ASSERT_BSONOBJ_EQ(qr->getMin(), fromjson("{x: 'min'}"));
+    ASSERT_BSONOBJ_EQ(qr->getMax(), fromjson("{x: 'max'}"));
+    ASSERT_EQ(qr->getSkip(), boost::optional<long long>(kSkip));
+    ASSERT_EQ(qr->getNToReturn(), boost::optional<long long>(kNToReturn));
+    ASSERT_EQ(qr->wantMore(), true);
+    ASSERT_EQ(qr->isExplain(), false);
+    ASSERT_EQ(qr->getMaxScan(), 7);
+    ASSERT_EQ(qr->isSlaveOk(), false);
+    ASSERT_EQ(qr->isOplogReplay(), false);
+    ASSERT_EQ(qr->isNoCursorTimeout(), false);
+    ASSERT_EQ(qr->isTailable(), false);
+    ASSERT_EQ(qr->isExhaust(), true);
+    ASSERT_EQ(qr->isAllowPartialResults(), false);
+    ASSERT_EQ(qr->getOptions(), QueryOption_Exhaust);
+}
+
+TEST(QueryRequestTest, ParseFromLegacyQueryUnwrapped) {
+    BSONObj queryObj = fromjson(R"({
+            foo: 1
+         })");
+    const NamespaceString nss("test.testns");
+    unique_ptr<QueryRequest> qr(assertGet(
+        QueryRequest::fromLegacyQuery(nss, queryObj, BSONObj(), 0, 0, QueryOption_Exhaust)));
+
+    ASSERT_EQ(qr->nss(), nss);
+    ASSERT_BSONOBJ_EQ(qr->getFilter(), fromjson("{foo: 1}"));
+}
+
+TEST(QueryRequestTest, ParseFromLegacyQueryTooNegativeNToReturn) {
+    BSONObj queryObj = fromjson(R"({
+            foo: 1
+         })");
+    const NamespaceString nss("test.testns");
+
+    ASSERT_NOT_OK(
+        QueryRequest::fromLegacyQuery(
+            nss, queryObj, BSONObj(), 0, std::numeric_limits<int>::min(), QueryOption_Exhaust)
+            .getStatus());
+}
+
+class QueryRequestTest : public ServiceContextTest {};
+
+TEST_F(QueryRequestTest, ParseFromUUID) {
+    auto opCtx = makeOperationContext();
+    // Register a UUID/Collection pair in the UUIDCatalog.
+    const CollectionUUID uuid = UUID::gen();
+    const NamespaceString nss("test.testns");
+    Collection coll(stdx::make_unique<CollectionMock>(nss));
+    UUIDCatalog& catalog = UUIDCatalog::get(opCtx.get());
+    catalog.onCreateCollection(opCtx.get(), &coll, uuid);
+    QueryRequest qr(uuid);
+    // Ensure a call to refreshNSS succeeds.
+    qr.refreshNSS(opCtx.get());
+    ASSERT_EQ(nss, qr.nss());
 }
 
 }  // namespace mongo

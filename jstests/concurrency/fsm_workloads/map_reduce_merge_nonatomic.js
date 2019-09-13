@@ -12,10 +12,11 @@
  * of the output collection.
  *
  * Specifies nonAtomic=true.
+ *
+ * @tags: [SERVER-35473]
  */
 load('jstests/concurrency/fsm_libs/extend_workload.js');         // for extendWorkload
 load('jstests/concurrency/fsm_workloads/map_reduce_inline.js');  // for $config
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');  // for dropDatabases
 
 var $config = extendWorkload($config, function($config, $super) {
 
@@ -48,11 +49,6 @@ var $config = extendWorkload($config, function($config, $super) {
 
         var res = db[collName].mapReduce(this.mapper, this.reducer, options);
         assertAlways.commandWorked(res);
-    };
-
-    $config.teardown = function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + db.getName() + prefix + '\\d+$');
-        dropDatabases(db, pattern);
     };
 
     return $config;

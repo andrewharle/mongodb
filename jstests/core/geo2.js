@@ -1,3 +1,4 @@
+// @tags: [requires_fastcount]
 
 t = db.geo2;
 t.drop();

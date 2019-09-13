@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -40,7 +42,6 @@ using unittest::assertGet;
 namespace {
 
 const auto kNamespaceString = NamespaceString("TestDB", "TestColl");
-const auto kShardHasDistributedLock = false;
 
 const auto kShardId0 = ShardId("shard0");
 const auto kShardId1 = ShardId("shard1");
@@ -66,6 +67,8 @@ TEST(CommitChunkMigrationRequest, WithControlChunk) {
     controlChunk.setMax(kKey3);
     boost::optional<ChunkType> controlChunkOpt = controlChunk;
 
+    Timestamp validAfter{1};
+
     CommitChunkMigrationRequest::appendAsCommand(&builder,
                                                  kNamespaceString,
                                                  kShardId0,
@@ -73,7 +76,7 @@ TEST(CommitChunkMigrationRequest, WithControlChunk) {
                                                  migratedChunk,
                                                  controlChunkOpt,
                                                  fromShardCollectionVersion,
-                                                 kShardHasDistributedLock);
+                                                 validAfter);
 
     BSONObj cmdObj = builder.obj();
 
@@ -89,7 +92,6 @@ TEST(CommitChunkMigrationRequest, WithControlChunk) {
     ASSERT_BSONOBJ_EQ(kKey2, request.getControlChunk()->getMin());
     ASSERT_BSONOBJ_EQ(kKey3, request.getControlChunk()->getMax());
     ASSERT_EQ(fromShardCollectionVersion.epoch(), request.getCollectionEpoch());
-    ASSERT_EQ(kShardHasDistributedLock, request.shardHasDistributedLock());
 }
 
 TEST(CommitChunkMigrationRequest, WithoutControlChunk) {
@@ -101,6 +103,8 @@ TEST(CommitChunkMigrationRequest, WithoutControlChunk) {
 
     ChunkVersion fromShardCollectionVersion(1, 2, OID::gen());
 
+    Timestamp validAfter{1};
+
     CommitChunkMigrationRequest::appendAsCommand(&builder,
                                                  kNamespaceString,
                                                  kShardId0,
@@ -108,7 +112,7 @@ TEST(CommitChunkMigrationRequest, WithoutControlChunk) {
                                                  migratedChunk,
                                                  boost::none,
                                                  fromShardCollectionVersion,
-                                                 kShardHasDistributedLock);
+                                                 validAfter);
 
     BSONObj cmdObj = builder.obj();
 
@@ -122,7 +126,6 @@ TEST(CommitChunkMigrationRequest, WithoutControlChunk) {
     ASSERT_BSONOBJ_EQ(kKey1, request.getMigratedChunk().getMax());
     ASSERT(!request.getControlChunk());
     ASSERT_EQ(fromShardCollectionVersion.epoch(), request.getCollectionEpoch());
-    ASSERT_EQ(kShardHasDistributedLock, request.shardHasDistributedLock());
 }
 
 }  // namespace

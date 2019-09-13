@@ -1,30 +1,33 @@
 // stringutils_test.cpp
 
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/unittest/unittest.h"
@@ -36,7 +39,7 @@ namespace mongo {
 
 using std::string;
 
-TEST(Comparison, Basic) {
+TEST(StringUtilsTest, Basic) {
     //
     // Basic version comparison tests with different version string types
     //
@@ -58,7 +61,7 @@ TEST(Comparison, Basic) {
     ASSERT(versionCmp("1.2.3-pre", "1.2.3") < 0);
 }
 
-TEST(LexNumCmp, Simple1) {
+TEST(StringUtilsTest, Simple1) {
     ASSERT_EQUALS(0, LexNumCmp::cmp("a.b.c", "a.b.c", false));
 }
 
@@ -69,7 +72,7 @@ void assertCmp(int expected, StringData s1, StringData s2, bool lexOnly = false)
     ASSERT_EQUALS(expected < 0, cmp(s1, s2));
 }
 
-TEST(LexNumCmp, Simple2) {
+TEST(StringUtilsTest, Simple2) {
     ASSERT(!isdigit((char)255));
 
     assertCmp(0, "a", "a");
@@ -163,14 +166,14 @@ TEST(LexNumCmp, Simple2) {
     assertCmp(0, "ac.t", "ac.t");
 }
 
-TEST(LexNumCmp, LexOnly) {
+TEST(StringUtilsTest, LexOnly) {
     assertCmp(-1, "0", "00", true);
     assertCmp(1, "1", "01", true);
     assertCmp(-1, "1", "11", true);
     assertCmp(1, "2", "11", true);
 }
 
-TEST(LexNumCmp, Substring1) {
+TEST(StringUtilsTest, Substring1) {
     assertCmp(0, "1234", "1234", false);
     assertCmp(0, StringData("1234"), StringData("1234"), false);
     assertCmp(0, StringData("1234", 4), StringData("1234", 4), false);
@@ -180,7 +183,7 @@ TEST(LexNumCmp, Substring1) {
     assertCmp(0, StringData("0001", 3), StringData("0000", 3), false);
 }
 
-TEST(IntegerToHex, VariousConversions) {
+TEST(StringUtilsTest, VariousConversions) {
     ASSERT_EQUALS(std::string("0"), integerToHex(0));
     ASSERT_EQUALS(std::string("1"), integerToHex(1));
     ASSERT_EQUALS(std::string("1337"), integerToHex(0x1337));
@@ -193,4 +196,74 @@ TEST(IntegerToHex, VariousConversions) {
     ASSERT_EQUALS(std::string("8000000000000000"),
                   integerToHex(std::numeric_limits<long long>::min()));
 }
+
+TEST(StringUtilsTest, CanParseZero) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("0");
+    ASSERT(result && *result == 0);
 }
+
+TEST(StringUtilsTest, CanParseDoubleZero) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("00");
+    ASSERT(result && *result == 0);
+}
+
+TEST(StringUtilsTest, PositivePrefixFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("+0");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, NegativePrefixFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("-0");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, CanParseIntValue) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("10");
+    ASSERT(result && *result == 10);
+}
+
+TEST(StringUtilsTest, CanParseIntValueWithLeadingZeros) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("0010");
+    ASSERT(result && *result == 10);
+}
+
+TEST(StringUtilsTest, TrailingLetterFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("5a");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, LeadingLetterFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("a5");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, LetterWithinNumberFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("5a5");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, HexStringFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("0xfeed");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, BinaryStringFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("0b11010010");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, LeadingWhitespaceFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer(" 10");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, TrailingWhitespaceFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer("10 ");
+    ASSERT(!result);
+}
+
+TEST(StringUtilsTest, WhitespaceWithinNumberFailsToParse) {
+    boost::optional<size_t> result = parseUnsignedBase10Integer(" 10");
+    ASSERT(!result);
+}
+}  // namespace mongo

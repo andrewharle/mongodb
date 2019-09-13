@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -47,12 +47,12 @@ int
 __wt_cache_pool_config(WT_SESSION_IMPL *session, const char **cfg)
 {
 	WT_CACHE_POOL *cp;
-	WT_CONFIG_ITEM cval;
+	WT_CONFIG_ITEM cval, cval_cache_size;
 	WT_CONNECTION_IMPL *conn, *entry;
 	WT_DECL_RET;
+	uint64_t chunk, quota, reserve, size, used_cache;
 	char *pool_name;
 	bool created, updating;
-	uint64_t chunk, quota, reserve, size, used_cache;
 
 	conn = S2C(session);
 	created = updating = false;
@@ -78,7 +78,7 @@ __wt_cache_pool_config(WT_SESSION_IMPL *session, const char **cfg)
 		}
 
 		if (__wt_config_gets(session,
-		    &cfg[1], "cache_size", &cval) != WT_NOTFOUND)
+		    &cfg[1], "cache_size", &cval_cache_size) != WT_NOTFOUND)
 			WT_RET_MSG(session, EINVAL,
 			    "Only one of cache_size and shared_cache can be "
 			    "in the configuration");
@@ -135,7 +135,7 @@ __wt_cache_pool_config(WT_SESSION_IMPL *session, const char **cfg)
 		if (__wt_config_gets(session, &cfg[1],
 		    "shared_cache.size", &cval) == 0 && cval.val != 0)
 			size = (uint64_t)cval.val;
-		 else
+		else
 			size = cp->size;
 		if (__wt_config_gets(session, &cfg[1],
 		    "shared_cache.chunk", &cval) == 0 && cval.val != 0)
@@ -221,8 +221,7 @@ __wt_cache_pool_config(WT_SESSION_IMPL *session, const char **cfg)
 
 	F_SET(conn, WT_CONN_CACHE_POOL);
 err:	__wt_spin_unlock(session, &__wt_process.spinlock);
-	if (!updating)
-		__wt_free(session, pool_name);
+	__wt_free(session, pool_name);
 	if (ret != 0 && created) {
 		__wt_free(session, cp->name);
 		__wt_cond_destroy(session, &cp->cache_pool_cond);
@@ -277,7 +276,7 @@ __wt_conn_cache_pool_open(WT_SESSION_IMPL *session)
 	 * the active connection shuts down.
 	 */
 	F_SET(cp, WT_CACHE_POOL_ACTIVE);
-	F_SET(cache, WT_CACHE_POOL_RUN);
+	FLD_SET(cache->pool_flags, WT_CACHE_POOL_RUN);
 	WT_RET(__wt_thread_create(session, &cache->cp_tid,
 	    __wt_cache_pool_server, cache->cp_session));
 
@@ -304,7 +303,8 @@ __wt_conn_cache_pool_destroy(WT_SESSION_IMPL *session)
 
 	conn = S2C(session);
 	cache = conn->cache;
-	cp_locked = found = false;
+	WT_NOT_READ(cp_locked, false);
+	found = false;
 	cp = __wt_process.cache_pool;
 
 	if (!F_ISSET(conn, WT_CONN_CACHE_POOL))
@@ -338,11 +338,11 @@ __wt_conn_cache_pool_destroy(WT_SESSION_IMPL *session)
 		 * operation.
 		 */
 		__wt_spin_unlock(session, &cp->cache_pool_lock);
-		cp_locked = false;
+		WT_NOT_READ(cp_locked, false);
 
-		F_CLR(cache, WT_CACHE_POOL_RUN);
+		FLD_CLR(cache->pool_flags, WT_CACHE_POOL_RUN);
 		__wt_cond_signal(session, cp->cache_pool_cond);
-		WT_TRET(__wt_thread_join(session, cache->cp_tid));
+		WT_TRET(__wt_thread_join(session, &cache->cp_tid));
 
 		wt_session = &cache->cp_session->iface;
 		WT_TRET(wt_session->close(wt_session, NULL));
@@ -372,8 +372,8 @@ __wt_conn_cache_pool_destroy(WT_SESSION_IMPL *session)
 	}
 
 	if (!F_ISSET(cp, WT_CACHE_POOL_ACTIVE)) {
-		__wt_verbose(
-		    session, WT_VERB_SHARED_CACHE, "Destroying cache pool");
+		__wt_verbose(session,
+		    WT_VERB_SHARED_CACHE, "%s", "Destroying cache pool");
 		__wt_spin_lock(session, &__wt_process.spinlock);
 		/*
 		 * We have been holding the pool lock - no connections could
@@ -399,9 +399,9 @@ __wt_conn_cache_pool_destroy(WT_SESSION_IMPL *session)
 		__wt_spin_unlock(session, &cp->cache_pool_lock);
 
 		/* Notify other participants if we were managing */
-		if (F_ISSET(cache, WT_CACHE_POOL_MANAGER)) {
+		if (FLD_ISSET(cache->pool_flags, WT_CACHE_POOL_MANAGER)) {
 			cp->pool_managed = 0;
-			__wt_verbose(session, WT_VERB_SHARED_CACHE,
+			__wt_verbose(session, WT_VERB_SHARED_CACHE, "%s",
 			    "Shutting down shared cache manager connection");
 		}
 	}
@@ -449,7 +449,8 @@ __cache_pool_balance(WT_SESSION_IMPL *session, bool forward)
 	for (i = 0;
 	    i < 2 * WT_CACHE_POOL_BUMP_THRESHOLD &&
 	    F_ISSET(cp, WT_CACHE_POOL_ACTIVE) &&
-	    F_ISSET(S2C(session)->cache, WT_CACHE_POOL_RUN); i++) {
+	    FLD_ISSET(S2C(session)->cache->pool_flags, WT_CACHE_POOL_RUN);
+	    i++) {
 		__cache_pool_adjust(
 		    session, highest, bump_threshold, forward, &adjusted);
 		/*
@@ -472,8 +473,8 @@ __cache_pool_balance(WT_SESSION_IMPL *session, bool forward)
 static void
 __cache_pool_assess(WT_SESSION_IMPL *session, uint64_t *phighest)
 {
-	WT_CACHE_POOL *cp;
 	WT_CACHE *cache;
+	WT_CACHE_POOL *cp;
 	WT_CONNECTION_IMPL *entry;
 	uint64_t app_evicts, app_waits, reads;
 	uint64_t balanced_size, entries, highest, tmp;
@@ -567,25 +568,26 @@ static void
 __cache_pool_adjust(WT_SESSION_IMPL *session,
     uint64_t highest, uint64_t bump_threshold, bool forward, bool *adjustedp)
 {
-	WT_CACHE_POOL *cp;
 	WT_CACHE *cache;
+	WT_CACHE_POOL *cp;
 	WT_CONNECTION_IMPL *entry;
+	double pct_full;
 	uint64_t adjustment, highest_percentile, pressure, reserved, smallest;
-	u_int pct_full;
 	bool busy, decrease_ok, grow, pool_full;
 
 	*adjustedp = false;
+
 	cp = __wt_process.cache_pool;
 	grow = false;
 	pool_full = cp->currently_used >= cp->size;
-	pct_full = 0;
+	pct_full = 0.0;
 	/* Highest as a percentage, avoid 0 */
 	highest_percentile = (highest / 100) + 1;
 
 	if (WT_VERBOSE_ISSET(session, WT_VERB_SHARED_CACHE)) {
 		__wt_verbose(session,
-		    WT_VERB_SHARED_CACHE, "Cache pool distribution: ");
-		__wt_verbose(session, WT_VERB_SHARED_CACHE,
+		    WT_VERB_SHARED_CACHE, "%s", "Cache pool distribution: ");
+		__wt_verbose(session, WT_VERB_SHARED_CACHE, "%s",
 		    "\t" "cache (MB), pressure, skips, busy, %% full:");
 	}
 
@@ -607,10 +609,10 @@ __cache_pool_adjust(WT_SESSION_IMPL *session,
 		 */
 		pressure = cache->cp_pass_pressure / highest_percentile;
 		busy = __wt_eviction_needed(
-		    entry->default_session, false, &pct_full);
+		    entry->default_session, false, true, &pct_full);
 
 		__wt_verbose(session, WT_VERB_SHARED_CACHE,
-		    "\t%5" PRIu64 ", %3" PRIu64 ", %2" PRIu32 ", %d, %2u",
+		    "\t%5" PRIu64 ", %3" PRIu64 ", %2" PRIu32 ", %d, %2.3f",
 		    entry->cache_size >> 20, pressure, cache->cp_skip_count,
 		    busy, pct_full);
 
@@ -673,8 +675,9 @@ __cache_pool_adjust(WT_SESSION_IMPL *session,
 			 * potentially a negative feedback loop in the
 			 * balance algorithm.
 			 */
-			smallest = (100 * __wt_cache_bytes_inuse(cache)) /
-			    cache->eviction_trigger;
+			smallest =
+			    (uint64_t)((100 * __wt_cache_bytes_inuse(cache)) /
+			    cache->eviction_trigger);
 			if (entry->cache_size > smallest)
 				adjustment = WT_MIN(cp->chunk,
 				    (entry->cache_size - smallest) / 2);
@@ -730,7 +733,7 @@ __cache_pool_adjust(WT_SESSION_IMPL *session,
 				cp->currently_used -= adjustment;
 			}
 			__wt_verbose(session, WT_VERB_SHARED_CACHE,
-			    "Allocated %s%" PRId64 " to %s",
+			    "Allocated %s%" PRIu64 " to %s",
 			    grow ? "" : "-", adjustment, entry->home);
 
 			/*
@@ -760,7 +763,7 @@ __wt_cache_pool_server(void *arg)
 	forward = true;
 
 	while (F_ISSET(cp, WT_CACHE_POOL_ACTIVE) &&
-	    F_ISSET(cache, WT_CACHE_POOL_RUN)) {
+	    FLD_ISSET(cache->pool_flags, WT_CACHE_POOL_RUN)) {
 		if (cp->currently_used <= cp->size)
 			__wt_cond_wait(
 			    session, cp->cache_pool_cond, WT_MILLION, NULL);
@@ -770,21 +773,21 @@ __wt_cache_pool_server(void *arg)
 		 * lock on shutdown.
 		 */
 		if (!F_ISSET(cp, WT_CACHE_POOL_ACTIVE) &&
-		    F_ISSET(cache, WT_CACHE_POOL_RUN))
+		    FLD_ISSET(cache->pool_flags, WT_CACHE_POOL_RUN))
 			break;
 
 		/* Try to become the managing thread */
 		if (__wt_atomic_cas8(&cp->pool_managed, 0, 1)) {
-			F_SET(cache, WT_CACHE_POOL_MANAGER);
+			FLD_SET(cache->pool_flags, WT_CACHE_POOL_MANAGER);
 			__wt_verbose(session, WT_VERB_SHARED_CACHE,
-			    "Cache pool switched manager thread");
+			    "%s", "Cache pool switched manager thread");
 		}
 
 		/*
 		 * Continue even if there was an error. Details of errors are
 		 * reported in the balance function.
 		 */
-		if (F_ISSET(cache, WT_CACHE_POOL_MANAGER)) {
+		if (FLD_ISSET(cache->pool_flags, WT_CACHE_POOL_MANAGER)) {
 			__cache_pool_balance(session, forward);
 			forward = !forward;
 		}

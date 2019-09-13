@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -67,6 +67,15 @@
 #define	WT_TIMEDIFF_SEC(end, begin)					\
 	(WT_TIMEDIFF_NS((end), (begin)) / WT_BILLION)
 
+#define	WT_CLOCKDIFF_NS(end, begin)					\
+	(__wt_clock_to_nsec(end, begin))
+#define	WT_CLOCKDIFF_US(end, begin)					\
+	(WT_CLOCKDIFF_NS(end, begin) / WT_THOUSAND)
+#define	WT_CLOCKDIFF_MS(end, begin)					\
+	(WT_CLOCKDIFF_NS(end, begin) / WT_MILLION)
+#define	WT_CLOCKDIFF_SEC(end, begin)					\
+	(WT_CLOCKDIFF_NS(end, begin) / WT_BILLION)
+
 #define	WT_TIMECMP(t1, t2)						\
 	((t1).tv_sec < (t2).tv_sec ? -1 :				\
 	     (t1).tv_sec == (t2).tv_sec ?				\
@@ -100,9 +109,12 @@ struct __wt_fh {
 	const char *name;			/* File name */
 
 	uint64_t name_hash;			/* hash of name */
+	uint64_t last_sync;			/* time of background fsync */
+	volatile uint64_t written;		/* written since fsync */
 	TAILQ_ENTRY(__wt_fh) q;			/* internal queue */
 	TAILQ_ENTRY(__wt_fh) hashq;		/* internal hash queue */
 	u_int ref;				/* reference count */
+	WT_FS_OPEN_FILE_TYPE file_type;		/* file type */
 
 	WT_FILE_HANDLE *handle;
 };
@@ -157,9 +169,11 @@ struct __wt_fstream {
 	wt_off_t size;				/* File size */
 	WT_ITEM  buf;				/* Data */
 
-#define	WT_STREAM_APPEND	0x01		/* Open a stream for append */
-#define	WT_STREAM_READ		0x02		/* Open a stream for read */
-#define	WT_STREAM_WRITE		0x04		/* Open a stream for write */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_STREAM_APPEND	0x1u		/* Open a stream for append */
+#define	WT_STREAM_READ		0x2u		/* Open a stream for read */
+#define	WT_STREAM_WRITE		0x4u		/* Open a stream for write */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint32_t flags;
 
 	int (*close)(WT_SESSION_IMPL *, WT_FSTREAM *);

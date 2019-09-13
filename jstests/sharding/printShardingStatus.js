@@ -5,12 +5,20 @@
 (function() {
     'use strict';
 
-    var st = new ShardingTest({shards: 1, mongos: 2, config: 1, other: {smallfiles: true}});
+    const MONGOS_COUNT = 2;
+    var st =
+        new ShardingTest({shards: 1, mongos: MONGOS_COUNT, config: 1, other: {smallfiles: true}});
 
     var standalone = MongoRunner.runMongod();
 
     var mongos = st.s0;
     var admin = mongos.getDB("admin");
+
+    // Wait for the background thread from the mongos to insert their entries before beginning
+    // the tests.
+    assert.soon(function() {
+        return MONGOS_COUNT == mongos.getDB('config').mongos.count();
+    });
 
     function grabStatusOutput(configdb, verbose) {
         var res = print.captureAllOutput(function() {
@@ -95,7 +103,7 @@
         // Create collection with options.
         assert.commandWorked(configCopy.createCollection(c.name, c.options));
         // Clone the docs.
-        config.getCollection(c.name).find().snapshot().forEach(function(d) {
+        config.getCollection(c.name).find().hint({_id: 1}).forEach(function(d) {
             assert.writeOK(configCopy.getCollection(c.name).insert(d));
         });
         // Build the indexes.

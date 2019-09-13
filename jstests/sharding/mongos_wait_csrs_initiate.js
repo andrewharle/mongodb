@@ -1,5 +1,7 @@
 // Tests that mongos will wait for CSRS replica set to initiate.
 
+load("jstests/libs/feature_compatibility_version.js");
+
 var configRS = new ReplSetTest({name: "configRS", nodes: 1, useHostName: true});
 configRS.startSet({configsvr: '', journal: "", storageEngine: 'wiredTiger'});
 var replConfig = configRS.getReplSetConfig();
@@ -12,6 +14,11 @@ assert.throws(function() {
 
 jsTestLog("Initiating CSRS");
 configRS.initiate(replConfig);
+
+// Ensure the featureCompatibilityVersion is lastStableFCV so that the mongos can connect if it is
+// binary version last-stable.
+assert.commandWorked(
+    configRS.getPrimary().adminCommand({setFeatureCompatibilityVersion: lastStableFCV}));
 
 jsTestLog("getting mongos");
 var e;
@@ -32,3 +39,5 @@ assert.soon(
 
 jsTestLog("got mongos");
 assert.commandWorked(mongos2.getDB('admin').runCommand('serverStatus'));
+configRS.stopSet();
+MongoRunner.stopMongos(mongos);

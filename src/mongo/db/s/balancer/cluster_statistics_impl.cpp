@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,7 +39,6 @@
 #include "mongo/base/status_with.h"
 #include "mongo/bson/util/bson_extract.h"
 #include "mongo/client/read_preference.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
@@ -46,10 +47,6 @@
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-
-using std::string;
-using std::vector;
-
 namespace {
 
 const char kVersionField[] = "version";
@@ -62,16 +59,16 @@ const char kVersionField[] = "version";
  *  ShardNotFound if shard by that id is not available on the registry
  *  NoSuchKey if the version could not be retrieved
  */
-StatusWith<string> retrieveShardMongoDVersion(OperationContext* txn, ShardId shardId) {
-    auto shardRegistry = Grid::get(txn)->shardRegistry();
-    auto shardStatus = shardRegistry->getShard(txn, shardId);
+StatusWith<std::string> retrieveShardMongoDVersion(OperationContext* opCtx, ShardId shardId) {
+    auto shardRegistry = Grid::get(opCtx)->shardRegistry();
+    auto shardStatus = shardRegistry->getShard(opCtx, shardId);
     if (!shardStatus.isOK()) {
         return shardStatus.getStatus();
     }
     auto shard = shardStatus.getValue();
 
     auto commandResponse =
-        shard->runCommandWithFixedRetryAttempts(txn,
+        shard->runCommandWithFixedRetryAttempts(opCtx,
                                                 ReadPreferenceSetting{ReadPreference::PrimaryOnly},
                                                 "admin",
                                                 BSON("serverStatus" << 1),
@@ -85,7 +82,7 @@ StatusWith<string> retrieveShardMongoDVersion(OperationContext* txn, ShardId sha
 
     BSONObj serverStatus = std::move(commandResponse.getValue().response);
 
-    string version;
+    std::string version;
     Status status = bsonExtractStringField(serverStatus, kVersionField, &version);
     if (!status.isOK()) {
         return status;
@@ -102,14 +99,14 @@ ClusterStatisticsImpl::ClusterStatisticsImpl(BalancerRandomSource& random) : _ra
 
 ClusterStatisticsImpl::~ClusterStatisticsImpl() = default;
 
-StatusWith<vector<ShardStatistics>> ClusterStatisticsImpl::getStats(OperationContext* txn) {
+StatusWith<std::vector<ShardStatistics>> ClusterStatisticsImpl::getStats(OperationContext* opCtx) {
     // Get a list of all the shards that are participating in this balance round along with any
     // maximum allowed quotas and current utilization. We get the latter by issuing
     // db.serverStatus() (mem.mapped) to all shards.
     //
     // TODO: skip unresponsive shards and mark information as stale.
-    auto shardsStatus = Grid::get(txn)->catalogClient(txn)->getAllShards(
-        txn, repl::ReadConcernLevel::kMajorityReadConcern);
+    auto shardsStatus = Grid::get(opCtx)->catalogClient()->getAllShards(
+        opCtx, repl::ReadConcernLevel::kMajorityReadConcern);
     if (!shardsStatus.isOK()) {
         return shardsStatus.getStatus();
     }
@@ -118,7 +115,7 @@ StatusWith<vector<ShardStatistics>> ClusterStatisticsImpl::getStats(OperationCon
 
     std::shuffle(shards.begin(), shards.end(), _random);
 
-    vector<ShardStatistics> stats;
+    std::vector<ShardStatistics> stats;
 
     for (const auto& shard : shards) {
         const auto shardSizeStatus = [&]() -> StatusWith<long long> {
@@ -126,22 +123,20 @@ StatusWith<vector<ShardStatistics>> ClusterStatisticsImpl::getStats(OperationCon
                 return 0;
             }
 
-            return shardutil::retrieveTotalShardSize(txn, shard.getName());
+            return shardutil::retrieveTotalShardSize(opCtx, shard.getName());
         }();
 
         if (!shardSizeStatus.isOK()) {
             const auto& status = shardSizeStatus.getStatus();
 
-            return {status.code(),
-                    str::stream() << "Unable to obtain shard utilization information for "
-                                  << shard.getName()
-                                  << " due to "
-                                  << status.reason()};
+            return status.withContext(str::stream()
+                                      << "Unable to obtain shard utilization information for "
+                                      << shard.getName());
         }
 
-        string mongoDVersion;
+        std::string mongoDVersion;
 
-        auto mongoDVersionStatus = retrieveShardMongoDVersion(txn, shard.getName());
+        auto mongoDVersionStatus = retrieveShardMongoDVersion(opCtx, shard.getName());
         if (mongoDVersionStatus.isOK()) {
             mongoDVersion = std::move(mongoDVersionStatus.getValue());
         } else {
@@ -151,7 +146,7 @@ StatusWith<vector<ShardStatistics>> ClusterStatisticsImpl::getStats(OperationCon
                   << causedBy(mongoDVersionStatus.getStatus());
         }
 
-        std::set<string> shardTags;
+        std::set<std::string> shardTags;
 
         for (const auto& shardTag : shard.getTags()) {
             shardTags.insert(shardTag);

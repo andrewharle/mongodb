@@ -6,8 +6,8 @@ function runAllUserManagementCommandsTests(conn, writeConcern) {
     'use strict';
 
     var hasAuthzError = function(result) {
-        assert(result.hasWriteError());
-        assert.eq(ErrorCodes.Unauthorized, result.getWriteError().code);
+        assert(result instanceof WriteCommandError);
+        assert.eq(ErrorCodes.Unauthorized, result.code);
     };
 
     conn.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['root']}, writeConcern);
@@ -201,6 +201,14 @@ function runAllUserManagementCommandsTests(conn, writeConcern) {
         assert.eq("spencer", res.users[1].user);
         assert(!res.users[0].customData);
         assert.eq(10036, res.users[1].customData.zipCode);
+
+        res = testUserAdmin.runCommand({usersInfo: {forAllDBs: true}});
+        printjson(res);
+        assert.eq(4, res.users.length);
+        assert.eq("admin", res.users[0].user);
+        assert.eq("andy", res.users[1].user);
+        assert.eq("spencer", res.users[2].user);
+        assert.eq("userAdmin", res.users[3].user);
     })();
 
     (function testDropUser() {

@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kFTDC
@@ -55,7 +57,7 @@ FTDCFileManager::FTDCFileManager(const FTDCConfig* config,
     : _config(config), _writer(_config), _path(path), _rotateCollectors(collection) {}
 
 FTDCFileManager::~FTDCFileManager() {
-    close();
+    close().transitional_ignore();
 }
 
 StatusWith<std::unique_ptr<FTDCFileManager>> FTDCFileManager::create(
@@ -75,7 +77,7 @@ StatusWith<std::unique_ptr<FTDCFileManager>> FTDCFileManager::create(
         boost::filesystem::create_directories(dir, ec);
         if (ec) {
             return {ErrorCodes::NonExistentPath,
-                    str::stream() << "\'" << dir.generic_string() << "\' could not be created: "
+                    str::stream() << "\"" << dir.generic_string() << "\" could not be created: "
                                   << ec.message()};
         }
     }
@@ -101,7 +103,10 @@ StatusWith<std::unique_ptr<FTDCFileManager>> FTDCFileManager::create(
     }
 
     // Rotate as needed after we appended interim data to the archive file
-    mgr->trimDirectory(files);
+    s = mgr->trimDirectory(files);
+    if (!s.isOK()) {
+        return s;
+    }
 
     return {std::move(mgr)};
 }
@@ -205,22 +210,38 @@ Status FTDCFileManager::openArchiveFile(
     return Status::OK();
 }
 
-void FTDCFileManager::trimDirectory(std::vector<boost::filesystem::path>& files) {
+Status FTDCFileManager::trimDirectory(std::vector<boost::filesystem::path>& files) {
     std::uint64_t maxSize = _config->maxDirectorySizeBytes;
     std::uint64_t size = 0;
 
     dassert(std::is_sorted(files.begin(), files.end()));
 
     for (auto it = files.rbegin(); it != files.rend(); ++it) {
-        std::uint64_t fileSize = boost::filesystem::file_size(*it);
+        boost::system::error_code ec;
+        std::uint64_t fileSize = boost::filesystem::file_size(*it, ec);
+        if (ec) {
+            return {ErrorCodes::NonExistentPath,
+                    str::stream() << "\"" << (*it).generic_string()
+                                  << "\" file size could not be retrieved during trimming: "
+                                  << ec.message()};
+        }
         size += fileSize;
 
         if (size >= maxSize) {
             LOG(1) << "Cleaning file over full-time diagnostic data capture quota, file: "
                    << (*it).generic_string() << " with size " << fileSize;
-            boost::filesystem::remove(*it);
+
+            boost::filesystem::remove(*it, ec);
+            if (ec) {
+                return {ErrorCodes::NonExistentPath,
+                        str::stream() << "\"" << (*it).generic_string()
+                                      << "\" could not be removed during trimming: "
+                                      << ec.message()};
+            }
         }
     }
+
+    return Status::OK();
 }
 
 std::vector<std::tuple<FTDCBSONUtil::FTDCType, BSONObj, Date_t>>
@@ -234,7 +255,14 @@ FTDCFileManager::recoverInterimFile() {
         return docs;
     }
 
-    size_t size = boost::filesystem::file_size(interimFile);
+    boost::system::error_code ec;
+    size_t size = boost::filesystem::file_size(interimFile, ec);
+    if (ec) {
+        log() << "Recover interim file failed as the file size could not be checked: "
+              << ec.message();
+        return docs;
+    }
+
     if (size == 0) {
         return docs;
     }
@@ -280,7 +308,10 @@ Status FTDCFileManager::rotate(Client* client) {
     auto files = scanDirectory();
 
     // Rotate as needed
-    trimDirectory(files);
+    s = trimDirectory(files);
+    if (!s.isOK()) {
+        return s;
+    }
 
     auto swFile = generateArchiveFileName(_path, terseUTCCurrentTime());
     if (!swFile.isOK()) {

@@ -3,8 +3,13 @@
  * entry matching the server's response from the "getCmdLineOpts" command. The former operation may
  * be routed to a secondary in the replica set, whereas the latter must be routed to the primary.
  *
- * @tags: [assumes_read_preference_unchanged]
+ * @tags: [
+ *  assumes_read_preference_unchanged,
+ *  requires_collstats,
+ *  requires_capped,
+ * ]
  */
+
 load('jstests/aggregation/extras/utils.js');
 
 (function() {
@@ -60,7 +65,9 @@ load('jstests/aggregation/extras/utils.js');
 
     // Test buildinfo
     var buildinfo = db.runCommand("buildinfo");
-    delete buildinfo.ok;  // Delete extra meta info not in startup_log
+    delete buildinfo.ok;             // Delete extra meta info not in startup_log
+    delete buildinfo.operationTime;  // Delete extra meta info not in startup_log
+    delete buildinfo.$clusterTime;   // Delete extra meta info not in startup_log
     var isMaster = db._adminCommand("ismaster");
 
     // Test buildinfo has the expected keys

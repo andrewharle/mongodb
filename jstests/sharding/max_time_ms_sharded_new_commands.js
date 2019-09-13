@@ -1,8 +1,7 @@
-// Continuation of max_time_ms.js, but only contains commands which are not present in a previous
-// version
+// Make sure the setFeatureCompatibilityVersion command respects maxTimeMs.
 (function() {
     'use strict';
-
+    load("./jstests/libs/feature_compatibility_version.js");
     var st = new ShardingTest({shards: 2});
 
     var mongos = st.s0;
@@ -25,16 +24,22 @@
     // Positive test for "setFeatureCompatibilityVersion"
     configureMaxTimeAlwaysTimeOut("alwaysOn");
     assert.commandFailedWithCode(
-        admin.runCommand({setFeatureCompatibilityVersion: '3.2', maxTimeMS: 1000 * 60 * 60 * 24}),
-        ErrorCodes.ExceededTimeLimit,
+        admin.runCommand(
+            {setFeatureCompatibilityVersion: lastStableFCV, maxTimeMS: 1000 * 60 * 60 * 24}),
+        ErrorCodes.MaxTimeMSExpired,
         "expected setFeatureCompatibilityVersion to fail due to maxTimeAlwaysTimeOut fail point");
 
     // Negative test for "setFeatureCompatibilityVersion"
     configureMaxTimeAlwaysTimeOut("off");
     assert.commandWorked(
-        admin.runCommand({setFeatureCompatibilityVersion: '3.2', maxTimeMS: 1000 * 60 * 60 * 24}),
+        admin.runCommand(
+            {setFeatureCompatibilityVersion: lastStableFCV, maxTimeMS: 1000 * 60 * 60 * 24}),
+        "expected setFeatureCompatibilityVersion to not hit time limit in mongod");
+
+    assert.commandWorked(
+        admin.runCommand(
+            {setFeatureCompatibilityVersion: latestFCV, maxTimeMS: 1000 * 60 * 60 * 24}),
         "expected setFeatureCompatibilityVersion to not hit time limit in mongod");
 
     st.stop();
-
 })();

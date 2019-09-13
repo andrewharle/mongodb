@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -16,14 +16,13 @@ static void __free_skip_array(
 		WT_SESSION_IMPL *, WT_INSERT_HEAD **, uint32_t, bool);
 static void __free_skip_list(WT_SESSION_IMPL *, WT_INSERT *, bool);
 static void __free_update(WT_SESSION_IMPL *, WT_UPDATE **, uint32_t, bool);
-static void __page_out_int(WT_SESSION_IMPL *, WT_PAGE **, bool);
 
 /*
- * __wt_ref_out_int --
+ * __wt_ref_out --
  *	Discard an in-memory page, freeing all memory associated with it.
  */
 void
-__wt_ref_out_int(WT_SESSION_IMPL *session, WT_REF *ref, bool rewrite)
+__wt_ref_out(WT_SESSION_IMPL *session, WT_REF *ref)
 {
 	/*
 	 * A version of the page-out function that allows us to make additional
@@ -33,49 +32,24 @@ __wt_ref_out_int(WT_SESSION_IMPL *session, WT_REF *ref, bool rewrite)
 	 */
 	WT_ASSERT(session, S2BT(session)->evict_ref != ref);
 
-#ifdef HAVE_DIAGNOSTIC
-	{
-	WT_HAZARD *hp;
-	int i;
 	/*
 	 * Make sure no other thread has a hazard pointer on the page we are
 	 * about to discard.  This is complicated by the fact that readers
 	 * publish their hazard pointer before re-checking the page state, so
 	 * our check can race with readers without indicating a real problem.
-	 * Wait for up to a second for hazard pointers to be cleared.
+	 * If we find a hazard pointer, wait for it to be cleared.
 	 */
-	for (hp = NULL, i = 0; i < 100; i++) {
-		if ((hp = __wt_hazard_check(session, ref)) == NULL)
-			break;
-		__wt_sleep(0, 10000);
-	}
-	if (hp != NULL)
-		__wt_errx(session,
-		    "discarded page has hazard pointer: (%p: %s, line %d)",
-		    (void *)hp->ref, hp->file, hp->line);
-	WT_ASSERT(session, hp == NULL);
-	}
-#endif
+	WT_ASSERT(session, __wt_hazard_check_assert(session, ref, true));
 
-	__page_out_int(session, &ref->page, rewrite);
+	__wt_page_out(session, &ref->page);
 }
 
 /*
- * __wt_ref_out --
+ * __wt_page_out --
  *	Discard an in-memory page, freeing all memory associated with it.
  */
 void
-__wt_ref_out(WT_SESSION_IMPL *session, WT_REF *ref)
-{
-	__wt_ref_out_int(session, ref, false);
-}
-
-/*
- * __page_out_int --
- *	Discard an in-memory page, freeing all memory associated with it.
- */
-static void
-__page_out_int(WT_SESSION_IMPL *session, WT_PAGE **pagep, bool rewrite)
+__wt_page_out(WT_SESSION_IMPL *session, WT_PAGE **pagep)
 {
 	WT_PAGE *page;
 	WT_PAGE_HEADER *dsk;
@@ -87,15 +61,17 @@ __page_out_int(WT_SESSION_IMPL *session, WT_PAGE **pagep, bool rewrite)
 	page = *pagep;
 	*pagep = NULL;
 
-	if (F_ISSET(session->dhandle, WT_DHANDLE_DEAD))
+	/*
+	 * Unless we have a dead handle or we're closing the database, we
+	 * should never discard a dirty page.  We do ordinary eviction from
+	 * dead trees until sweep gets to them, so we may not in the
+	 * WT_SYNC_DISCARD loop.
+	 */
+	if (F_ISSET(session->dhandle, WT_DHANDLE_DEAD) ||
+	    F_ISSET(S2C(session), WT_CONN_CLOSING))
 		__wt_page_modify_clear(session, page);
 
-	/*
-	 * We should never discard:
-	 * - a dirty page,
-	 * - a page queued for eviction, or
-	 * - a locked page.
-	 */
+	/* Assert we never discard a dirty page or a page queue for eviction. */
 	WT_ASSERT(session, !__wt_page_is_modified(page));
 	WT_ASSERT(session, !F_ISSET_ATOMIC(page, WT_PAGE_EVICT_LRU));
 
@@ -113,7 +89,7 @@ __page_out_int(WT_SESSION_IMPL *session, WT_PAGE **pagep, bool rewrite)
 	}
 
 	/* Update the cache's information. */
-	__wt_cache_page_evict(session, page, rewrite);
+	__wt_cache_page_evict(session, page);
 
 	dsk = (WT_PAGE_HEADER *)page->dsk;
 	if (F_ISSET_ATOMIC(page, WT_PAGE_DISK_ALLOC))
@@ -155,16 +131,6 @@ __page_out_int(WT_SESSION_IMPL *session, WT_PAGE **pagep, bool rewrite)
 		__wt_overwrite_and_free_len(session, dsk, dsk->mem_size);
 
 	__wt_overwrite_and_free(session, page);
-}
-
-/*
- * __wt_page_out --
- *	Discard an in-memory page, freeing all memory associated with it.
- */
-void
-__wt_page_out(WT_SESSION_IMPL *session, WT_PAGE **pagep)
-{
-	__page_out_int(session, pagep, false);
 }
 
 /*
@@ -249,8 +215,8 @@ __free_page_modify(WT_SESSION_IMPL *session, WT_PAGE *page)
 
 	/* Free the overflow on-page, reuse and transaction-cache skiplists. */
 	__wt_ovfl_reuse_free(session, page);
-	__wt_ovfl_txnc_free(session, page);
 	__wt_ovfl_discard_free(session, page);
+	__wt_ovfl_discard_remove(session, page);
 
 	__wt_free(session, page->modify->ovfl_track);
 	__wt_spin_destroy(session, &page->modify->page_lock);
@@ -282,6 +248,9 @@ __wt_free_ref(
 	if (ref == NULL)
 		return;
 
+	/* Assert there are no hazard pointers. */
+	WT_ASSERT(session, __wt_hazard_check_assert(session, ref, false));
+
 	/*
 	 * Optionally free the referenced pages.  (The path to free referenced
 	 * page is used for error cleanup, no instantiated and then discarded
@@ -310,13 +279,11 @@ __wt_free_ref(
 		break;
 	}
 
-	/*
-	 * Free any address allocation; if there's no linked WT_REF page, it
-	 * must be allocated.
-	 */
+	/* Free any address allocation. */
 	__wt_ref_addr_free(session, ref);
 
-	/* Free any page-deleted information. */
+	/* Free any lookaside or page-deleted information. */
+	__wt_free(session, ref->page_las);
 	if (ref->page_del != NULL) {
 		__wt_free(session, ref->page_del->update_list);
 		__wt_free(session, ref->page_del);

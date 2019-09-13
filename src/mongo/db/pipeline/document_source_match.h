@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -37,25 +39,38 @@
 
 namespace mongo {
 
-class DocumentSourceMatch final : public DocumentSource {
+class DocumentSourceMatch : public DocumentSource {
 public:
-    // virtuals from DocumentSource
-    GetNextResult getNext() final;
-    const char* getSourceName() const final;
-    Value serialize(bool explain = false) const final;
+    virtual ~DocumentSourceMatch() = default;
+
+    GetNextResult getNext() override;
     boost::intrusive_ptr<DocumentSource> optimize() final;
     BSONObjSet getOutputSorts() final {
         return pSource ? pSource->getOutputSorts()
                        : SimpleBSONObjComparator::kInstance.makeBSONObjSet();
     }
 
+    const char* getSourceName() const override;
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+        return {StreamType::kStreaming,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed,
+                ChangeStreamRequirement::kWhitelist};
+    }
+
+    Value serialize(
+        boost::optional<ExplainOptions::Verbosity> explain = boost::none) const override;
+
     /**
      * Attempts to combine with any subsequent $match stages, joining the query objects with a
      * $and.
      */
     Pipeline::SourceContainer::iterator doOptimizeAt(Pipeline::SourceContainer::iterator itr,
-                                                     Pipeline::SourceContainer* container) final;
-    void setSource(DocumentSource* Source) final;
+                                                     Pipeline::SourceContainer* container) override;
 
     GetDepsReturn getDependencies(DepsTracker* deps) const final;
 
@@ -116,14 +131,14 @@ public:
      *
      * For example, {$match: {a: "foo", "b.c": 4}} split by "b" will return pointers to two stages:
      * {$match: {a: "foo"}}, and {$match: {"b.c": 4}}.
+     *
+     * The 'renames' structure maps from a field to an alias that should be used in the independent
+     * portion of the match. For example, suppose that we split by fields "a" with the rename "b" =>
+     * "c". The match {$match: {a: "foo", b: "bar", z: "baz"}} will split into {$match: {c: "bar",
+     * z: "baz"}} and {$match: {a: "foo"}}.
      */
     std::pair<boost::intrusive_ptr<DocumentSourceMatch>, boost::intrusive_ptr<DocumentSourceMatch>>
-    splitSourceBy(const std::set<std::string>& fields);
-
-    /**
-     * Given a document 'input', extract 'fields' and produce a BSONObj with those values.
-     */
-    static BSONObj getObjectForMatch(const Document& input, const std::set<std::string>& fields);
+    splitSourceBy(const std::set<std::string>& fields, const StringMap<std::string>& renames);
 
     /**
      * Returns a new DocumentSourceMatch with a MatchExpression that, if executed on the
@@ -142,19 +157,18 @@ public:
         const std::string& path,
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-private:
+protected:
     DocumentSourceMatch(const BSONObj& query,
-                        const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+                        const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    void addDependencies(DepsTracker* deps) const;
-
+private:
     std::unique_ptr<MatchExpression> _expression;
+
+    BSONObj _predicate;
+    const bool _isTextQuery;
 
     // Cache the dependencies so that we know what fields we need to serialize to BSON for matching.
     DepsTracker _dependencies;
-
-    BSONObj _predicate;
-    bool _isTextQuery;
 };
 
 }  // namespace mongo

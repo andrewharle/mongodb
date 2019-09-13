@@ -1,24 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
- *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,11 +41,13 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/platform/strnlen.h"
 #include "mongo/util/base64.h"
+#include "mongo/util/duration.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/stringutils.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace str = mongoutils::str;
@@ -52,6 +55,9 @@ namespace str = mongoutils::str;
 using std::dec;
 using std::hex;
 using std::string;
+
+const double BSONElement::kLongLongMaxPlusOneAsDouble =
+    scalbn(1, std::numeric_limits<long long>::digits);
 
 string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, int pretty) const {
     std::stringstream s;
@@ -70,7 +76,7 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
             }
             break;
         case NumberInt:
-            if (format == JS) {
+            if (format == TenGen) {
                 s << "NumberInt(" << _numberInt() << ")";
                 break;
             }
@@ -306,36 +312,6 @@ string BSONElement::jsonString(JsonStringFormat format, bool includeFieldNames, 
 
 namespace {
 
-// Map from query operator string name to operator MatchType. Used in BSONElement::getGtLtOp().
-const StringMap<BSONObj::MatchType> queryOperatorMap{
-    // TODO: SERVER-19565 Add $eq after auditing callers.
-    {"lt", BSONObj::LT},
-    {"lte", BSONObj::LTE},
-    {"gte", BSONObj::GTE},
-    {"gt", BSONObj::GT},
-    {"in", BSONObj::opIN},
-    {"ne", BSONObj::NE},
-    {"size", BSONObj::opSIZE},
-    {"all", BSONObj::opALL},
-    {"nin", BSONObj::NIN},
-    {"exists", BSONObj::opEXISTS},
-    {"mod", BSONObj::opMOD},
-    {"type", BSONObj::opTYPE},
-    {"regex", BSONObj::opREGEX},
-    {"options", BSONObj::opOPTIONS},
-    {"elemMatch", BSONObj::opELEM_MATCH},
-    {"near", BSONObj::opNEAR},
-    {"nearSphere", BSONObj::opNEAR},
-    {"geoNear", BSONObj::opNEAR},
-    {"within", BSONObj::opWITHIN},
-    {"geoWithin", BSONObj::opWITHIN},
-    {"geoIntersects", BSONObj::opGEO_INTERSECTS},
-    {"bitsAllSet", BSONObj::opBITS_ALL_SET},
-    {"bitsAllClear", BSONObj::opBITS_ALL_CLEAR},
-    {"bitsAnySet", BSONObj::opBITS_ANY_SET},
-    {"bitsAnyClear", BSONObj::opBITS_ANY_CLEAR},
-};
-
 // Compares two string elements using a simple binary compare.
 int compareElementStringValues(const BSONElement& leftStr, const BSONElement& rightStr) {
     // we use memcmp as we allow zeros in UTF8 strings
@@ -351,18 +327,158 @@ int compareElementStringValues(const BSONElement& leftStr, const BSONElement& ri
 
 }  // namespace
 
-int BSONElement::getGtLtOp(int def) const {
-    const char* fn = fieldName();
-    if (fn[0] == '$' && fn[1]) {
-        StringData opName = fieldNameStringData().substr(1);
-
-        StringMap<BSONObj::MatchType>::const_iterator queryOp = queryOperatorMap.find(opName);
-        if (queryOp == queryOperatorMap.end()) {
-            return def;
+int BSONElement::compareElements(const BSONElement& l,
+                                 const BSONElement& r,
+                                 ComparisonRulesSet rules,
+                                 const StringData::ComparatorInterface* comparator) {
+    switch (l.type()) {
+        case BSONType::EOO:
+        case BSONType::Undefined:  // EOO and Undefined are same canonicalType
+        case BSONType::jstNULL:
+        case BSONType::MaxKey:
+        case BSONType::MinKey: {
+            auto f = l.canonicalType() - r.canonicalType();
+            if (f < 0)
+                return -1;
+            return f == 0 ? 0 : 1;
         }
-        return queryOp->second;
+        case BSONType::Bool:
+            return *l.value() - *r.value();
+        case BSONType::bsonTimestamp:
+            // unsigned compare for timestamps - note they are not really dates but (ordinal +
+            // time_t)
+            if (l.timestamp() < r.timestamp())
+                return -1;
+            return l.timestamp() == r.timestamp() ? 0 : 1;
+        case BSONType::Date:
+            // Signed comparisons for Dates.
+            {
+                const Date_t a = l.Date();
+                const Date_t b = r.Date();
+                if (a < b)
+                    return -1;
+                return a == b ? 0 : 1;
+            }
+
+        case BSONType::NumberInt: {
+            // All types can precisely represent all NumberInts, so it is safe to simply convert to
+            // whatever rhs's type is.
+            switch (r.type()) {
+                case NumberInt:
+                    return compareInts(l._numberInt(), r._numberInt());
+                case NumberLong:
+                    return compareLongs(l._numberInt(), r._numberLong());
+                case NumberDouble:
+                    return compareDoubles(l._numberInt(), r._numberDouble());
+                case NumberDecimal:
+                    return compareIntToDecimal(l._numberInt(), r._numberDecimal());
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
+
+        case BSONType::NumberLong: {
+            switch (r.type()) {
+                case NumberLong:
+                    return compareLongs(l._numberLong(), r._numberLong());
+                case NumberInt:
+                    return compareLongs(l._numberLong(), r._numberInt());
+                case NumberDouble:
+                    return compareLongToDouble(l._numberLong(), r._numberDouble());
+                case NumberDecimal:
+                    return compareLongToDecimal(l._numberLong(), r._numberDecimal());
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
+
+        case BSONType::NumberDouble: {
+            switch (r.type()) {
+                case NumberDouble:
+                    return compareDoubles(l._numberDouble(), r._numberDouble());
+                case NumberInt:
+                    return compareDoubles(l._numberDouble(), r._numberInt());
+                case NumberLong:
+                    return compareDoubleToLong(l._numberDouble(), r._numberLong());
+                case NumberDecimal:
+                    return compareDoubleToDecimal(l._numberDouble(), r._numberDecimal());
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
+
+        case BSONType::NumberDecimal: {
+            switch (r.type()) {
+                case NumberDecimal:
+                    return compareDecimals(l._numberDecimal(), r._numberDecimal());
+                case NumberInt:
+                    return compareDecimalToInt(l._numberDecimal(), r._numberInt());
+                case NumberLong:
+                    return compareDecimalToLong(l._numberDecimal(), r._numberLong());
+                case NumberDouble:
+                    return compareDecimalToDouble(l._numberDecimal(), r._numberDouble());
+                default:
+                    MONGO_UNREACHABLE;
+            }
+        }
+
+        case BSONType::jstOID:
+            return memcmp(l.value(), r.value(), OID::kOIDSize);
+        case BSONType::Code:
+            return compareElementStringValues(l, r);
+        case BSONType::Symbol:
+        case BSONType::String: {
+            if (comparator) {
+                return comparator->compare(l.valueStringData(), r.valueStringData());
+            } else {
+                return compareElementStringValues(l, r);
+            }
+        }
+        case BSONType::Object:
+        case BSONType::Array: {
+            return l.embeddedObject().woCompare(
+                r.embeddedObject(),
+                BSONObj(),
+                rules | BSONElement::ComparisonRules::kConsiderFieldName,
+                comparator);
+        }
+        case BSONType::DBRef: {
+            int lsz = l.valuesize();
+            int rsz = r.valuesize();
+            if (lsz - rsz != 0)
+                return lsz - rsz;
+            return memcmp(l.value(), r.value(), lsz);
+        }
+        case BSONType::BinData: {
+            int lsz = l.objsize();  // our bin data size in bytes, not including the subtype byte
+            int rsz = r.objsize();
+            if (lsz - rsz != 0)
+                return lsz - rsz;
+            return memcmp(l.value() + 4, r.value() + 4, lsz + 1 /*+1 for subtype byte*/);
+        }
+        case BSONType::RegEx: {
+            int c = strcmp(l.regex(), r.regex());
+            if (c)
+                return c;
+            return strcmp(l.regexFlags(), r.regexFlags());
+        }
+        case BSONType::CodeWScope: {
+            int cmp = StringData(l.codeWScopeCode(), l.codeWScopeCodeLen() - 1)
+                          .compare(StringData(r.codeWScopeCode(), r.codeWScopeCodeLen() - 1));
+            if (cmp)
+                return cmp;
+
+            // When comparing the scope object, we should consider field names. Special string
+            // comparison semantics do not apply to strings nested inside the CodeWScope scope
+            // object, so we do not pass through the string comparator.
+            return l.codeWScopeObject().woCompare(
+                r.codeWScopeObject(),
+                BSONObj(),
+                rules | BSONElement::ComparisonRules::kConsiderFieldName);
+        }
     }
-    return def;
+
+    MONGO_UNREACHABLE;
 }
 
 /** transform a BSON array into a vector of BSONElements.
@@ -391,24 +507,20 @@ std::vector<BSONElement> BSONElement::Array() const {
     return v;
 }
 
-/* wo = "well ordered"
-   note: (mongodb related) : this can only change in behavior when index version # changes
-*/
-int BSONElement::woCompare(const BSONElement& e,
-                           bool considerFieldName,
+int BSONElement::woCompare(const BSONElement& elem,
+                           ComparisonRulesSet rules,
                            const StringData::ComparatorInterface* comparator) const {
-    int lt = (int)canonicalType();
-    int rt = (int)e.canonicalType();
-    int x = lt - rt;
-    if (x != 0 && (!isNumber() || !e.isNumber()))
-        return x;
-    if (considerFieldName) {
-        x = strcmp(fieldName(), e.fieldName());
-        if (x != 0)
-            return x;
+    if (type() != elem.type()) {
+        int lt = (int)canonicalType();
+        int rt = (int)elem.canonicalType();
+        if (int diff = lt - rt)
+            return diff;
     }
-    x = compareElementValues(*this, e, comparator);
-    return x;
+    if (rules & ComparisonRules::kConsiderFieldName) {
+        if (int diff = fieldNameStringData().compare(elem.fieldNameStringData()))
+            return diff;
+    }
+    return compareElements(*this, elem, rules, comparator);
 }
 
 bool BSONElement::binaryEqual(const BSONElement& rhs) const {
@@ -438,7 +550,7 @@ bool BSONElement::binaryEqualValues(const BSONElement& rhs) const {
 
 BSONObj BSONElement::embeddedObjectUserCheck() const {
     if (MONGO_likely(isABSONObj()))
-        return BSONObj(value());
+        return BSONObj(value(), BSONObj::LargeSizeTrait{});
     std::stringstream ss;
     ss << "invalid parameter: expected an object (" << fieldName() << ")";
     uasserted(10065, ss.str());
@@ -447,7 +559,7 @@ BSONObj BSONElement::embeddedObjectUserCheck() const {
 
 BSONObj BSONElement::embeddedObject() const {
     verify(isABSONObj());
-    return BSONObj(value());
+    return BSONObj(value(), BSONObj::LargeSizeTrait{});
 }
 
 BSONObj BSONElement::codeWScopeObject() const {
@@ -477,164 +589,83 @@ BSONObj BSONElement::Obj() const {
     return embeddedObjectUserCheck();
 }
 
-BSONElement BSONElement::operator[](const std::string& field) const {
+BSONElement BSONElement::operator[](StringData field) const {
     BSONObj o = Obj();
     return o[field];
 }
 
-int BSONElement::size(int maxLen) const {
-    if (totalSize >= 0)
-        return totalSize;
-
-    int remain = maxLen - fieldNameSize() - 1;
-
-    int x = 0;
-    switch (type()) {
-        case EOO:
-        case Undefined:
-        case jstNULL:
-        case MaxKey:
-        case MinKey:
-            break;
-        case mongo::Bool:
-            x = 1;
-            break;
-        case NumberInt:
-            x = 4;
-            break;
-        case bsonTimestamp:
-        case mongo::Date:
-        case NumberDouble:
-        case NumberLong:
-            x = 8;
-            break;
-        case NumberDecimal:
-            x = 16;
-            break;
-        case jstOID:
-            x = OID::kOIDSize;
-            break;
-        case Symbol:
-        case Code:
-        case mongo::String:
-            massert(
-                10313, "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3);
-            x = valuestrsize() + 4;
-            break;
-        case CodeWScope:
-            massert(
-                10314, "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3);
-            x = objsize();
-            break;
-
-        case DBRef:
-            massert(
-                10315, "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3);
-            x = valuestrsize() + 4 + 12;
-            break;
-        case Object:
-        case mongo::Array:
-            massert(
-                10316, "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3);
-            x = objsize();
-            break;
-        case BinData:
-            massert(
-                10317, "Insufficient bytes to calculate element size", maxLen == -1 || remain > 3);
-            x = valuestrsize() + 4 + 1 /*subtype*/;
-            break;
-        case RegEx: {
-            const char* p = value();
-            size_t len1 = (maxLen == -1) ? strlen(p) : strnlen(p, remain);
-            massert(10318, "Invalid regex string", maxLen == -1 || len1 < size_t(remain));
-            p = p + len1 + 1;
-            size_t len2;
-            if (maxLen == -1)
-                len2 = strlen(p);
-            else {
-                size_t x = remain - len1 - 1;
-                verify(x <= 0x7fffffff);
-                len2 = strnlen(p, x);
-                massert(10319, "Invalid regex options string", len2 < x);
-            }
-            x = (int)(len1 + 1 + len2 + 1);
-        } break;
-        default: {
-            StringBuilder ss;
-            ss << "BSONElement: bad type " << (int)type();
-            std::string msg = ss.str();
-            massert(13655, msg.c_str(), false);
-        }
-    }
-    totalSize = x + fieldNameSize() + 1;  // BSONType
-
-    return totalSize;
+namespace {
+NOINLINE_DECL void msgAssertedBadType[[noreturn]](int8_t type) {
+    msgasserted(10320, str::stream() << "BSONElement: bad type " << (int)type);
 }
+}  // namespace
+int BSONElement::computeSize() const {
+    enum SizeStyle : uint8_t {
+        kFixed,         // Total size is a fixed amount + key length.
+        kIntPlusFixed,  // Like Fixed, but also add in the int32 immediately following the key.
+        kRegEx,         // Handled specially.
+    };
+    struct SizeInfo {
+        uint8_t style : 2;
+        uint8_t bytes : 6;  // Includes type byte. Excludes field name and variable lengths.
+    };
+    MONGO_STATIC_ASSERT(sizeof(SizeInfo) == 1);
 
-int BSONElement::size() const {
-    if (totalSize >= 0)
-        return totalSize;
+    // This table should take 20 bytes. Align to next power of 2 to avoid splitting across cache
+    // lines unnecessarily.
+    static constexpr SizeInfo kSizeInfoTable alignas(32)[] = {
+        {SizeStyle::kFixed, 1},          // EOO
+        {SizeStyle::kFixed, 9},          // NumberDouble
+        {SizeStyle::kIntPlusFixed, 5},   // String
+        {SizeStyle::kIntPlusFixed, 1},   // Object
+        {SizeStyle::kIntPlusFixed, 1},   // Array
+        {SizeStyle::kIntPlusFixed, 6},   // BinData
+        {SizeStyle::kFixed, 1},          // Undefined
+        {SizeStyle::kFixed, 13},         // OID
+        {SizeStyle::kFixed, 2},          // Bool
+        {SizeStyle::kFixed, 9},          // Date
+        {SizeStyle::kFixed, 1},          // Null
+        {SizeStyle::kRegEx},             // Regex
+        {SizeStyle::kIntPlusFixed, 17},  // DBRef
+        {SizeStyle::kIntPlusFixed, 5},   // Code
+        {SizeStyle::kIntPlusFixed, 5},   // Symbol
+        {SizeStyle::kIntPlusFixed, 1},   // CodeWScope
+        {SizeStyle::kFixed, 5},          // Int
+        {SizeStyle::kFixed, 9},          // Timestamp
+        {SizeStyle::kFixed, 9},          // Long
+        {SizeStyle::kFixed, 17},         // Decimal
+    };
+    MONGO_STATIC_ASSERT((sizeof(kSizeInfoTable) / sizeof(kSizeInfoTable[0])) == JSTypeMax + 1);
 
-    int x = 0;
-    switch (type()) {
-        case EOO:
-        case Undefined:
-        case jstNULL:
-        case MaxKey:
-        case MinKey:
-            break;
-        case mongo::Bool:
-            x = 1;
-            break;
-        case NumberInt:
-            x = 4;
-            break;
-        case bsonTimestamp:
-        case mongo::Date:
-        case NumberDouble:
-        case NumberLong:
-            x = 8;
-            break;
-        case NumberDecimal:
-            x = 16;
-            break;
-        case jstOID:
-            x = OID::kOIDSize;
-            break;
-        case Symbol:
-        case Code:
-        case mongo::String:
-            x = valuestrsize() + 4;
-            break;
-        case DBRef:
-            x = valuestrsize() + 4 + 12;
-            break;
-        case CodeWScope:
-        case Object:
-        case mongo::Array:
-            x = objsize();
-            break;
-        case BinData:
-            x = valuestrsize() + 4 + 1 /*subtype*/;
-            break;
-        case RegEx: {
-            const char* p = value();
-            size_t len1 = strlen(p);
-            p = p + len1 + 1;
-            size_t len2;
-            len2 = strlen(p);
-            x = (int)(len1 + 1 + len2 + 1);
-        } break;
-        default: {
-            StringBuilder ss;
-            ss << "BSONElement: bad type " << (int)type();
-            std::string msg = ss.str();
-            massert(10320, msg.c_str(), false);
+    // This is the start of the runtime code for this function. Everything above happens at compile
+    // time. This function attempts to push complex handling of unlikely events out-of-line to
+    // ensure that the common cases never need to spill any registers (at least on x64 with
+    // gcc-5.4), which reduces the function call overhead.
+    int8_t type = *data;
+    if (MONGO_unlikely(type < 0 || type > JSTypeMax)) {
+        if (MONGO_unlikely(type != MinKey && type != MaxKey)) {
+            msgAssertedBadType(type);
         }
-    }
-    totalSize = x + fieldNameSize() + 1;  // BSONType
 
-    return totalSize;
+        // MinKey and MaxKey should be treated the same as Null
+        type = jstNULL;
+    }
+
+    const auto sizeInfo = kSizeInfoTable[type];
+    if (sizeInfo.style == SizeStyle::kFixed)
+        return sizeInfo.bytes + fieldNameSize();
+    if (MONGO_likely(sizeInfo.style == SizeStyle::kIntPlusFixed))
+        return sizeInfo.bytes + fieldNameSize() + valuestrsize();
+
+    return [this, type]() NOINLINE_DECL {
+        // Regex is two c-strings back-to-back.
+        invariant(type == BSONType::RegEx);
+        const char* p = value();
+        size_t len1 = strlen(p);
+        p = p + len1 + 1;
+        size_t len2 = strlen(p);
+        return (len1 + 1 + len2 + 1) + fieldNameSize() + 1;
+    }();
 }
 
 std::string BSONElement::toString(bool includeFieldName, bool full) const {
@@ -744,21 +775,38 @@ void BSONElement::toString(
             s << "ObjectId('";
             s << __oid() << "')";
             break;
-        case BinData:
-            s << "BinData(" << binDataType() << ", ";
-            {
-                int len;
-                const char* data = binDataClean(len);
-                if (!full && len > 80) {
-                    s << toHex(data, 70) << "...)";
-                } else {
-                    s << toHex(data, len) << ")";
-                }
+        case BinData: {
+            int len;
+            const char* data = binDataClean(len);
+            // If the BinData is a correctly sized newUUID, display it as such.
+            if (binDataType() == newUUID && len == 16) {
+                // 4 Octets - 2 Octets - 2 Octets - 2 Octets - 6 Octets
+                s << "UUID(\"";
+                s << toHexLower(&data[0], 4);
+                s << "-";
+                s << toHexLower(&data[4], 2);
+                s << "-";
+                s << toHexLower(&data[6], 2);
+                s << "-";
+                s << toHexLower(&data[8], 2);
+                s << "-";
+                s << toHexLower(&data[10], 6);
+                s << "\")";
+                break;
             }
-            break;
-        case bsonTimestamp:
-            s << "Timestamp " << timestampTime().toMillisSinceEpoch() << "|" << timestampInc();
-            break;
+            s << "BinData(" << binDataType() << ", ";
+            if (!full && len > 80) {
+                s << toHex(data, 70) << "...)";
+            } else {
+                s << toHex(data, len) << ")";
+            }
+        } break;
+
+        case bsonTimestamp: {
+            // Convert from Milliseconds to Seconds for consistent Timestamp printing.
+            auto secs = duration_cast<Seconds>(timestampTime().toDurationSinceEpoch());
+            s << "Timestamp(" << secs.count() << ", " << timestampInc() << ")";
+        } break;
         default:
             s << "?type=" << type();
             break;
@@ -853,161 +901,6 @@ bool BSONObj::coerceVector(std::vector<T>* out) const {
         out->push_back(t);
     }
     return true;
-}
-
-/**
- * l and r must be same canonicalType when called.
- */
-int compareElementValues(const BSONElement& l,
-                         const BSONElement& r,
-                         const StringData::ComparatorInterface* comparator) {
-    int f;
-
-    switch (l.type()) {
-        case EOO:
-        case Undefined:  // EOO and Undefined are same canonicalType
-        case jstNULL:
-        case MaxKey:
-        case MinKey:
-            f = l.canonicalType() - r.canonicalType();
-            if (f < 0)
-                return -1;
-            return f == 0 ? 0 : 1;
-        case Bool:
-            return *l.value() - *r.value();
-        case bsonTimestamp:
-            // unsigned compare for timestamps - note they are not really dates but (ordinal +
-            // time_t)
-            if (l.timestamp() < r.timestamp())
-                return -1;
-            return l.timestamp() == r.timestamp() ? 0 : 1;
-        case Date:
-            // Signed comparisons for Dates.
-            {
-                const Date_t a = l.Date();
-                const Date_t b = r.Date();
-                if (a < b)
-                    return -1;
-                return a == b ? 0 : 1;
-            }
-
-        case NumberInt: {
-            // All types can precisely represent all NumberInts, so it is safe to simply convert to
-            // whatever rhs's type is.
-            switch (r.type()) {
-                case NumberInt:
-                    return compareInts(l._numberInt(), r._numberInt());
-                case NumberLong:
-                    return compareLongs(l._numberInt(), r._numberLong());
-                case NumberDouble:
-                    return compareDoubles(l._numberInt(), r._numberDouble());
-                case NumberDecimal:
-                    return compareIntToDecimal(l._numberInt(), r._numberDecimal());
-                default:
-                    invariant(false);
-            }
-        }
-
-        case NumberLong: {
-            switch (r.type()) {
-                case NumberLong:
-                    return compareLongs(l._numberLong(), r._numberLong());
-                case NumberInt:
-                    return compareLongs(l._numberLong(), r._numberInt());
-                case NumberDouble:
-                    return compareLongToDouble(l._numberLong(), r._numberDouble());
-                case NumberDecimal:
-                    return compareLongToDecimal(l._numberLong(), r._numberDecimal());
-                default:
-                    invariant(false);
-            }
-        }
-
-        case NumberDouble: {
-            switch (r.type()) {
-                case NumberDouble:
-                    return compareDoubles(l._numberDouble(), r._numberDouble());
-                case NumberInt:
-                    return compareDoubles(l._numberDouble(), r._numberInt());
-                case NumberLong:
-                    return compareDoubleToLong(l._numberDouble(), r._numberLong());
-                case NumberDecimal:
-                    return compareDoubleToDecimal(l._numberDouble(), r._numberDecimal());
-                default:
-                    invariant(false);
-            }
-        }
-
-        case NumberDecimal: {
-            switch (r.type()) {
-                case NumberDecimal:
-                    return compareDecimals(l._numberDecimal(), r._numberDecimal());
-                case NumberInt:
-                    return compareDecimalToInt(l._numberDecimal(), r._numberInt());
-                case NumberLong:
-                    return compareDecimalToLong(l._numberDecimal(), r._numberLong());
-                case NumberDouble:
-                    return compareDecimalToDouble(l._numberDecimal(), r._numberDouble());
-                default:
-                    invariant(false);
-            }
-        }
-
-        case jstOID:
-            return memcmp(l.value(), r.value(), OID::kOIDSize);
-        case Code:
-            return compareElementStringValues(l, r);
-        case Symbol:
-        case String: {
-            if (comparator) {
-                return comparator->compare(l.valueStringData(), r.valueStringData());
-            } else {
-                return compareElementStringValues(l, r);
-            }
-        }
-        case Object:
-        case Array:
-            // woCompare parameters: r, ordering, considerFieldName, comparator.
-            // r: the BSONObj to compare with.
-            // ordering: the sort directions for each key.
-            // considerFieldName: whether field names should be considered in comparison.
-            // comparator: used for all string comparisons, if non-null.
-            return l.embeddedObject().woCompare(r.embeddedObject(), BSONObj(), true, comparator);
-        case DBRef: {
-            int lsz = l.valuesize();
-            int rsz = r.valuesize();
-            if (lsz - rsz != 0)
-                return lsz - rsz;
-            return memcmp(l.value(), r.value(), lsz);
-        }
-        case BinData: {
-            int lsz = l.objsize();  // our bin data size in bytes, not including the subtype byte
-            int rsz = r.objsize();
-            if (lsz - rsz != 0)
-                return lsz - rsz;
-            return memcmp(l.value() + 4, r.value() + 4, lsz + 1 /*+1 for subtype byte*/);
-        }
-        case RegEx: {
-            int c = strcmp(l.regex(), r.regex());
-            if (c)
-                return c;
-            return strcmp(l.regexFlags(), r.regexFlags());
-        }
-        case CodeWScope: {
-            int cmp = StringData(l.codeWScopeCode(), l.codeWScopeCodeLen() - 1)
-                          .compare(StringData(r.codeWScopeCode(), r.codeWScopeCodeLen() - 1));
-            if (cmp)
-                return cmp;
-
-            // When comparing the scope object, we should consider field names. Special string
-            // comparison semantics do not apply to strings nested inside the CodeWScope scope
-            // object, so we do not pass through the string comparator.
-            return l.codeWScopeObject().woCompare(r.codeWScopeObject(), BSONObj(), true);
-        }
-        default:
-            verify(false);
-    }
-    return -1;
 }
 
 }  // namespace mongo

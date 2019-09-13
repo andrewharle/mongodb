@@ -1,5 +1,6 @@
 // SERVER-28594 Ensure non-atomic ops are individually logged in applyOps
 // and atomic ops are collectively logged in applyOps.
+// @tags: [requires_replication]
 (function() {
     "use strict";
 
@@ -28,7 +29,7 @@
         ]
     }));
     assert.eq(oplogColl.find({"o.applyOps": {"$exists": true}}).count(), 1);
-    assert.eq(oplogColl.find({"op": "i"}).count(), 0);
+    assert.eq(oplogColl.find({op: "i", ns: testColl.getFullName()}).count(), 0);
     // Ensure non-atomic apply ops logging produces an oplog entry for
     // each operation in the apply ops call and no record of applyOps
     // appears for these operations.
@@ -58,5 +59,22 @@
     }));
     assert.eq(oplogColl.find({"o.renameCollection": {"$exists": true}}).count(), 2);
     assert.eq(oplogColl.find({"o.applyOps": {"$exists": true}}).count(), 1);
+
+    // Ensure that applyOps respects the 'allowAtomic' boolean flag on CRUD operations that it would
+    // have applied atomically.
+    assert.commandWorked(testDB.createCollection(testColl.getName()));
+    assert.commandFailedWithCode(testDB.runCommand({applyOps: [], allowAtomic: 'must be boolean'}),
+                                 ErrorCodes.TypeMismatch,
+                                 'allowAtomic flag must be a boolean.');
+    assert.commandWorked(testDB.runCommand({
+        applyOps: [
+            {op: "i", ns: testColl.getFullName(), o: {_id: 3, a: "augh"}},
+            {op: "i", ns: testColl.getFullName(), o: {_id: 4, a: "blah"}}
+        ],
+        allowAtomic: false,
+    }));
+    assert.eq(oplogColl.find({"o.applyOps": {"$exists": true}}).count(), 1);
+    assert.eq(oplogColl.find({op: "i", ns: testColl.getFullName()}).count(), 2);
+
     rst.stopSet();
 })();

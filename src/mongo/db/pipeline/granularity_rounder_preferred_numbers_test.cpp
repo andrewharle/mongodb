@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -531,9 +533,9 @@ TEST(GranularityRounderPreferredNumbersTest, ShouldFailOnRoundingNonNumericValue
             GranularityRounder::getGranularityRounder(new ExpressionContextForTest(), series);
 
         // Make sure that each GranularityRounder fails when rounding a non-numeric value.
-        Value stringValue = Value("test");
-        ASSERT_THROWS_CODE(rounder->roundUp(stringValue), UserException, 40262);
-        ASSERT_THROWS_CODE(rounder->roundDown(stringValue), UserException, 40262);
+        Value stringValue = Value("test"_sd);
+        ASSERT_THROWS_CODE(rounder->roundUp(stringValue), AssertionException, 40262);
+        ASSERT_THROWS_CODE(rounder->roundDown(stringValue), AssertionException, 40262);
     }
 }
 
@@ -544,15 +546,15 @@ TEST(GranularityRounderPreferredNumbersTest, ShouldFailOnRoundingNaN) {
 
         // Make sure that each GranularityRounder fails when rounding NaN.
         Value nan = Value(std::nan("NaN"));
-        ASSERT_THROWS_CODE(rounder->roundUp(nan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundDown(nan), UserException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundUp(nan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundDown(nan), AssertionException, 40263);
 
         Value positiveNan = Value(Decimal128::kPositiveNaN);
         Value negativeNan = Value(Decimal128::kNegativeNaN);
-        ASSERT_THROWS_CODE(rounder->roundUp(positiveNan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundDown(positiveNan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundUp(negativeNan), UserException, 40263);
-        ASSERT_THROWS_CODE(rounder->roundDown(negativeNan), UserException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundUp(positiveNan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundDown(positiveNan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundUp(negativeNan), AssertionException, 40263);
+        ASSERT_THROWS_CODE(rounder->roundDown(negativeNan), AssertionException, 40263);
     }
 }
 
@@ -563,12 +565,12 @@ TEST(GranularityRounderPreferredNumbersTest, ShouldFailOnRoundingNegativeNumber)
 
         // Make sure that each GranularityRounder fails when rounding a negative number.
         Value negativeNumber = Value(-1);
-        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), UserException, 40268);
-        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), UserException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), AssertionException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), AssertionException, 40268);
 
         negativeNumber = Value(Decimal128(-1));
-        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), UserException, 40268);
-        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), UserException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundUp(negativeNumber), AssertionException, 40268);
+        ASSERT_THROWS_CODE(rounder->roundDown(negativeNumber), AssertionException, 40268);
     }
 }
 }  // namespace

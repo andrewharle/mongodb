@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 /**
@@ -31,11 +33,14 @@
  * the DBClientReplicaSet talks to, so the tests only covers the client side logic.
  */
 
+#include "mongo/platform/basic.h"
+
 #include <map>
 #include <memory>
 #include <string>
 #include <vector>
 
+#include "mongo/base/init.h"
 #include "mongo/base/string_data.h"
 #include "mongo/client/connpool.h"
 #include "mongo/client/dbclient_rs.h"
@@ -44,7 +49,6 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/dbtests/mock/mock_conn_registry.h"
 #include "mongo/dbtests/mock/mock_replica_set.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/stdx/unordered_set.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
@@ -59,14 +63,16 @@ using std::string;
 using std::unique_ptr;
 using std::vector;
 
+MONGO_INITIALIZER(DisableReplicaSetMonitorRefreshRetries)(InitializerContext*) {
+    ReplicaSetMonitor::disableRefreshRetries_forTest();
+    return Status::OK();
+}
+
 /**
  * Constructs a metadata object containing the passed server selection metadata.
  */
-BSONObj makeMetadata(ReadPreference rp, TagSet tagSet, bool secondaryOk) {
-    BSONObjBuilder metadataBob;
-    rpc::ServerSelectionMetadata ssm(secondaryOk, ReadPreferenceSetting(rp, tagSet));
-    uassertStatusOK(ssm.writeToMetadata(&metadataBob));
-    return metadataBob.obj();
+BSONObj makeMetadata(ReadPreference rp, TagSet tagSet) {
+    return ReadPreferenceSetting(rp, std::move(tagSet)).toContainingBSON();
 }
 
 /**
@@ -104,8 +110,8 @@ void assertOneOfNodesSelected(MockReplicaSet* replSet,
     bool secondaryOk = (rp != ReadPreference::PrimaryOnly);
     auto tagSet = secondaryOk ? TagSet() : TagSet::primaryOnly();
     // We need the command to be a "SecOk command"
-    auto res = replConn.runCommandWithMetadata(
-        "foo", "dbStats", makeMetadata(rp, tagSet, secondaryOk), BSON("dbStats" << 1));
+    auto res = replConn.runCommand(
+        OpMsgRequest::fromDBAndBody("foo", BSON("dbStats" << 1), makeMetadata(rp, tagSet)));
     stdx::unordered_set<HostAndPort> hostSet;
     for (const auto& hostName : hostNames) {
         hostSet.emplace(hostName);
@@ -228,13 +234,11 @@ private:
 
 void assertRunCommandWithReadPrefThrows(MockReplicaSet* replSet, ReadPreference rp) {
     bool isPrimaryOnly = (rp == ReadPreference::PrimaryOnly);
-
-    bool secondaryOk = !isPrimaryOnly;
     TagSet ts = isPrimaryOnly ? TagSet::primaryOnly() : TagSet();
 
     DBClientReplicaSet replConn(replSet->getSetName(), replSet->getHosts(), StringData());
-    ASSERT_THROWS(replConn.runCommandWithMetadata(
-                      "foo", "whoami", makeMetadata(rp, ts, secondaryOk), BSON("dbStats" << 1)),
+    ASSERT_THROWS(replConn.runCommand(OpMsgRequest::fromDBAndBody(
+                      "foo", BSON("dbStats" << 1), makeMetadata(rp, ts))),
                   AssertionException);
 }
 
@@ -543,6 +547,7 @@ protected:
             mongo::BSONObjBuilder newConfigBuilder;
             newConfigBuilder.append("_id", oldConfig.getReplSetName());
             newConfigBuilder.append("version", oldConfig.getConfigVersion());
+            newConfigBuilder.append("protocolVersion", 1);
 
             mongo::BSONArrayBuilder membersBuilder(newConfigBuilder.subarrayStart("members"));
             {

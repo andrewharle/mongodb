@@ -1,25 +1,27 @@
 // path.h
 
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,29 +42,76 @@ namespace mongo {
 
 class ElementPath {
 public:
-    Status init(StringData path);
+    /**
+     * Controls how the element path interacts with leaf arrays, e.g. how we will handle the path
+     * "a.b" when "b" is an array.
+     */
+    enum class LeafArrayBehavior {
+        // Matches against the elements of arrays at the end of the path (in addition to the array
+        // as a whole).
+        //
+        // For example, for the path "f" and document {f: [1, 2]}, causes the path iterator to
+        // return 1, 2, and [1, 2].
+        kTraverse,
 
-    void setTraverseNonleafArrays(bool b) {
-        _shouldTraverseNonleafArrays = b;
+        // Does not traverse arrays at the end of the path. For the path "f" and document {f: [1,
+        // 2]}, the path iterator returns only the entire array [1, 2].
+        kNoTraversal,
+    };
+
+    /**
+     * Controls how the element path interacts with non-leaf arrays, e.g. how we will handle the
+     * path "a.b" when "a" is an array.
+     */
+    enum class NonLeafArrayBehavior {
+        // Path traversal spans non-leaf arrays.
+        kTraverse,
+
+        // Path traversal stops at non-leaf array boundaries. The path iterator will return no
+        // elements.
+        kNoTraversal,
+
+        // Path traversal stops at non-leaf array boundaries. The path iterator will return the
+        // array element.
+        kMatchSubpath,
+    };
+
+    ElementPath(StringData path,
+                LeafArrayBehavior leafArrayBehavior = LeafArrayBehavior::kTraverse,
+                NonLeafArrayBehavior nonLeafArrayBehavior = NonLeafArrayBehavior::kTraverse)
+        : _leafArrayBehavior(leafArrayBehavior),
+          _nonLeafArrayBehavior(nonLeafArrayBehavior),
+          _fieldRef(path) {}
+
+    // TODO: replace uses of members below with regular construction.
+    ElementPath() {}
+    void init(StringData path);
+
+    void setLeafArrayBehavior(LeafArrayBehavior leafArrBehavior) {
+        _leafArrayBehavior = leafArrBehavior;
     }
-    void setTraverseLeafArray(bool b) {
-        _shouldTraverseLeafArray = b;
+
+    LeafArrayBehavior leafArrayBehavior() const {
+        return _leafArrayBehavior;
+    }
+
+    void setNonLeafArrayBehavior(NonLeafArrayBehavior value) {
+        _nonLeafArrayBehavior = value;
+    }
+
+    NonLeafArrayBehavior nonLeafArrayBehavior() const {
+        return _nonLeafArrayBehavior;
     }
 
     const FieldRef& fieldRef() const {
         return _fieldRef;
     }
-    bool shouldTraverseNonleafArrays() const {
-        return _shouldTraverseNonleafArrays;
-    }
-    bool shouldTraverseLeafArray() const {
-        return _shouldTraverseLeafArray;
-    }
 
 private:
+    LeafArrayBehavior _leafArrayBehavior;
+    NonLeafArrayBehavior _nonLeafArrayBehavior;
+
     FieldRef _fieldRef;
-    bool _shouldTraverseNonleafArrays;
-    bool _shouldTraverseLeafArray;
 };
 
 class ElementIterator {
@@ -71,7 +120,7 @@ public:
     public:
         void reset();
 
-        void reset(BSONElement element, BSONElement arrayOffset, bool outerArray);
+        void reset(BSONElement element, BSONElement arrayOffset);
 
         void setArrayOffset(BSONElement e) {
             _arrayOffset = e;
@@ -83,14 +132,10 @@ public:
         BSONElement arrayOffset() const {
             return _arrayOffset;
         }
-        bool outerArray() const {
-            return _outerArray;
-        }
 
     private:
         BSONElement _element;
         BSONElement _arrayOffset;
-        bool _outerArray;
     };
 
     virtual ~ElementIterator();
@@ -104,8 +149,9 @@ public:
 class SingleElementElementIterator : public ElementIterator {
 public:
     explicit SingleElementElementIterator(BSONElement e) : _seen(false) {
-        _element.reset(e, BSONElement(), false);
+        _element.reset(e, BSONElement());
     }
+
     virtual ~SingleElementElementIterator() {}
 
     virtual bool more() {
@@ -137,11 +183,28 @@ private:
 class BSONElementIterator : public ElementIterator {
 public:
     BSONElementIterator();
-    BSONElementIterator(const ElementPath* path, const BSONObj& context);
+
+    /**
+     * Constructs an iterator over 'elementToIterate', where the desired element(s) is/are at the
+     * end of the suffix of 'path' starting at 'suffixIndex'. For example, constructing a
+     * BSONElementIterator with path="a.b.c", suffixIndex=1, and 'elementToIterate' as the
+     * subdocument located at 'a' within the object {a: {b: [{c: 1}, {c: 2}]}} would iterate over
+     * the elements of {b: [{c: 1}, {c: 2}]} at the end of the path 'b.c'. 'elementToIterate' does
+     * not need to be of type Object, so it would also be valid to construct a BSONElementIterator
+     * with path="a.b" and 'elementToIterate' as the array within 'a.b'.
+     */
+    BSONElementIterator(const ElementPath* path, size_t suffixIndex, BSONElement elementToIterate);
+
+    /**
+     * Constructs an iterator over 'objectToIterate', where the desired element(s) is/are at the end
+     * of 'path'.
+     */
+    BSONElementIterator(const ElementPath* path, const BSONObj& objectToIterate);
 
     virtual ~BSONElementIterator();
 
-    void reset(const ElementPath* path, const BSONObj& context);
+    void reset(const ElementPath* path, size_t suffixIndex, BSONElement elementToIterate);
+    void reset(const ElementPath* path, const BSONObj& objectToIterate);
 
     bool more();
     Context next();
@@ -153,8 +216,22 @@ private:
      */
     bool subCursorHasMore();
 
+    /**
+     * Sets _traversalStart and _traversalStartIndex by traversing 'elementToIterate' along the
+     * suffix of '_path' starting at 'suffixIndex'.
+     */
+    void _setTraversalStart(size_t suffixIndex, BSONElement elementToIterate);
+
     const ElementPath* _path;
-    BSONObj _context;
+
+    // The element where we begin our iteration. This is either:
+    // -- The element at the end of _path.
+    // -- The first array element encountered along _path.
+    // -- EOO, if _path does not exist in the object/element we are exploring.
+    BSONElement _traversalStart;
+
+    // This index of _traversalStart in _path, or 0 if _traversalStart is EOO.
+    size_t _traversalStartIndex;
 
     enum State { BEGIN, IN_ARRAY, DONE } _state;
     Context _next;

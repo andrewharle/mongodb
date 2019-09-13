@@ -1,28 +1,31 @@
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -34,6 +37,7 @@
 #include "mongo/client/query.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/s/client/shard.h"
+#include "mongo/s/stale_exception.h"
 
 namespace mongo {
 
@@ -43,7 +47,6 @@ class DBClientCursorHolder;
 class OperationContext;
 struct ParallelConnectionMetadata;
 struct ParallelConnectionState;
-class StaleConfigException;
 
 struct CommandInfo {
     CommandInfo() = default;
@@ -91,7 +94,7 @@ public:
 
     ~ParallelSortClusteredCursor();
 
-    void init(OperationContext* txn);
+    void init(OperationContext* opCtx);
 
     bool more();
 
@@ -107,9 +110,9 @@ public:
 private:
     using ShardCursorsMap = std::map<ShardId, ParallelConnectionMetadata>;
 
-    void fullInit(OperationContext* txn);
-    void startInit(OperationContext* txn);
-    void finishInit(OperationContext* txn);
+    void fullInit(OperationContext* opCtx);
+    void startInit(OperationContext* opCtx);
+    void finishInit(OperationContext* opCtx);
 
     bool isCommand() {
         return NamespaceString(_qSpec.ns()).isCommand();
@@ -146,7 +149,7 @@ private:
      * set connection and the primary cannot be reached, the version
      * will not be set if the slaveOk flag is set.
      */
-    void setupVersionAndHandleSlaveOk(OperationContext* txn,
+    void setupVersionAndHandleSlaveOk(OperationContext* opCtx,
                                       std::shared_ptr<ParallelConnectionState> state /* in & out */,
                                       const ShardId& shardId,
                                       std::shared_ptr<Shard> primary /* in */,
@@ -166,8 +169,8 @@ private:
 };
 
 /**
- * Throws a RecvStaleConfigException wrapping the stale error document in this cursor when the
- * ShardConfigStale flag is set or a command returns a ErrorCodes::SendStaleConfig error code.
+ * Throws a StaleConfigException wrapping the stale error document in this cursor when the
+ * ShardConfigStale flag is set or a command returns a ErrorCodes::StaleConfig error code.
  */
 void throwCursorStale(DBClientCursor* cursor);
 

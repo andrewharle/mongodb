@@ -9,6 +9,9 @@
  * Each thread uses its own database, though sometimes threads may try to create databases with
  * names that only differ in case, expecting the appriopriate error code.
  */
+
+load('jstests/concurrency/fsm_workload_helpers/server_types.js');  // for isEphemeralForTest
+
 var $config = (function() {
 
     let data = {
@@ -137,6 +140,6 @@ var $config = (function() {
         // * 30 iterations worth of data to disk, or about 10GB, which can be slow on
         // test hosts.
         threadCount: 10,
-        iterations: 180, states, transitions,
+        iterations: 120, states, transitions,
     };
 })();

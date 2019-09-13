@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,7 +33,7 @@
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/query_solution.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/stdx/unordered_set.h"
 
 namespace mongo {
 
@@ -51,13 +53,13 @@ public:
      */
     static void getFields(const MatchExpression* node,
                           std::string prefix,
-                          unordered_set<std::string>* out);
+                          stdx::unordered_set<std::string>* out);
 
     /**
      * Find all indices prefixed by fields we have predicates over.  Only these indices are
      * useful in answering the query.
      */
-    static void findRelevantIndices(const unordered_set<std::string>& fields,
+    static void findRelevantIndices(const stdx::unordered_set<std::string>& fields,
                                     const std::vector<IndexEntry>& indices,
                                     std::vector<IndexEntry>* out);
 
@@ -83,8 +85,6 @@ public:
      * imply a path prefix).
      *
      * For an index to be useful to a predicate, the index must be compatible (see above).
-     *
-     * If an index is prefixed by the predicate's path, it's always useful.
      *
      * If an index is compound but not prefixed by a predicate's path, it's only useful if
      * there exists another predicate that 1. will use that index and 2. is related to the
@@ -130,6 +130,19 @@ public:
      */
     static void stripUnneededAssignments(MatchExpression* node,
                                          const std::vector<IndexEntry>& indices);
+
+    /**
+     * Returns true if the indexed field has any multikey components. Illegal to call unless
+     * 'indexedField' is present in the key pattern for 'index'.
+     */
+    static bool indexedFieldHasMultikeyComponents(StringData indexedField, const IndexEntry& index);
+
+    /**
+     * Some types of matches are not supported by any type of index. If this function returns
+     * false, then 'queryExpr' is definitely not supported for any type of index. If the function
+     * returns true then 'queryExpr' may (or may not) be supported by some index.
+     */
+    static bool logicalNodeMayBeSupportedByAnIndex(const MatchExpression* queryExpr);
 
 private:
     /**

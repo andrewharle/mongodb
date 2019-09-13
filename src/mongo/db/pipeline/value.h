@@ -1,29 +1,31 @@
+
 /**
- * Copyright (c) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -31,7 +33,7 @@
 #include "mongo/base/static_assert.h"
 #include "mongo/base/string_data.h"
 #include "mongo/db/pipeline/value_internal.h"
-#include "mongo/platform/unordered_set.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 class BSONElement;
@@ -99,7 +101,6 @@ public:
     explicit Value(const OID& value) : _storage(jstOID, value) {}
     explicit Value(StringData value) : _storage(String, value) {}
     explicit Value(const std::string& value) : _storage(String, StringData(value)) {}
-    explicit Value(const char* value) : _storage(String, StringData(value)) {}
     explicit Value(const Document& doc) : _storage(Object, doc) {}
     explicit Value(const BSONObj& obj);
     explicit Value(const BSONArray& arr);
@@ -117,10 +118,18 @@ public:
     explicit Value(const MinKeyLabeler&) : _storage(MinKey) {}        // MINKEY
     explicit Value(const MaxKeyLabeler&) : _storage(MaxKey) {}        // MAXKEY
     explicit Value(const Date_t& date) : _storage(Date, date.toMillisSinceEpoch()) {}
+    explicit Value(const UUID& uuid)
+        : _storage(BinData,
+                   BSONBinData(uuid.toCDR().data(), uuid.toCDR().length(), BinDataType::newUUID)) {}
+
+    explicit Value(const char*) = delete;  // Use StringData instead to prevent accidentally
+                                           // terminating the string at the first null byte.
 
     // TODO: add an unsafe version that can share storage with the BSONElement
     /// Deep-convert from BSONElement to Value
     explicit Value(const BSONElement& elem);
+
+    static constexpr StringData kISOFormatString = "%Y-%m-%dT%H:%M:%S.%LZ"_sd;
 
     /** Construct a long or integer-valued Value.
      *
@@ -162,6 +171,12 @@ public:
      */
     bool integral() const;
 
+    /**
+     * Returns true if this value is a numeric type that can be represented as a 64-bit integer,
+     * and false otherwise.
+     */
+    bool integral64Bit() const;
+
     /// Get the BSON type of the field.
     BSONType getType() const {
         return _storage.bsonType();
@@ -174,10 +189,13 @@ public:
     Decimal128 getDecimal() const;
     double getDouble() const;
     std::string getString() const;
+    // May contain embedded NUL bytes, the returned StringData is just a view into the string still
+    // owned by this Value.
+    StringData getStringData() const;
     Document getDocument() const;
     OID getOid() const;
     bool getBool() const;
-    long long getDate() const;  // in milliseconds
+    Date_t getDate() const;
     Timestamp getTimestamp() const;
     const char* getRegex() const;
     const char* getRegexFlags() const;
@@ -185,6 +203,9 @@ public:
     std::string getCode() const;
     int getInt() const;
     long long getLong() const;
+    UUID getUuid() const;
+    // The returned BSONBinData remains owned by this Value.
+    BSONBinData getBinData() const;
     const std::vector<Value>& getArray() const {
         return _storage.getArray();
     }
@@ -198,8 +219,8 @@ public:
 
     /**
      * Recursively serializes this value as a field in the object in 'builder' with the field name
-     * 'fieldName'. This function throws a UserException if the recursion exceeds the server's BSON
-     * depth limit.
+     * 'fieldName'. This function throws a AssertionException if the recursion exceeds the server's
+     * BSON depth limit.
      */
     void addToBsonObj(BSONObjBuilder* builder,
                       StringData fieldName,
@@ -207,7 +228,7 @@ public:
 
     /**
      * Recursively serializes this value as an element in the array in 'builder'. This function
-     * throws a UserException if the recursion exceeds the server's BSON depth limit.
+     * throws a AssertionException if the recursion exceeds the server's BSON depth limit.
      */
     void addToBsonArray(BSONArrayBuilder* builder, size_t recursionLevel = 1) const;
 
@@ -229,9 +250,7 @@ public:
     double coerceToDouble() const;
     Decimal128 coerceToDecimal() const;
     Timestamp coerceToTimestamp() const;
-    long long coerceToDate() const;
-    time_t coerceToTimeT() const;
-    tm coerceToTm() const;  // broken-out time struct (see man gmtime)
+    Date_t coerceToDate() const;
 
     //
     // Comparison API.
@@ -328,6 +347,11 @@ public:
         return *this;
     }
 
+    /// Members to support parsing/deserialization from IDL generated code.
+    void serializeForIDL(StringData fieldName, BSONObjBuilder* builder) const;
+    void serializeForIDL(BSONArrayBuilder* builder) const;
+    static Value deserializeForIDL(const BSONElement& element);
+
 private:
     /** This is a "honeypot" to prevent unexpected implicit conversions to the accepted argument
      *  types. bool is especially bad since without this it will accept any pointer.
@@ -339,8 +363,8 @@ private:
 
     explicit Value(const ValueStorage& storage) : _storage(storage) {}
 
-    // does no type checking
-    StringData getStringData() const;  // May contain embedded NUL bytes
+    // May contain embedded NUL bytes, does not check the type.
+    StringData getRawData() const;
 
     ValueStorage _storage;
     friend class MutableValue;  // gets and sets _storage.genericRCPtr
@@ -359,6 +383,16 @@ class ImplicitValue : public Value {
 public:
     template <typename T>
     ImplicitValue(T arg) : Value(std::move(arg)) {}
+
+    /**
+     * Converts a vector of Implicit values to a single Value object.
+     */
+    static Value convertToValue(const std::vector<ImplicitValue>& vec) {
+        std::vector<Value> values;
+        for_each(
+            vec.begin(), vec.end(), ([&](const ImplicitValue& val) { values.push_back(val); }));
+        return Value(values);
+    }
 };
 }
 
@@ -372,6 +406,11 @@ inline size_t Value::getArrayLength() const {
 }
 
 inline StringData Value::getStringData() const {
+    verify(getType() == String);
+    return getRawData();
+}
+
+inline StringData Value::getRawData() const {
     return _storage.getString();
 }
 
@@ -390,9 +429,9 @@ inline bool Value::getBool() const {
     return _storage.boolValue;
 }
 
-inline long long Value::getDate() const {
+inline Date_t Value::getDate() const {
     verify(getType() == Date);
-    return _storage.dateValue;
+    return Date_t::fromMillisSinceEpoch(_storage.dateValue);
 }
 
 inline Timestamp Value::getTimestamp() const {
@@ -434,4 +473,16 @@ inline long long Value::getLong() const {
     verify(type == NumberLong);
     return _storage.longValue;
 }
-};
+
+inline UUID Value::getUuid() const {
+    verify(_storage.binDataType() == BinDataType::newUUID);
+    auto stringData = _storage.getString();
+    return UUID::fromCDR({stringData.rawData(), stringData.size()});
+}
+
+inline BSONBinData Value::getBinData() const {
+    verify(getType() == BinData);
+    auto stringData = _storage.getString();
+    return BSONBinData(stringData.rawData(), stringData.size(), _storage.binDataType());
+}
+}  // namespace mongo

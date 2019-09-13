@@ -1,36 +1,39 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/db/query/parsed_projection.h"
 
 #include "mongo/db/json.h"
+#include "mongo/db/matcher/expression_always_boolean.h"
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/query/query_test_service_context.h"
 #include "mongo/unittest/unittest.h"
 #include <memory>
 
@@ -47,14 +50,17 @@ using namespace mongo;
 //
 
 unique_ptr<ParsedProjection> createParsedProjection(const BSONObj& query, const BSONObj& projObj) {
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
     const CollatorInterface* collator = nullptr;
+    const boost::intrusive_ptr<ExpressionContext> expCtx(
+        new ExpressionContext(opCtx.get(), collator));
     StatusWithMatchExpression statusWithMatcher =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+        MatchExpressionParser::parse(query, std::move(expCtx));
     ASSERT(statusWithMatcher.isOK());
     std::unique_ptr<MatchExpression> queryMatchExpr = std::move(statusWithMatcher.getValue());
     ParsedProjection* out = NULL;
-    Status status = ParsedProjection::make(
-        projObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    Status status = ParsedProjection::make(opCtx.get(), projObj, queryMatchExpr.get(), &out);
     if (!status.isOK()) {
         FAIL(mongoutils::str::stream() << "failed to parse projection " << projObj << " (query: "
                                        << query
@@ -78,14 +84,17 @@ unique_ptr<ParsedProjection> createParsedProjection(const char* queryStr, const 
 void assertInvalidProjection(const char* queryStr, const char* projStr) {
     BSONObj query = fromjson(queryStr);
     BSONObj projObj = fromjson(projStr);
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
     const CollatorInterface* collator = nullptr;
+    const boost::intrusive_ptr<ExpressionContext> expCtx(
+        new ExpressionContext(opCtx.get(), collator));
     StatusWithMatchExpression statusWithMatcher =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+        MatchExpressionParser::parse(query, std::move(expCtx));
     ASSERT(statusWithMatcher.isOK());
     std::unique_ptr<MatchExpression> queryMatchExpr = std::move(statusWithMatcher.getValue());
     ParsedProjection* out = NULL;
-    Status status = ParsedProjection::make(
-        projObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    Status status = ParsedProjection::make(opCtx.get(), projObj, queryMatchExpr.get(), &out);
     std::unique_ptr<ParsedProjection> destroy(out);
     ASSERT(!status.isOK());
 }
@@ -162,6 +171,24 @@ TEST(ParsedProjectionTest, InvalidPositionalOperatorProjections) {
     assertInvalidProjection("{a: [1, 2, 3]}", "{'.$': 1}");
 }
 
+TEST(ParsedProjectionTest, InvalidElemMatchTextProjection) {
+    assertInvalidProjection("{}", "{a: {$elemMatch: {$text: {$search: 'str'}}}}");
+}
+
+TEST(ParsedProjectionTest, InvalidElemMatchWhereProjection) {
+    assertInvalidProjection("{}", "{a: {$elemMatch: {$where: 'this.a == this.b'}}}");
+}
+
+TEST(ParsedProjectionTest, InvalidElemMatchGeoNearProjection) {
+    assertInvalidProjection(
+        "{}",
+        "{a: {$elemMatch: {$nearSphere: {$geometry: {type: 'Point', coordinates: [0, 0]}}}}}");
+}
+
+TEST(ParsedProjectionTest, InvalidElemMatchExprProjection) {
+    assertInvalidProjection("{}", "{a: {$elemMatch: {$expr: 5}}}");
+}
+
 TEST(ParsedProjectionTest, ValidPositionalOperatorProjections) {
     createParsedProjection("{a: 1}", "{'a.$': 1}");
     createParsedProjection("{a: 1}", "{'a.foo.bar.$': 1}");
@@ -185,20 +212,20 @@ TEST(ParsedProjectionTest, ValidPositionalOperatorProjections) {
 // to achieve the same effect.
 // Projection parser should handle this the same way as an empty path.
 TEST(ParsedProjectionTest, InvalidPositionalProjectionDefaultPathMatchExpression) {
-    unique_ptr<MatchExpression> queryMatchExpr(new FalseMatchExpression(""));
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
+    unique_ptr<MatchExpression> queryMatchExpr(new AlwaysFalseMatchExpression());
     ASSERT(NULL == queryMatchExpr->path().rawData());
 
     ParsedProjection* out = NULL;
     BSONObj projObj = fromjson("{'a.$': 1}");
-    Status status = ParsedProjection::make(
-        projObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    Status status = ParsedProjection::make(opCtx.get(), projObj, queryMatchExpr.get(), &out);
     ASSERT(!status.isOK());
     std::unique_ptr<ParsedProjection> destroy(out);
 
     // Projecting onto empty field should fail.
     BSONObj emptyFieldProjObj = fromjson("{'.$': 1}");
-    status = ParsedProjection::make(
-        emptyFieldProjObj, queryMatchExpr.get(), &out, ExtensionsCallbackDisallowExtensions());
+    status = ParsedProjection::make(opCtx.get(), emptyFieldProjObj, queryMatchExpr.get(), &out);
     ASSERT(!status.isOK());
 }
 

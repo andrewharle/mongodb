@@ -1,3 +1,5 @@
+// @tags: [does_not_support_stepdowns, requires_non_retryable_writes, requires_profiling]
+
 // Confirms that profiled delete execution contains all expected metrics with proper values.
 
 (function() {
@@ -31,7 +33,7 @@
     assert.eq(profileObj.ns, coll.getFullName(), tojson(profileObj));
     assert.eq(profileObj.op, "remove", tojson(profileObj));
     if (db.getMongo().writeMode() === "commands") {
-        assert.eq(profileObj.collation, {locale: "fr"}, tojson(profileObj));
+        assert.eq(profileObj.command.collation, {locale: "fr"}, tojson(profileObj));
     }
     assert.eq(profileObj.ndeleted, 1, tojson(profileObj));
     assert.eq(profileObj.keysExamined, 1, tojson(profileObj));

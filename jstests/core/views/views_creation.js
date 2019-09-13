@@ -1,4 +1,7 @@
 // Test the creation of views with various options.
+// @tags: [
+//   assumes_superuser_permissions,
+// ]
 
 (function() {
     "use strict";
@@ -13,9 +16,10 @@
     assert.eq(0, collNames.length, tojson(collNames));
 
     // You cannot create a view that starts with 'system.'.
-    assert.commandFailedWithCode(viewsDB.runCommand({create: "system.views", viewOn: "collection"}),
-                                 ErrorCodes.InvalidNamespace,
-                                 "Created an illegal view named 'system.views'");
+    assert.commandFailedWithCode(
+        viewsDB.runCommand({create: "system.special", viewOn: "collection"}),
+        ErrorCodes.InvalidNamespace,
+        "Created an illegal view named 'system.views'");
 
     // We don't run this check on MMAPv1 as it automatically creates a system.indexes collection
     // when creating a database, which causes this command to fail with NamespaceAlreadyExists.
@@ -29,7 +33,7 @@
     // Collections that start with 'system.' that are not special to MongoDB fail with a different
     // error code.
     assert.commandFailedWithCode(viewsDB.runCommand({create: "system.foo", viewOn: "collection"}),
-                                 ErrorCodes.BadValue,
+                                 ErrorCodes.InvalidNamespace,
                                  "Created an illegal view named 'system.foo'");
 
     // Create a collection for test purposes.
@@ -44,7 +48,7 @@
     collNames = viewsDB.getCollectionNames().filter((function(coll) {
         return !coll.startsWith("system.");
     }));
-    assert.eq(2, collNames.length, collNames);
+    assert.eq(2, collNames.length, tojson(collNames));
     let res = viewsDB.runCommand({listCollections: 1, filter: {type: "view"}});
     assert.commandWorked(res);
 
@@ -79,8 +83,8 @@
     assert.commandFailed(viewsDB.runCommand({create: "", viewOn: "collection", pipeline: pipe}));
     assert.commandFailedWithCode(
         viewsDB.runCommand({create: "system.local.new", viewOn: "collection", pipeline: pipe}),
-        ErrorCodes.BadValue);
+        ErrorCodes.InvalidNamespace);
     assert.commandFailedWithCode(
         viewsDB.runCommand({create: "dollar$", viewOn: "collection", pipeline: pipe}),
-        ErrorCodes.BadValue);
+        ErrorCodes.InvalidNamespace);
 }());

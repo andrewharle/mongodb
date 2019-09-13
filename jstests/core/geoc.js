@@ -1,3 +1,4 @@
+// @tags: [requires_getmore]
 
 t = db.geoc;
 t.drop();

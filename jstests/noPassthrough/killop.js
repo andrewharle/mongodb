@@ -1,4 +1,5 @@
 // Confirms basic killOp execution via mongod and mongos.
+// @tags: [requires_replication, requires_sharding]
 
 (function() {
     "use strict";
@@ -26,9 +27,9 @@
         assert.soon(
             function() {
                 const result =
-                    db.currentOp({"ns": dbName + "." + collName, "query.filter": {x: 1}});
+                    db.currentOp({"ns": dbName + "." + collName, "command.filter": {x: 1}});
                 assert.commandWorked(result);
-                if (result.inprog.length === 1) {
+                if (result.inprog.length === 1 && result.inprog[0].numYields > 0) {
                     opId = result.inprog[0].opid;
                     return true;
                 }
@@ -36,12 +37,13 @@
                 return false;
             },
             function() {
-                return "Failed to find operation in currentOp() output: " + tojson(db.currentOp());
+                return "Failed to find operation in currentOp() output: " +
+                    tojson(db.currentOp({"ns": dbName + "." + collName}));
             });
 
         assert.commandWorked(db.killOp(opId));
 
-        let result = db.currentOp({"ns": dbName + "." + collName, "query.filter": {x: 1}});
+        let result = db.currentOp({"ns": dbName + "." + collName, "command.filter": {x: 1}});
         assert.commandWorked(result);
         assert(result.inprog.length === 1, tojson(db.currentOp()));
         assert(result.inprog[0].hasOwnProperty("killPending"));

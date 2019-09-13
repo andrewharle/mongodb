@@ -8,8 +8,6 @@
  * where a $lookup or $graphLookup view that forms a cycle is created successfully.
  */
 
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');  // for dropCollections
-
 var $config = (function() {
 
     // Use the workload name as a prefix for the view names, since the workload name is assumed
@@ -22,13 +20,14 @@ var $config = (function() {
             return viewList[Random.randInt(viewList.length)];
         },
         getRandomViewPipeline: function() {
-            const lookupViewNs = this.getRandomView(this.viewList);
-            const index = Random.randInt(3);
+            const lookupViewNs1 = this.getRandomView(this.viewList);
+            const lookupViewNs2 = this.getRandomView(this.viewList);
+            const index = Random.randInt(4);
             switch (index) {
                 case 0:
                     return [{
                         $lookup: {
-                            from: lookupViewNs,
+                            from: lookupViewNs1,
                             localField: 'a',
                             foreignField: 'b',
                             as: 'result1'
@@ -36,15 +35,34 @@ var $config = (function() {
                     }];
                 case 1:
                     return [{
-                        $graphLookup: {
-                            from: lookupViewNs,
-                            startWith: '$a',
-                            connectFromField: 'a',
-                            connectToField: 'b',
+                        $lookup: {
+                            from: lookupViewNs1,
+                            let : {a1: '$a'},
+                            pipeline: [
+                                {$match: {$expr: {$eq: ["$$a1", "$b"]}}},
+                                {
+                                  $lookup: {
+                                      from: lookupViewNs2,
+                                      let : {b1: '$b'},
+                                      pipeline: [{$match: {$expr: {$eq: ["$$b1", "$b"]}}}],
+                                      as: "result2Inner"
+                                  }
+                                }
+                            ],
                             as: 'result2'
                         }
                     }];
                 case 2:
+                    return [{
+                        $graphLookup: {
+                            from: lookupViewNs1,
+                            startWith: '$a',
+                            connectFromField: 'a',
+                            connectToField: 'b',
+                            as: 'result3'
+                        }
+                    }];
+                case 3:
                     return [];
                 default:
                     assertAlways(false, "Invalid index: " + index);
@@ -80,7 +98,15 @@ var $config = (function() {
 
         function readFromView(db, collName) {
             const viewName = this.getRandomView(this.viewList);
-            assertAlways.commandWorked(db.runCommand({find: viewName}));
+            const res = db.runCommand({find: viewName});
+            // When initializing an aggregation on a view, the server briefly releases its
+            // collection lock before creating and iterating the cursor on the underlying namespace.
+            // In this short window of time, it's possible that that namespace has been dropped and
+            // replaced with a view.
+            // TODO (SERVER-35635): It would be more appropriate for the server to return
+            // OperationFailed, as CommandNotSupportedOnView is misleading.
+            assertAlways(res.ok === 1 || res.code === ErrorCodes.CommandNotSupportedOnView,
+                         () => tojson(res));
         }
 
         return {
@@ -111,11 +137,6 @@ var $config = (function() {
         }
     }
 
-    function teardown(db, collName, cluster) {
-        const pattern = new RegExp('^' + prefix + '[A-z]*$');
-        dropCollections(db, pattern);
-    }
-
     return {
         threadCount: 20,
         iterations: 100,
@@ -124,6 +145,5 @@ var $config = (function() {
         startState: 'readFromView',
         transitions: transitions,
         setup: setup,
-        teardown: teardown,
     };
 })();

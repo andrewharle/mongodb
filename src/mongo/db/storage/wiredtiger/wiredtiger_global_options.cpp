@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -55,6 +57,8 @@ Status WiredTigerGlobalOptions::add(moe::OptionSection* options) {
                            moe::Int,
                            "seconds to wait between each write to a statistics file in the dbpath; "
                            "0 means do not log statistics")
+        // FTDC supercedes WiredTiger's statistics logging.
+        .hidden()
         .validRange(0, 100000)
         .setDefault(moe::Value(0));
     wiredTigerOptions
@@ -75,6 +79,13 @@ Status WiredTigerGlobalOptions::add(moe::OptionSection* options) {
                            "WiredTiger storage engine custom "
                            "configuration settings")
         .hidden();
+    wiredTigerOptions
+        .addOptionChaining("storage.wiredTiger.engineConfig.maxCacheOverflowFileSizeGB",
+                           "wiredTigerMaxCacheOverflowFileSizeGB",
+                           moe::Double,
+                           "Maximum amount of disk space to use for cache overflow; "
+                           "Defaults to 0 (unbounded)")
+        .setDefault(moe::Value(0.0));
 
     // WiredTiger collection options
     wiredTigerOptions
@@ -138,6 +149,18 @@ Status WiredTigerGlobalOptions::store(const moe::Environment& params,
             params["storage.wiredTiger.engineConfig.configString"].as<std::string>();
         log() << "Engine custom option: " << wiredTigerGlobalOptions.engineConfig;
     }
+    if (params.count("storage.wiredTiger.engineConfig.maxCacheOverflowFileSizeGB")) {
+        const auto val =
+            params["storage.wiredTiger.engineConfig.maxCacheOverflowFileSizeGB"].as<double>();
+        const auto result = validateMaxCacheOverflowFileSizeGB(val);
+        if (result.isOK()) {
+            wiredTigerGlobalOptions.maxCacheOverflowFileSizeGB = val;
+            log() << "Max cache overflow file size custom option: "
+                  << wiredTigerGlobalOptions.maxCacheOverflowFileSizeGB;
+        } else {
+            return result;
+        }
+    }
 
     // WiredTiger collection options
     if (params.count("storage.wiredTiger.collectionConfig.blockCompressor")) {
@@ -159,6 +182,15 @@ Status WiredTigerGlobalOptions::store(const moe::Environment& params,
         wiredTigerGlobalOptions.indexConfig =
             params["storage.wiredTiger.indexConfig.configString"].as<std::string>();
         log() << "Index custom option: " << wiredTigerGlobalOptions.indexConfig;
+    }
+
+    return Status::OK();
+}
+
+Status WiredTigerGlobalOptions::validateMaxCacheOverflowFileSizeGB(double value) {
+    if (value != 0.0 && value < 0.1) {
+        return {ErrorCodes::BadValue,
+                "MaxCacheOverflowFileSizeGB must be either 0 (unbounded) or greater than 0.1."};
     }
 
     return Status::OK();

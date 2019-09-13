@@ -2,6 +2,8 @@
 
 Import("env")
 
+env = env.Clone()
+
 env.Library(
     target=[
         'command_status',
@@ -19,29 +21,21 @@ env.Library(
 
 env.Library(
     target=[
-        'document_range',
-    ],
-    source=[
-        'document_range.cpp'
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/server_options_core',
-    ],
-)
-
-env.Library(
-    target=[
         'protocol',
     ],
     source=[
+        'message.cpp',
+        'op_msg.cpp',
         'protocol.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/bson/util/bson_extract',
-        '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/wire_version',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/bson/util/bson_extract',
+        '$BUILD_DIR/mongo/db/bson/dotted_path_support',
+        '$BUILD_DIR/mongo/db/server_options_core',
     ],
 )
 
@@ -86,7 +80,8 @@ env.Library(
         'command_request_builder.cpp',
     ],
     LIBDEPS=[
-        'document_range',
+        '$BUILD_DIR/mongo/client/read_preference',
+        '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/util/net/network',
     ],
 )
@@ -100,7 +95,6 @@ env.Library(
         'legacy_request_builder.cpp',
     ],
     LIBDEPS=[
-        'document_range',
         'metadata',
         '$BUILD_DIR/mongo/db/dbmessage',
         '$BUILD_DIR/mongo/util/net/network',
@@ -117,7 +111,7 @@ env.Library(
         'reply_builder_interface.cpp',
     ],
     LIBDEPS=[
-        'document_range',
+        '$BUILD_DIR/mongo/db/server_options_core',
         '$BUILD_DIR/mongo/util/net/network',
     ],
 )
@@ -131,11 +125,11 @@ env.Library(
         'legacy_reply_builder.cpp'
     ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/s/common_s',
+        '$BUILD_DIR/mongo/util/net/network',
         'command_reply',
-        'document_range',
         'metadata',
         'object_check',
-        '$BUILD_DIR/mongo/util/net/network',
     ],
 )
 
@@ -145,9 +139,9 @@ env.Library(
     ],
     source=[
         'metadata.cpp',
-        'metadata/audit_metadata.cpp',
         'metadata/config_server_metadata.cpp',
-        'metadata/server_selection_metadata.cpp',
+        'metadata/egress_metadata_hook_list.cpp',
+        'metadata/logical_time_metadata.cpp',
         'metadata/sharding_metadata.cpp',
         'metadata/repl_set_metadata.cpp',
         'metadata/oplog_query_metadata.cpp',
@@ -155,11 +149,30 @@ env.Library(
     ],
     LIBDEPS=[
         'client_metadata',
+        'audit_metadata',
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/bson/util/bson_extract',
         '$BUILD_DIR/mongo/client/read_preference',
+        '$BUILD_DIR/mongo/db/logical_time_validator',
         '$BUILD_DIR/mongo/db/repl/optime',
-        '$BUILD_DIR/mongo/util/decorable',
+        '$BUILD_DIR/mongo/db/signed_logical_time',
+    ],
+)
+
+env.Clone().InjectModule("enterprise").Library(
+    target=[
+        'audit_metadata',
+    ],
+    source=[
+        'metadata/audit_metadata.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/bson/util/bson_extract',
+        '$BUILD_DIR/mongo/db/auth/auth_rolename',
+        '$BUILD_DIR/mongo/db/auth/user_name',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
     ],
 )
 
@@ -168,7 +181,9 @@ env.CppUnitTest(
         'rpc_metadata_test',
     ],
     source=[
-        'metadata/server_selection_metadata_test.cpp',
+        'metadata_test.cpp',
+        'metadata/egress_metadata_hook_list_test.cpp',
+        'metadata/logical_time_metadata_test.cpp',
         'metadata/sharding_metadata_test.cpp',
         'metadata/tracking_metadata_test.cpp',
     ],
@@ -185,13 +200,15 @@ env.CppUnitTest(
         'command_reply_test.cpp',
         'command_request_builder_test.cpp',
         'command_request_test.cpp',
+        'get_status_from_command_result_test.cpp',
         'legacy_request_test.cpp',
         'object_check_test.cpp',
+        'op_msg_test.cpp',
         'protocol_test.cpp',
         'reply_builder_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/client/clientdriver',
+        '$BUILD_DIR/mongo/client/clientdriver_minimal',
         'rpc',
     ],
 )
@@ -228,10 +245,10 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/transport/transport_layer_legacy',
+        '$BUILD_DIR/mongo/s/is_mongos',
+        '$BUILD_DIR/mongo/transport/transport_layer_common',
         "$BUILD_DIR/mongo/util/concurrency/spin_lock",
-        '$BUILD_DIR/mongo/util/decorable',
-        '$BUILD_DIR/mongo/util/net/hostandport',
+        '$BUILD_DIR/mongo/util/net/network',
         "$BUILD_DIR/mongo/util/processinfo",
     ],
 )
@@ -244,4 +261,17 @@ env.CppUnitTest(
     LIBDEPS=[
         'client_metadata',
     ]
+)
+
+env.CppIntegrationTest(
+    target='op_msg_integration_test',
+    source=[
+        'op_msg_integration_test.cpp',
+    ],
+    LIBDEPS=[
+        'protocol',
+        '$BUILD_DIR/mongo/client/clientdriver_network',
+        '$BUILD_DIR/mongo/transport/transport_layer_egress_init',
+        '$BUILD_DIR/mongo/util/version_impl',
+    ],
 )

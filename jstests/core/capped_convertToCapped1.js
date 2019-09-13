@@ -1,3 +1,11 @@
+/**
+ * @tags: [
+ *  requires_non_retryable_commands,
+ *  requires_fastcount,
+ *  requires_capped,
+ * ]
+ */
+
 // test cloneCollectionAsCapped
 
 source = db.capped_convertToCapped1;

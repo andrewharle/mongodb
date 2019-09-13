@@ -40,19 +40,16 @@
 
     jsTestLog("Wait long enough for the secondary to call for an election.");
     checkLog.contains(secondary, "can see a healthy primary");
+    checkLog.contains(secondary, "not running for primary");
 
     jsTestLog("Verify the primary and secondary do not change during the partition.");
     assert.eq(primary, replTest.getPrimary());
     assert.eq(secondary, replTest.getSecondary());
 
+    checkLog.contains(secondary, "not running for primary");
+
     jsTestLog("Heal the partition.");
     primary.reconnect(secondary);
-
-    jsTestLog("Verify the primary and secondary did not change and are in the initial term.");
-    assert.eq(primary, replTest.getPrimary());
-    assert.eq(secondary, replTest.getSecondary());
-    assert.eq(initialTerm, getTerm(primary));
-    assert.eq(initialTerm, getTerm(secondary));
 
     replTest.stopSet();
 })();

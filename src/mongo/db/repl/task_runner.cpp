@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,13 +36,12 @@
 
 #include <memory>
 
-#include "mongo/db/auth/authorization_manager_global.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/service_context.h"
 #include "mongo/util/assert_util.h"
-#include "mongo/util/concurrency/old_thread_pool.h"
 #include "mongo/util/concurrency/thread_name.h"
 #include "mongo/util/destructor_guard.h"
 #include "mongo/util/log.h"
@@ -60,10 +61,10 @@ using LockGuard = stdx::lock_guard<stdx::mutex>;
  * next action of kCancel.
  */
 TaskRunner::NextAction runSingleTask(const TaskRunner::Task& task,
-                                     OperationContext* txn,
+                                     OperationContext* opCtx,
                                      const Status& status) {
     try {
-        return task(txn, status);
+        return task(opCtx, status);
     } catch (...) {
         log() << "Unhandled exception in task runner: " << redact(exceptionToStatus());
     }
@@ -74,10 +75,10 @@ TaskRunner::NextAction runSingleTask(const TaskRunner::Task& task,
 
 // static
 TaskRunner::Task TaskRunner::makeCancelTask() {
-    return [](OperationContext* txn, const Status& status) { return NextAction::kCancel; };
+    return [](OperationContext* opCtx, const Status& status) { return NextAction::kCancel; };
 }
 
-TaskRunner::TaskRunner(OldThreadPool* threadPool)
+TaskRunner::TaskRunner(ThreadPool* threadPool)
     : _threadPool(threadPool), _active(false), _cancelRequested(false) {
     uassert(ErrorCodes::BadValue, "null thread pool", threadPool);
 }
@@ -113,7 +114,7 @@ void TaskRunner::schedule(const Task& task) {
         return;
     }
 
-    _threadPool->schedule(stdx::bind(&TaskRunner::_runTasks, this));
+    invariant(_threadPool->schedule([this] { _runTasks(); }));
 
     _active = true;
     _cancelRequested = false;
@@ -136,19 +137,19 @@ void TaskRunner::_runTasks() {
     Client::initThreadIfNotAlready();
     Client* client = &cc();
     if (AuthorizationManager::get(client->getServiceContext())->isAuthEnabled()) {
-        AuthorizationSession::get(client)->grantInternalAuthorization();
+        AuthorizationSession::get(client)->grantInternalAuthorization(client);
     }
-    ServiceContext::UniqueOperationContext txn;
+    ServiceContext::UniqueOperationContext opCtx;
 
     while (Task task = _waitForNextTask()) {
-        if (!txn) {
-            txn = client->makeOperationContext();
+        if (!opCtx) {
+            opCtx = client->makeOperationContext();
         }
 
-        NextAction nextAction = runSingleTask(task, txn.get(), Status::OK());
+        NextAction nextAction = runSingleTask(task, opCtx.get(), Status::OK());
 
         if (nextAction != NextAction::kKeepOperationContext) {
-            txn.reset();
+            opCtx.reset();
         }
 
         if (nextAction == NextAction::kCancel) {
@@ -164,7 +165,7 @@ void TaskRunner::_runTasks() {
             }
         }
     }
-    txn.reset();
+    opCtx.reset();
 
     std::list<Task> tasks;
     UniqueLock lk{_mutex};
@@ -218,13 +219,13 @@ Status TaskRunner::runSynchronousTask(SynchronousTask func, TaskRunner::NextActi
     stdx::condition_variable waitTillDoneCond;
 
     Status returnStatus{Status::OK()};
-    this->schedule([&](OperationContext* txn, const Status taskStatus) {
+    this->schedule([&](OperationContext* opCtx, const Status taskStatus) {
         if (!taskStatus.isOK()) {
             returnStatus = taskStatus;
         } else {
             // Run supplied function.
             try {
-                returnStatus = func(txn);
+                returnStatus = func(opCtx);
             } catch (...) {
                 returnStatus = exceptionToStatus();
                 error() << "Exception thrown in runSynchronousTask: " << redact(returnStatus);

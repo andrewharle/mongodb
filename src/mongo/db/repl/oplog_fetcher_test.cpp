@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,15 +32,14 @@
 
 #include <memory>
 
-#include "mongo/base/disallow_copying.h"
+#include "mongo/db/repl/abstract_oplog_fetcher_test_fixture.h"
 #include "mongo/db/repl/data_replicator_external_state_mock.h"
 #include "mongo/db/repl/oplog_fetcher.h"
-#include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/metadata/oplog_query_metadata.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/unittest/ensure_fcv.h"
 #include "mongo/unittest/task_executor_proxy.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/scopeguard.h"
@@ -53,45 +54,20 @@ using executor::RemoteCommandRequest;
 using executor::RemoteCommandResponse;
 using NetworkGuard = executor::NetworkInterfaceMock::InNetworkGuard;
 
-class ShutdownState {
-    MONGO_DISALLOW_COPYING(ShutdownState);
-
-public:
-    ShutdownState();
-
-    Status getStatus() const;
-    OpTimeWithHash getLastFetched() const;
-
-    /**
-     * Use this for oplog fetcher shutdown callback.
-     */
-    void operator()(const Status& status, const OpTimeWithHash& lastFetched);
-
-private:
-    Status _status = executor::TaskExecutorTest::getDetectableErrorStatus();
-    OpTimeWithHash _lastFetched = {0, OpTime()};
-};
-
-class OplogFetcherTest : public executor::ThreadPoolExecutorTest {
+class OplogFetcherTest : public AbstractOplogFetcherTest {
 protected:
     void setUp() override;
-    void tearDown() override;
-
-    /**
-     * Schedules network response and instructs network interface to process response.
-     * Returns remote command request in network request.
-     */
-    RemoteCommandRequest processNetworkResponse(RemoteCommandResponse response,
-                                                bool expectReadyRequestsAfterProcessing = false);
-    RemoteCommandRequest processNetworkResponse(BSONObj obj,
-                                                bool expectReadyRequestsAfterProcessing = false);
 
     /**
      * Starts an oplog fetcher. Processes a single batch of results from
      * the oplog query and shuts down.
      * Returns shutdown state.
      */
-    std::unique_ptr<ShutdownState> processSingleBatch(RemoteCommandResponse response,
+
+    // 16MB max batch size / 12 byte min doc size * 10 (for good measure) = defaultBatchSize to use.
+    const int defaultBatchSize = (16 * 1024 * 1024) / 12 * 10;
+
+    std::unique_ptr<ShutdownState> processSingleBatch(executor::RemoteCommandResponse response,
                                                       bool requireFresherSyncSource = true);
     std::unique_ptr<ShutdownState> processSingleBatch(BSONObj obj,
                                                       bool requireFresherSyncSource = true);
@@ -114,9 +90,8 @@ protected:
      * Tests handling of two batches of operations returned from query.
      * Returns getMore request.
      */
-    RemoteCommandRequest testTwoBatchHandling(bool isV1ElectionProtocol);
+    RemoteCommandRequest testTwoBatchHandling();
 
-    OpTimeWithHash lastFetched;
     OpTime remoteNewerOpTime;
     OpTime staleOpTime;
     int rbid;
@@ -126,28 +101,13 @@ protected:
     Fetcher::Documents lastEnqueuedDocuments;
     OplogFetcher::DocumentsInfo lastEnqueuedDocumentsInfo;
     OplogFetcher::EnqueueDocumentsFn enqueueDocumentsFn;
+
+    std::unique_ptr<OplogFetcher> makeOplogFetcher(ReplSetConfig config);
 };
 
-ShutdownState::ShutdownState() = default;
-
-Status ShutdownState::getStatus() const {
-    return _status;
-}
-
-OpTimeWithHash ShutdownState::getLastFetched() const {
-    return _lastFetched;
-}
-
-void ShutdownState::operator()(const Status& status, const OpTimeWithHash& lastFetched) {
-    _status = status;
-    _lastFetched = lastFetched;
-}
-
 void OplogFetcherTest::setUp() {
-    executor::ThreadPoolExecutorTest::setUp();
-    launchExecutorThread();
+    AbstractOplogFetcherTest::setUp();
 
-    lastFetched = {456LL, {{123, 0}, 1}};
     remoteNewerOpTime = {{124, 1}, 2};
     staleOpTime = {{1, 1}, 0};
     rbid = 2;
@@ -165,31 +125,6 @@ void OplogFetcherTest::setUp() {
     };
 }
 
-void OplogFetcherTest::tearDown() {
-    executor::ThreadPoolExecutorTest::tearDown();
-}
-
-RemoteCommandRequest OplogFetcherTest::processNetworkResponse(
-    RemoteCommandResponse response, bool expectReadyRequestsAfterProcessing) {
-
-    auto net = getNet();
-    NetworkGuard guard(net);
-    log() << "scheduling response.";
-    auto request = net->scheduleSuccessfulResponse(response);
-    log() << "running network ops.";
-    net->runReadyNetworkOperations();
-    log() << "checking for more requests";
-    ASSERT_EQUALS(expectReadyRequestsAfterProcessing, net->hasReadyRequests());
-    log() << "returning consumed request";
-    return request;
-}
-
-RemoteCommandRequest OplogFetcherTest::processNetworkResponse(
-    BSONObj obj, bool expectReadyRequestsAfterProcessing) {
-    return processNetworkResponse({obj, rpc::makeEmptyMetadata(), Milliseconds(0)},
-                                  expectReadyRequestsAfterProcessing);
-}
-
 BSONObj OplogFetcherTest::makeOplogQueryMetadataObject(OpTime lastAppliedOpTime,
                                                        int rbid,
                                                        int primaryIndex,
@@ -204,18 +139,11 @@ BSONObj OplogFetcherTest::makeOplogQueryMetadataObject(OpTime lastAppliedOpTime,
 HostAndPort source("localhost:12345");
 NamespaceString nss("local.oplog.rs");
 
-// For testing, set these network timeouts to match the defaults in the OplogFetcher.
-const Milliseconds kNetworkTimeoutBufferMS{5000};
-const Milliseconds initialFindMaxTime = Milliseconds(60000);
-const Milliseconds retriedFindMaxTime = Milliseconds(2000);
-
-ReplSetConfig _createConfig(bool isV1ElectionProtocol) {
+ReplSetConfig _createConfig() {
     BSONObjBuilder bob;
     bob.append("_id", "myset");
     bob.append("version", 1);
-    if (isV1ElectionProtocol) {
-        bob.append("protocolVersion", 1);
-    }
+    bob.append("protocolVersion", 1);
     {
         BSONArrayBuilder membersBob(bob.subarrayStart("members"));
         BSONObjBuilder(membersBob.subobjStart())
@@ -240,13 +168,14 @@ std::unique_ptr<ShutdownState> OplogFetcherTest::processSingleBatch(RemoteComman
                               lastFetched,
                               source,
                               nss,
-                              _createConfig(true),
+                              _createConfig(),
                               0,
                               rbid,
                               requireFresherSyncSource,
                               dataReplicatorExternalState.get(),
                               enqueueDocumentsFn,
-                              stdx::ref(*shutdownState));
+                              stdx::ref(*shutdownState),
+                              defaultBatchSize);
 
     ASSERT_FALSE(oplogFetcher.isActive());
     ASSERT_OK(oplogFetcher.startup());
@@ -269,128 +198,6 @@ std::unique_ptr<ShutdownState> OplogFetcherTest::processSingleBatch(BSONObj obj,
                               requireFresherSyncSource);
 }
 
-TEST_F(OplogFetcherTest, InvalidConstruction) {
-    // Null start timestamp.
-    ASSERT_THROWS_CODE_AND_WHAT(OplogFetcher(&getExecutor(),
-                                             OpTimeWithHash(),
-                                             source,
-                                             nss,
-                                             _createConfig(true),
-                                             0,
-                                             -1,
-                                             true,
-                                             dataReplicatorExternalState.get(),
-                                             enqueueDocumentsFn,
-                                             [](Status, OpTimeWithHash) {}),
-                                UserException,
-                                ErrorCodes::BadValue,
-                                "null last optime fetched");
-
-    // Null EnqueueDocumentsFn.
-    ASSERT_THROWS_CODE_AND_WHAT(OplogFetcher(&getExecutor(),
-                                             lastFetched,
-                                             source,
-                                             nss,
-                                             _createConfig(true),
-                                             0,
-                                             -1,
-                                             true,
-                                             dataReplicatorExternalState.get(),
-                                             OplogFetcher::EnqueueDocumentsFn(),
-                                             [](Status, OpTimeWithHash) {}),
-                                UserException,
-                                ErrorCodes::BadValue,
-                                "null enqueueDocuments function");
-
-    // Uninitialized replica set configuration.
-    ASSERT_THROWS_CODE_AND_WHAT(OplogFetcher(&getExecutor(),
-                                             lastFetched,
-                                             source,
-                                             nss,
-                                             ReplSetConfig(),
-                                             0,
-                                             -1,
-                                             true,
-                                             dataReplicatorExternalState.get(),
-                                             enqueueDocumentsFn,
-                                             [](Status, OpTimeWithHash) {}),
-                                UserException,
-                                ErrorCodes::InvalidReplicaSetConfig,
-                                "uninitialized replica set configuration");
-
-    // Null OnShutdownCallbackFn.
-    ASSERT_THROWS_CODE_AND_WHAT(OplogFetcher(&getExecutor(),
-                                             lastFetched,
-                                             source,
-                                             nss,
-                                             _createConfig(true),
-                                             0,
-                                             -1,
-                                             true,
-                                             dataReplicatorExternalState.get(),
-                                             enqueueDocumentsFn,
-                                             OplogFetcher::OnShutdownCallbackFn()),
-                                UserException,
-                                ErrorCodes::BadValue,
-                                "null onShutdownCallback function");
-}
-
-TEST_F(OplogFetcherTest, StartupWhenActiveReturnsIllegalOperation) {
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              lastFetched,
-                              source,
-                              nss,
-                              _createConfig(true),
-                              0,
-                              -1,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              [](Status, OpTimeWithHash) {});
-    ASSERT_OK(oplogFetcher.startup());
-    ASSERT_TRUE(oplogFetcher.isActive());
-    auto status = oplogFetcher.startup();
-    getExecutor().shutdown();
-    ASSERT_EQUALS(ErrorCodes::InternalError, status);
-    ASSERT_STRING_CONTAINS(status.reason(), "oplog fetcher already started");
-}
-
-TEST_F(OplogFetcherTest, ShutdownAfterStartupTransitionsToShuttingDownState) {
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              lastFetched,
-                              source,
-                              nss,
-                              _createConfig(true),
-                              0,
-                              -1,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              [](Status, OpTimeWithHash) {});
-    ASSERT_OK(oplogFetcher.startup());
-    ASSERT_TRUE(oplogFetcher.isActive());
-    oplogFetcher.shutdown();
-    ASSERT_EQUALS(OplogFetcher::State::kShuttingDown, oplogFetcher.getState_forTest());
-    getExecutor().shutdown();
-}
-
-TEST_F(OplogFetcherTest, StartupWhenShuttingDownReturnsShutdownInProgress) {
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              lastFetched,
-                              source,
-                              nss,
-                              _createConfig(true),
-                              0,
-                              -1,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              [](Status, OpTimeWithHash) {});
-    oplogFetcher.shutdown();
-    ASSERT_EQUALS(OplogFetcher::State::kComplete, oplogFetcher.getState_forTest());
-    ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, oplogFetcher.startup());
-}
-
 void _checkDefaultCommandObjectFields(BSONObj cmdObj) {
     ASSERT_EQUALS(std::string("find"), cmdObj.firstElementFieldName());
     ASSERT_TRUE(cmdObj.getBoolField("tailable"));
@@ -399,21 +206,25 @@ void _checkDefaultCommandObjectFields(BSONObj cmdObj) {
     ASSERT_EQUALS(60000, cmdObj.getIntField("maxTimeMS"));
 }
 
+std::unique_ptr<OplogFetcher> OplogFetcherTest::makeOplogFetcher(ReplSetConfig config) {
+    return stdx::make_unique<OplogFetcher>(&getExecutor(),
+                                           lastFetched,
+                                           source,
+                                           nss,
+                                           config,
+                                           0,
+                                           -1,
+                                           true,
+                                           dataReplicatorExternalState.get(),
+                                           enqueueDocumentsFn,
+                                           [](Status) {},
+                                           defaultBatchSize);
+}
+
 TEST_F(
     OplogFetcherTest,
-    CommandObjectContainsTermAndStartTimestampIfGetCurrentTermAndLastCommittedOpTimeReturnsValidTerm) {
-    auto cmdObj = OplogFetcher(&getExecutor(),
-                               lastFetched,
-                               source,
-                               nss,
-                               _createConfig(true),
-                               0,
-                               -1,
-                               true,
-                               dataReplicatorExternalState.get(),
-                               enqueueDocumentsFn,
-                               [](Status, OpTimeWithHash) {})
-                      .getCommandObject_forTest();
+    FindQueryContainsTermAndStartTimestampIfGetCurrentTermAndLastCommittedOpTimeReturnsValidTerm) {
+    auto cmdObj = makeOplogFetcher(_createConfig())->getFindQuery_forTest();
     ASSERT_EQUALS(mongo::BSONType::Object, cmdObj["filter"].type());
     ASSERT_BSONOBJ_EQ(BSON("ts" << BSON("$gte" << lastFetched.opTime.getTimestamp())),
                       cmdObj["filter"].Obj());
@@ -421,22 +232,10 @@ TEST_F(
     _checkDefaultCommandObjectFields(cmdObj);
 }
 
-TEST_F(
-    OplogFetcherTest,
-    CommandObjectContainsDoesNotContainTermIfGetCurrentTermAndLastCommittedOpTimeReturnsUninitializedTerm) {
+TEST_F(OplogFetcherTest,
+       FindQueryDoesNotContainTermIfGetCurrentTermAndLastCommittedOpTimeReturnsUninitializedTerm) {
     dataReplicatorExternalState->currentTerm = OpTime::kUninitializedTerm;
-    auto cmdObj = OplogFetcher(&getExecutor(),
-                               lastFetched,
-                               source,
-                               nss,
-                               _createConfig(true),
-                               0,
-                               -1,
-                               true,
-                               dataReplicatorExternalState.get(),
-                               enqueueDocumentsFn,
-                               [](Status, OpTimeWithHash) {})
-                      .getCommandObject_forTest();
+    auto cmdObj = makeOplogFetcher(_createConfig())->getFindQuery_forTest();
     ASSERT_EQUALS(mongo::BSONType::Object, cmdObj["filter"].type());
     ASSERT_BSONOBJ_EQ(BSON("ts" << BSON("$gte" << lastFetched.opTime.getTimestamp())),
                       cmdObj["filter"].Obj());
@@ -445,163 +244,16 @@ TEST_F(
 }
 
 TEST_F(OplogFetcherTest, MetadataObjectContainsMetadataFieldsUnderProtocolVersion1) {
-    auto metadataObj = OplogFetcher(&getExecutor(),
-                                    lastFetched,
-                                    source,
-                                    nss,
-                                    _createConfig(true),
-                                    0,
-                                    -1,
-                                    true,
-                                    dataReplicatorExternalState.get(),
-                                    enqueueDocumentsFn,
-                                    [](Status, OpTimeWithHash) {})
-                           .getMetadataObject_forTest();
+    auto metadataObj = makeOplogFetcher(_createConfig())->getMetadataObject_forTest();
     ASSERT_EQUALS(3, metadataObj.nFields());
     ASSERT_EQUALS(1, metadataObj[rpc::kReplSetMetadataFieldName].numberInt());
     ASSERT_EQUALS(1, metadataObj[rpc::kOplogQueryMetadataFieldName].numberInt());
 }
 
-TEST_F(OplogFetcherTest, MetadataObjectIsEmptyUnderProtocolVersion0) {
-    auto metadataObj = OplogFetcher(&getExecutor(),
-                                    lastFetched,
-                                    source,
-                                    nss,
-                                    _createConfig(false),
-                                    0,
-                                    -1,
-                                    true,
-                                    dataReplicatorExternalState.get(),
-                                    enqueueDocumentsFn,
-                                    [](Status, OpTimeWithHash) {})
-                           .getMetadataObject_forTest();
-    ASSERT_BSONOBJ_EQ(BSON(rpc::ServerSelectionMetadata::fieldName()
-                           << BSON(rpc::ServerSelectionMetadata::kSecondaryOkFieldName << 1)),
-                      metadataObj);
-}
-
 TEST_F(OplogFetcherTest, AwaitDataTimeoutShouldEqualHalfElectionTimeoutUnderProtocolVersion1) {
-    auto config = _createConfig(true);
-    auto timeout = OplogFetcher(&getExecutor(),
-                                lastFetched,
-                                source,
-                                nss,
-                                config,
-                                0,
-                                -1,
-                                true,
-                                dataReplicatorExternalState.get(),
-                                enqueueDocumentsFn,
-                                [](Status, OpTimeWithHash) {})
-                       .getAwaitDataTimeout_forTest();
+    auto config = _createConfig();
+    auto timeout = makeOplogFetcher(config)->getAwaitDataTimeout_forTest();
     ASSERT_EQUALS(config.getElectionTimeoutPeriod() / 2, timeout);
-}
-
-TEST_F(OplogFetcherTest, AwaitDataTimeoutShouldBeAConstantUnderProtocolVersion0) {
-    auto timeout = OplogFetcher(&getExecutor(),
-                                lastFetched,
-                                source,
-                                nss,
-                                _createConfig(false),
-                                0,
-                                -1,
-                                true,
-                                dataReplicatorExternalState.get(),
-                                enqueueDocumentsFn,
-                                [](Status, OpTimeWithHash) {})
-                       .getAwaitDataTimeout_forTest();
-    ASSERT_EQUALS(OplogFetcher::kDefaultProtocolZeroAwaitDataTimeout, timeout);
-}
-
-TEST_F(OplogFetcherTest, ShuttingExecutorDownShouldPreventOplogFetcherFromStarting) {
-    getExecutor().shutdown();
-
-
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              lastFetched,
-                              source,
-                              nss,
-                              _createConfig(true),
-                              0,
-                              -1,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              [](Status, OpTimeWithHash) {});
-
-    // Last optime and hash fetched should match values passed to constructor.
-    ASSERT_EQUALS(lastFetched, oplogFetcher.getLastOpTimeWithHashFetched());
-
-    ASSERT_FALSE(oplogFetcher.isActive());
-    ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, oplogFetcher.startup());
-    ASSERT_FALSE(oplogFetcher.isActive());
-
-    // Last optime and hash fetched should not change.
-    ASSERT_EQUALS(lastFetched, oplogFetcher.getLastOpTimeWithHashFetched());
-}
-
-TEST_F(OplogFetcherTest, ShuttingExecutorDownAfterStartupStopsTheOplogFetcher) {
-    ShutdownState shutdownState;
-
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              lastFetched,
-                              source,
-                              nss,
-                              _createConfig(true),
-                              0,
-                              -1,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              stdx::ref(shutdownState));
-
-    ASSERT_FALSE(oplogFetcher.isActive());
-    ASSERT_OK(oplogFetcher.startup());
-    ASSERT_TRUE(oplogFetcher.isActive());
-
-    getExecutor().shutdown();
-
-    oplogFetcher.join();
-
-    ASSERT_EQUALS(ErrorCodes::CallbackCanceled, shutdownState.getStatus());
-    ASSERT_EQUALS(lastFetched, shutdownState.getLastFetched());
-}
-
-BSONObj makeNoopOplogEntry(OpTimeWithHash opTimeWithHash) {
-    BSONObjBuilder bob;
-    bob.appendElements(opTimeWithHash.opTime.toBSON());
-    bob.append("h", opTimeWithHash.value);
-    bob.append("op", "c");
-    bob.append("ns", "test.t");
-    return bob.obj();
-}
-
-BSONObj makeNoopOplogEntry(OpTime opTime, long long hash) {
-    return makeNoopOplogEntry({hash, opTime});
-}
-
-BSONObj makeNoopOplogEntry(Seconds seconds, long long hash) {
-    return makeNoopOplogEntry({{seconds, 0}, 1LL}, hash);
-}
-
-BSONObj makeCursorResponse(CursorId cursorId,
-                           Fetcher::Documents oplogEntries,
-                           bool isFirstBatch = true) {
-    BSONObjBuilder bob;
-    {
-        BSONObjBuilder cursorBob(bob.subobjStart("cursor"));
-        cursorBob.append("id", cursorId);
-        cursorBob.append("ns", nss.toString());
-        {
-            BSONArrayBuilder batchBob(
-                cursorBob.subarrayStart(isFirstBatch ? "firstBatch" : "nextBatch"));
-            for (auto oplogEntry : oplogEntries) {
-                batchBob.append(oplogEntry);
-            }
-        }
-    }
-    bob.append("ok", 1);
-    return bob.obj();
 }
 
 TEST_F(OplogFetcherTest, InvalidReplSetMetadataInResponseStopsTheOplogFetcher) {
@@ -717,9 +369,10 @@ TEST_F(OplogFetcherTest,
     ASSERT_OK(oqMetadata.writeToMetadata(&bob));
     auto metadataObj = bob.obj();
 
+    auto entry = makeNoopOplogEntry({123LL, staleOpTime});
     ASSERT_EQUALS(
         ErrorCodes::InvalidSyncSource,
-        processSingleBatch({makeCursorResponse(0, {}), metadataObj, Milliseconds(0)}, false)
+        processSingleBatch({makeCursorResponse(0, {entry}), metadataObj, Milliseconds(0)}, false)
             ->getStatus());
     ASSERT_FALSE(dataReplicatorExternalState->metadataWasProcessed);
     ASSERT(lastEnqueuedDocuments.empty());
@@ -741,9 +394,6 @@ TEST_F(OplogFetcherTest, MetadataAndBatchAreProcessedWhenSyncSourceIsCurrentButM
         processSingleBatch({makeCursorResponse(0, {entry}), metadataObj, Milliseconds(0)}, false);
     ASSERT_OK(shutdownState->getStatus());
     ASSERT(dataReplicatorExternalState->metadataWasProcessed);
-    ASSERT_EQUALS(OpTimeWithHash(entry["h"].numberLong(),
-                                 unittest::assertGet(OpTime::parseFromOplogEntry(entry))),
-                  shutdownState->getLastFetched());
 }
 
 TEST_F(OplogFetcherTest,
@@ -760,9 +410,6 @@ TEST_F(OplogFetcherTest,
         processSingleBatch({makeCursorResponse(0, {entry}), metadataObj, Milliseconds(0)}, false);
     ASSERT_OK(shutdownState->getStatus());
     ASSERT(dataReplicatorExternalState->metadataWasProcessed);
-    ASSERT_EQUALS(OpTimeWithHash(entry["h"].numberLong(),
-                                 unittest::assertGet(OpTime::parseFromOplogEntry(entry))),
-                  shutdownState->getLastFetched());
 }
 
 TEST_F(OplogFetcherTest,
@@ -835,7 +482,7 @@ TEST_F(OplogFetcherTest,
     ASSERT_EQUALS(
         ErrorCodes::OplogStartMissing,
         processSingleBatch(
-            {makeCursorResponse(0, {makeNoopOplogEntry(lastFetched.opTime, lastFetched.value + 1)}),
+            {makeCursorResponse(0, {makeNoopOplogEntry(remoteNewerOpTime, lastFetched.value + 1)}),
              metadataObj,
              Milliseconds(0)})
             ->getStatus());
@@ -898,9 +545,6 @@ TEST_F(OplogFetcherTest, OplogFetcherShouldExcludeFirstDocumentInFirstBatchWhenE
     // The last fetched optime and hash should be updated after pushing the operations into the
     // buffer and reflected in the shutdown callback arguments.
     ASSERT_OK(shutdownState->getStatus());
-    ASSERT_EQUALS(OpTimeWithHash(thirdEntry["h"].numberLong(),
-                                 unittest::assertGet(OpTime::parseFromOplogEntry(thirdEntry))),
-                  shutdownState->getLastFetched());
 }
 
 TEST_F(OplogFetcherTest, OplogFetcherShouldReportErrorsThrownFromCallback) {
@@ -948,9 +592,6 @@ void OplogFetcherTest::testSyncSourceChecking(rpc::ReplSetMetadata* replMetadata
     // The last fetched optime and hash should be reflected in the shutdown callback
     // arguments.
     ASSERT_EQUALS(ErrorCodes::InvalidSyncSource, shutdownState->getStatus());
-    ASSERT_EQUALS(OpTimeWithHash(thirdEntry["h"].numberLong(),
-                                 unittest::assertGet(OpTime::parseFromOplogEntry(thirdEntry))),
-                  shutdownState->getLastFetched());
 }
 
 TEST_F(OplogFetcherTest, FailedSyncSourceCheckWithoutMetadataStopsTheOplogFetcher) {
@@ -1032,24 +673,21 @@ TEST_F(OplogFetcherTest,
     ASSERT_FALSE(dataReplicatorExternalState->syncSourceHasSyncSource);
 }
 
-RemoteCommandRequest OplogFetcherTest::testTwoBatchHandling(bool isV1ElectionProtocol) {
+RemoteCommandRequest OplogFetcherTest::testTwoBatchHandling() {
     ShutdownState shutdownState;
-
-    if (!isV1ElectionProtocol) {
-        dataReplicatorExternalState->currentTerm = OpTime::kUninitializedTerm;
-    }
 
     OplogFetcher oplogFetcher(&getExecutor(),
                               lastFetched,
                               source,
                               nss,
-                              _createConfig(isV1ElectionProtocol),
+                              _createConfig(),
                               0,
                               rbid,
                               true,
                               dataReplicatorExternalState.get(),
                               enqueueDocumentsFn,
-                              stdx::ref(shutdownState));
+                              stdx::ref(shutdownState),
+                              defaultBatchSize);
     ASSERT_EQUALS(OplogFetcher::State::kPreStart, oplogFetcher.getState_forTest());
 
     ASSERT_OK(oplogFetcher.startup());
@@ -1085,9 +723,6 @@ RemoteCommandRequest OplogFetcherTest::testTwoBatchHandling(bool isV1ElectionPro
     ASSERT_EQUALS(OplogFetcher::State::kComplete, oplogFetcher.getState_forTest());
 
     ASSERT_OK(shutdownState.getStatus());
-    ASSERT_EQUALS(OpTimeWithHash(fourthEntry["h"].numberLong(),
-                                 unittest::assertGet(OpTime::parseFromOplogEntry(fourthEntry))),
-                  shutdownState.getLastFetched());
 
     return request;
 }
@@ -1095,18 +730,11 @@ RemoteCommandRequest OplogFetcherTest::testTwoBatchHandling(bool isV1ElectionPro
 TEST_F(
     OplogFetcherTest,
     NoDataAvailableAfterFirstTwoBatchesShouldCauseTheOplogFetcherToShutDownWithSuccessfulStatus) {
-    auto request = testTwoBatchHandling(true);
+    auto request = testTwoBatchHandling();
     ASSERT_EQUALS(dataReplicatorExternalState->currentTerm, request.cmdObj["term"].numberLong());
     ASSERT_EQUALS(dataReplicatorExternalState->lastCommittedOpTime,
                   unittest::assertGet(OpTime::parseFromOplogEntry(
                       request.cmdObj["lastKnownCommittedOpTime"].Obj())));
-}
-
-TEST_F(OplogFetcherTest,
-       GetMoreRequestUnderProtocolVersionZeroDoesNotIncludeTermOrLastKnownCommittedOpTime) {
-    auto request = testTwoBatchHandling(false);
-    ASSERT_FALSE(request.cmdObj.hasField("term"));
-    ASSERT_FALSE(request.cmdObj.hasField("lastKnownCommittedOpTime"));
 }
 
 TEST_F(OplogFetcherTest, ValidateDocumentsReturnsNoSuchKeyIfTimestampIsNotFoundInAnyDocument) {
@@ -1242,390 +870,4 @@ TEST_F(OplogFetcherTest,
     ASSERT_EQUALS(0LL, info.lastDocument.value);
     ASSERT_EQUALS(OpTime(), info.lastDocument.opTime);
 }
-
-long long _getHash(const BSONObj& oplogEntry) {
-    return oplogEntry["h"].numberLong();
-}
-
-Timestamp _getTimestamp(const BSONObj& oplogEntry) {
-    return OplogEntry(oplogEntry).getOpTime().getTimestamp();
-}
-
-OpTimeWithHash _getOpTimeWithHash(const BSONObj& oplogEntry) {
-    return {_getHash(oplogEntry), OplogEntry(oplogEntry).getOpTime()};
-}
-
-std::vector<BSONObj> _generateOplogEntries(std::size_t size) {
-    std::vector<BSONObj> ops(size);
-    for (std::size_t i = 0; i < size; ++i) {
-        ops[i] = makeNoopOplogEntry(Seconds(100 + int(i)), 123LL);
-    }
-    return ops;
-}
-
-void _assertFindCommandTimestampEquals(const Timestamp& timestamp,
-                                       const RemoteCommandRequest& request) {
-    executor::TaskExecutorTest::assertRemoteCommandNameEquals("find", request);
-    ASSERT_EQUALS(timestamp, request.cmdObj["filter"].Obj()["ts"].Obj()["$gte"].timestamp());
-}
-
-void _assertFindCommandTimestampEquals(const BSONObj& oplogEntry,
-                                       const RemoteCommandRequest& request) {
-    _assertFindCommandTimestampEquals(_getTimestamp(oplogEntry), request);
-}
-
-TEST_F(OplogFetcherTest, OplogFetcherCreatesNewFetcherOnCallbackErrorDuringGetMoreNumberOne) {
-    auto ops = _generateOplogEntries(5U);
-    std::size_t maxFetcherRestarts = 1U;
-    auto shutdownState = stdx::make_unique<ShutdownState>();
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              _getOpTimeWithHash(ops[0]),
-                              source,
-                              nss,
-                              _createConfig(true),
-                              maxFetcherRestarts,
-                              rbid,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              stdx::ref(*shutdownState));
-    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
-
-    ASSERT_OK(oplogFetcher.startup());
-
-    auto metadataObj = makeOplogQueryMetadataObject(remoteNewerOpTime, rbid, 2, 2);
-
-    // Send first batch from FIND.
-    _assertFindCommandTimestampEquals(
-        ops[0],
-        processNetworkResponse(
-            {makeCursorResponse(1, {ops[0], ops[1], ops[2]}), metadataObj, Milliseconds(0)}, true));
-
-    // Send error during GETMORE.
-    processNetworkResponse({ErrorCodes::CursorNotFound, "blah"}, true);
-
-    // Send first batch from FIND, and Check that it started from the end of the last FIND response.
-    // Check that the optimes match for the query and last oplog entry.
-    _assertFindCommandTimestampEquals(
-        ops[2],
-        processNetworkResponse(
-            {makeCursorResponse(0, {ops[2], ops[3], ops[4]}), metadataObj, Milliseconds(0)},
-            false));
-
-    // Done.
-    oplogFetcher.join();
-    ASSERT_OK(shutdownState->getStatus());
-    ASSERT_EQUALS(_getOpTimeWithHash(ops[4]), shutdownState->getLastFetched());
-}
-
-TEST_F(OplogFetcherTest, OplogFetcherStopsRestartingFetcherIfRestartLimitIsReached) {
-    auto ops = _generateOplogEntries(3U);
-    std::size_t maxFetcherRestarts = 2U;
-    auto shutdownState = stdx::make_unique<ShutdownState>();
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              _getOpTimeWithHash(ops[0]),
-                              source,
-                              nss,
-                              _createConfig(true),
-                              maxFetcherRestarts,
-                              rbid,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              stdx::ref(*shutdownState));
-    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
-
-    ASSERT_OK(oplogFetcher.startup());
-
-    unittest::log() << "processing find request from first fetcher";
-
-
-    auto metadataObj = makeOplogQueryMetadataObject(remoteNewerOpTime, rbid, 2, 2);
-    _assertFindCommandTimestampEquals(
-        ops[0],
-        processNetworkResponse(
-            {makeCursorResponse(1, {ops[0], ops[1], ops[2]}), metadataObj, Milliseconds(0)}, true));
-
-    unittest::log() << "sending error response to getMore request from first fetcher";
-    assertRemoteCommandNameEquals(
-        "getMore", processNetworkResponse({ErrorCodes::CappedPositionLost, "fail 1"}, true));
-
-    unittest::log() << "sending error response to find request from second fetcher";
-    _assertFindCommandTimestampEquals(
-        ops[2], processNetworkResponse({ErrorCodes::IllegalOperation, "fail 2"}, true));
-
-    unittest::log() << "sending error response to find request from third fetcher";
-    _assertFindCommandTimestampEquals(
-        ops[2], processNetworkResponse({ErrorCodes::OperationFailed, "fail 3"}, false));
-
-    oplogFetcher.join();
-    ASSERT_EQUALS(ErrorCodes::OperationFailed, shutdownState->getStatus());
-    ASSERT_EQUALS(_getOpTimeWithHash(ops[2]), shutdownState->getLastFetched());
-}
-
-TEST_F(OplogFetcherTest, OplogFetcherResetsRestartCounterOnSuccessfulFetcherResponse) {
-    auto ops = _generateOplogEntries(5U);
-    std::size_t maxFetcherRestarts = 2U;
-    auto shutdownState = stdx::make_unique<ShutdownState>();
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              _getOpTimeWithHash(ops[0]),
-                              source,
-                              nss,
-                              _createConfig(true),
-                              maxFetcherRestarts,
-                              rbid,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              stdx::ref(*shutdownState));
-    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
-
-    ASSERT_OK(oplogFetcher.startup());
-
-    unittest::log() << "processing find request from first fetcher";
-
-
-    auto metadataObj = makeOplogQueryMetadataObject(remoteNewerOpTime, rbid, 2, 2);
-    _assertFindCommandTimestampEquals(
-        ops[0],
-        processNetworkResponse(
-            {makeCursorResponse(1, {ops[0], ops[1], ops[2]}), metadataObj, Milliseconds(0)}, true));
-
-    unittest::log() << "sending error response to getMore request from first fetcher";
-    assertRemoteCommandNameEquals(
-        "getMore", processNetworkResponse({ErrorCodes::CappedPositionLost, "fail 1"}, true));
-
-    unittest::log() << "processing find request from second fetcher";
-    _assertFindCommandTimestampEquals(
-        ops[2],
-        processNetworkResponse(
-            {makeCursorResponse(1, {ops[2], ops[3], ops[4]}), metadataObj, Milliseconds(0)}, true));
-
-    unittest::log() << "sending error response to getMore request from second fetcher";
-    assertRemoteCommandNameEquals(
-        "getMore", processNetworkResponse({ErrorCodes::IllegalOperation, "fail 2"}, true));
-
-    unittest::log() << "sending error response to find request from third fetcher";
-    _assertFindCommandTimestampEquals(
-        ops[4], processNetworkResponse({ErrorCodes::InternalError, "fail 3"}, true));
-
-    unittest::log() << "sending error response to find request from fourth fetcher";
-    _assertFindCommandTimestampEquals(
-        ops[4], processNetworkResponse({ErrorCodes::OperationFailed, "fail 4"}, false));
-
-    oplogFetcher.join();
-    ASSERT_EQUALS(ErrorCodes::OperationFailed, shutdownState->getStatus());
-    ASSERT_EQUALS(_getOpTimeWithHash(ops[4]), shutdownState->getLastFetched());
-}
-
-class TaskExecutorWithFailureInScheduleRemoteCommand : public unittest::TaskExecutorProxy {
-public:
-    using ShouldFailRequestFn = stdx::function<bool(const executor::RemoteCommandRequest&)>;
-
-    TaskExecutorWithFailureInScheduleRemoteCommand(executor::TaskExecutor* executor,
-                                                   ShouldFailRequestFn shouldFailRequest)
-        : unittest::TaskExecutorProxy(executor), _shouldFailRequest(shouldFailRequest) {}
-
-    StatusWith<CallbackHandle> scheduleRemoteCommand(const executor::RemoteCommandRequest& request,
-                                                     const RemoteCommandCallbackFn& cb) override {
-        if (_shouldFailRequest(request)) {
-            return Status(ErrorCodes::OperationFailed, "failed to schedule remote command");
-        }
-        return getExecutor()->scheduleRemoteCommand(request, cb);
-    }
-
-private:
-    ShouldFailRequestFn _shouldFailRequest;
-};
-
-TEST_F(OplogFetcherTest, OplogFetcherAbortsWithOriginalResponseErrorOnFailureToScheduleNewFetcher) {
-    auto ops = _generateOplogEntries(3U);
-    std::size_t maxFetcherRestarts = 2U;
-    auto shutdownState = stdx::make_unique<ShutdownState>();
-    bool shouldFailSchedule = false;
-    TaskExecutorWithFailureInScheduleRemoteCommand _executorProxy(
-        &getExecutor(), [&shouldFailSchedule](const executor::RemoteCommandRequest& request) {
-            return shouldFailSchedule;
-        });
-    OplogFetcher oplogFetcher(&_executorProxy,
-                              _getOpTimeWithHash(ops[0]),
-                              source,
-                              nss,
-                              _createConfig(true),
-                              maxFetcherRestarts,
-                              rbid,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              stdx::ref(*shutdownState));
-    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
-
-    ASSERT_OK(oplogFetcher.startup());
-    ASSERT_TRUE(oplogFetcher.isActive());
-
-    unittest::log() << "processing find request from first fetcher";
-
-    auto metadataObj = makeOplogQueryMetadataObject(remoteNewerOpTime, rbid, 2, 2);
-    _assertFindCommandTimestampEquals(
-        ops[0],
-        processNetworkResponse(
-            {makeCursorResponse(1, {ops[0], ops[1], ops[2]}), metadataObj, Milliseconds(0)}, true));
-
-    unittest::log() << "sending error response to getMore request from first fetcher";
-    shouldFailSchedule = true;
-    assertRemoteCommandNameEquals(
-        "getMore", processNetworkResponse({ErrorCodes::CappedPositionLost, "dead cursor"}, false));
-
-    oplogFetcher.join();
-    // Status in shutdown callback should match error for dead cursor instead of error from failed
-    // schedule request.
-    ASSERT_EQUALS(ErrorCodes::CappedPositionLost, shutdownState->getStatus());
-    ASSERT_EQUALS(_getOpTimeWithHash(ops[2]), shutdownState->getLastFetched());
-}
-
-TEST_F(OplogFetcherTest, OplogFetcherTimesOutCorrectlyOnInitialFindRequests) {
-    auto ops = _generateOplogEntries(2U);
-    std::size_t maxFetcherRestarts = 0U;
-    auto shutdownState = stdx::make_unique<ShutdownState>();
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              _getOpTimeWithHash(ops[0]),
-                              source,
-                              nss,
-                              _createConfig(true),
-                              maxFetcherRestarts,
-                              rbid,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              stdx::ref(*shutdownState));
-
-    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
-
-    ASSERT_OK(oplogFetcher.startup());
-    ASSERT_TRUE(oplogFetcher.isActive());
-
-    auto net = getNet();
-
-    // Schedule a response at a time that would exceed the initial find request network timeout.
-    net->enterNetwork();
-    auto when = net->now() + initialFindMaxTime + kNetworkTimeoutBufferMS + Milliseconds(10);
-    auto noi = getNet()->getNextReadyRequest();
-    RemoteCommandResponse response = {
-        {makeCursorResponse(1, {ops[0], ops[1]})}, rpc::makeEmptyMetadata(), Milliseconds(0)};
-    auto request = net->scheduleSuccessfulResponse(noi, when, response);
-    net->runUntil(when);
-    net->runReadyNetworkOperations();
-    net->exitNetwork();
-
-    oplogFetcher.join();
-
-    // The fetcher should have shut down after its last request timed out.
-    ASSERT_EQUALS(ErrorCodes::NetworkTimeout, shutdownState->getStatus());
-}
-
-TEST_F(OplogFetcherTest, OplogFetcherTimesOutCorrectlyOnRetriedFindRequests) {
-    auto ops = _generateOplogEntries(2U);
-    std::size_t maxFetcherRestarts = 1U;
-    auto shutdownState = stdx::make_unique<ShutdownState>();
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              _getOpTimeWithHash(ops[0]),
-                              source,
-                              nss,
-                              _createConfig(true),
-                              maxFetcherRestarts,
-                              rbid,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              stdx::ref(*shutdownState));
-
-
-    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
-
-    ASSERT_OK(oplogFetcher.startup());
-    ASSERT_TRUE(oplogFetcher.isActive());
-
-    auto net = getNet();
-
-    // Schedule a response at a time that would exceed the initial find request network timeout.
-    net->enterNetwork();
-    auto when = net->now() + initialFindMaxTime + kNetworkTimeoutBufferMS + Milliseconds(10);
-    auto noi = getNet()->getNextReadyRequest();
-    RemoteCommandResponse response = {
-        {makeCursorResponse(1, {ops[0], ops[1]})}, rpc::makeEmptyMetadata(), Milliseconds(0)};
-    auto request = net->scheduleSuccessfulResponse(noi, when, response);
-    net->runUntil(when);
-    net->runReadyNetworkOperations();
-    net->exitNetwork();
-
-    // Schedule a response at a time that would exceed the retried find request network timeout.
-    net->enterNetwork();
-    when = net->now() + retriedFindMaxTime + kNetworkTimeoutBufferMS + Milliseconds(10);
-    noi = getNet()->getNextReadyRequest();
-    response = {
-        {makeCursorResponse(1, {ops[0], ops[1]})}, rpc::makeEmptyMetadata(), Milliseconds(0)};
-    request = net->scheduleSuccessfulResponse(noi, when, response);
-    net->runUntil(when);
-    net->runReadyNetworkOperations();
-    net->exitNetwork();
-
-    oplogFetcher.join();
-
-    // The fetcher should have shut down after its last request timed out.
-    ASSERT_EQUALS(ErrorCodes::NetworkTimeout, shutdownState->getStatus());
-}
-
-
-bool sharedCallbackStateDestroyed = false;
-class SharedCallbackState {
-    MONGO_DISALLOW_COPYING(SharedCallbackState);
-
-public:
-    SharedCallbackState() {}
-    ~SharedCallbackState() {
-        sharedCallbackStateDestroyed = true;
-    }
-};
-
-TEST_F(OplogFetcherTest, OplogFetcherResetsOnShutdownCallbackFunctionOnCompletion) {
-    auto sharedCallbackData = std::make_shared<SharedCallbackState>();
-    auto callbackInvoked = false;
-    auto status = getDetectableErrorStatus();
-
-    OplogFetcher oplogFetcher(&getExecutor(),
-                              lastFetched,
-                              source,
-                              nss,
-                              _createConfig(true),
-                              0,
-                              rbid,
-                              true,
-                              dataReplicatorExternalState.get(),
-                              enqueueDocumentsFn,
-                              [&callbackInvoked, sharedCallbackData, &status](
-                                  const Status& shutdownStatus, const OpTimeWithHash&) {
-                                  status = shutdownStatus, callbackInvoked = true;
-                              });
-    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
-
-    ASSERT_FALSE(oplogFetcher.isActive());
-    ASSERT_OK(oplogFetcher.startup());
-    ASSERT_TRUE(oplogFetcher.isActive());
-
-    sharedCallbackData.reset();
-    ASSERT_FALSE(sharedCallbackStateDestroyed);
-
-    processNetworkResponse({ErrorCodes::OperationFailed, "oplog tailing query failed"}, false);
-
-    oplogFetcher.join();
-
-    ASSERT_EQUALS(ErrorCodes::OperationFailed, status);
-
-    // Oplog fetcher should reset 'OplogFetcher::_onShutdownCallbackFn' after running callback
-    // function before becoming inactive.
-    // This ensures that we release resources associated with 'OplogFetcher::_onShutdownCallbackFn'.
-    ASSERT_TRUE(callbackInvoked);
-    ASSERT_TRUE(sharedCallbackStateDestroyed);
-}
-
 }  // namespace

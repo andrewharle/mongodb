@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -415,6 +417,82 @@ TEST(S2KeyGeneratorTest, NoCollation) {
     assertKeysetsEqual(expectedKeys, actualKeys);
     assertMultikeyPathsEqual(MultikeyPaths{std::set<size_t>{}, std::set<size_t>{}},
                              actualMultikeyPaths);
+}
+
+TEST(S2KeyGeneratorTest, EmptyArrayForLeadingFieldIsConsideredMultikey) {
+    BSONObj obj = fromjson("{a: [], b: {type: 'Point', coordinates: [0, 0]}}");
+    BSONObj keyPattern = fromjson("{a: 1, b: '2dsphere'}");
+    BSONObj infoObj = fromjson("{key: {a: 1, b: '2dsphere'}, '2dsphereIndexVersion': 3}");
+    S2IndexingParams params;
+    const CollatorInterface* collator = nullptr;
+    ExpressionParams::initialize2dsphereParams(infoObj, collator, &params);
+
+    BSONObjSet actualKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    MultikeyPaths actualMultikeyPaths;
+    ExpressionKeysPrivate::getS2Keys(obj, keyPattern, params, &actualKeys, &actualMultikeyPaths);
+
+    BSONObjSet expectedKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    expectedKeys.insert(BSON("" << BSONUndefined << "" << getCellID(0, 0)));
+
+    assertKeysetsEqual(expectedKeys, actualKeys);
+    assertMultikeyPathsEqual(MultikeyPaths{{0U}, std::set<size_t>{}}, actualMultikeyPaths);
+}
+
+TEST(S2KeyGeneratorTest, EmptyArrayForTrailingFieldIsConsideredMultikey) {
+    BSONObj obj = fromjson("{a: {type: 'Point', coordinates: [0, 0]}, b: []}");
+    BSONObj keyPattern = fromjson("{a: '2dsphere', b: 1}");
+    BSONObj infoObj = fromjson("{key: {a: '2dsphere', a: 1}, '2dsphereIndexVersion': 3}");
+    S2IndexingParams params;
+    const CollatorInterface* collator = nullptr;
+    ExpressionParams::initialize2dsphereParams(infoObj, collator, &params);
+
+    BSONObjSet actualKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    MultikeyPaths actualMultikeyPaths;
+    ExpressionKeysPrivate::getS2Keys(obj, keyPattern, params, &actualKeys, &actualMultikeyPaths);
+
+    BSONObjSet expectedKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    expectedKeys.insert(BSON("" << getCellID(0, 0) << "" << BSONUndefined));
+
+    assertKeysetsEqual(expectedKeys, actualKeys);
+    assertMultikeyPathsEqual(MultikeyPaths{std::set<size_t>{}, {0U}}, actualMultikeyPaths);
+}
+
+TEST(S2KeyGeneratorTest, SingleElementTrailingArrayIsConsideredMultikey) {
+    BSONObj obj = fromjson("{a: {c: [99]}}, b: {type: 'Point', coordinates: [0, 0]}}");
+    BSONObj keyPattern = fromjson("{'a.c': 1, b: '2dsphere'}");
+    BSONObj infoObj = fromjson("{key: {'a.c': 1, b: '2dsphere'}, '2dsphereIndexVersion': 3}");
+    S2IndexingParams params;
+    const CollatorInterface* collator = nullptr;
+    ExpressionParams::initialize2dsphereParams(infoObj, collator, &params);
+
+    BSONObjSet actualKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    MultikeyPaths actualMultikeyPaths;
+    ExpressionKeysPrivate::getS2Keys(obj, keyPattern, params, &actualKeys, &actualMultikeyPaths);
+
+    BSONObjSet expectedKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    expectedKeys.insert(BSON("" << 99 << "" << getCellID(0, 0)));
+
+    assertKeysetsEqual(expectedKeys, actualKeys);
+    assertMultikeyPathsEqual(MultikeyPaths{{1U}, std::set<size_t>{}}, actualMultikeyPaths);
+}
+
+TEST(S2KeyGeneratorTest, MidPathSingleElementArrayIsConsideredMultikey) {
+    BSONObj obj = fromjson("{a: [{c: 99}]}, b: {type: 'Point', coordinates: [0, 0]}}");
+    BSONObj keyPattern = fromjson("{'a.c': 1, b: '2dsphere'}");
+    BSONObj infoObj = fromjson("{key: {'a.c': 1, b: '2dsphere'}, '2dsphereIndexVersion': 3}");
+    S2IndexingParams params;
+    const CollatorInterface* collator = nullptr;
+    ExpressionParams::initialize2dsphereParams(infoObj, collator, &params);
+
+    BSONObjSet actualKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    MultikeyPaths actualMultikeyPaths;
+    ExpressionKeysPrivate::getS2Keys(obj, keyPattern, params, &actualKeys, &actualMultikeyPaths);
+
+    BSONObjSet expectedKeys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    expectedKeys.insert(BSON("" << 99 << "" << getCellID(0, 0)));
+
+    assertKeysetsEqual(expectedKeys, actualKeys);
+    assertMultikeyPathsEqual(MultikeyPaths{{0U}, std::set<size_t>{}}, actualMultikeyPaths);
 }
 
 }  // namespace

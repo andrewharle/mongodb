@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -11,6 +11,10 @@
  * and unused function return values.
  */
 #define	WT_UNUSED(var)		(void)(var)
+#define	WT_NOT_READ(v, val) do {					\
+	(v) = (val);							\
+	(void)(v);							\
+} while (0);
 #define	WT_IGNORE_RET(call) do {					\
 	int __ignored_ret;						\
 	__ignored_ret = (call);						\
@@ -23,6 +27,8 @@
 #define	WT_THOUSAND	(1000)
 #define	WT_MILLION	(1000000)
 #define	WT_BILLION	(1000000000)
+
+#define	WT_MINUTE	(60)
 
 #define	WT_KILOBYTE	(1024)
 #define	WT_MEGABYTE	(1048576)
@@ -74,6 +80,12 @@
  * block or logging subsystems pad.  Constant value.
  */
 #define	WT_ENCRYPT_LEN_SIZE	sizeof(uint32_t)
+
+/*
+ * Default hash table size; we don't need a prime number of buckets
+ * because we always use a good hash function.
+ */
+#define	WT_HASH_ARRAY_SIZE	512
 
 /*
  * __wt_calloc_def, __wt_calloc_one --
@@ -132,15 +144,13 @@
  * hex constant might be a negative integer), and to ensure the hex constant is
  * the correct size before applying the bitwise not operator.
  */
-#define	FLD_CLR(field, mask)	        ((void)((field) &= ~(uint32_t)(mask)))
-#define	FLD_MASK(field, mask)	        ((field) & (uint32_t)(mask))
+#define	FLD_CLR(field, mask)	        ((void)((field) &= ~(mask)))
+#define	FLD_MASK(field, mask)	        ((field) & (mask))
 #define	FLD_ISSET(field, mask)	        (FLD_MASK(field, mask) != 0)
-#define	FLD64_ISSET(field, mask)	(((field) & (uint64_t)(mask)) != 0)
-#define	FLD_SET(field, mask)	        ((void)((field) |= (uint32_t)(mask)))
+#define	FLD_SET(field, mask)	        ((void)((field) |= (mask)))
 
 #define	F_CLR(p, mask)		        FLD_CLR((p)->flags, mask)
 #define	F_ISSET(p, mask)	        FLD_ISSET((p)->flags, mask)
-#define	F_ISSET_ALL(p, mask)	        (FLD_MASK((p)->flags, mask) == (mask))
 #define	F_MASK(p, mask)	                FLD_MASK((p)->flags, mask)
 #define	F_SET(p, mask)		        FLD_SET((p)->flags, mask)
 
@@ -177,6 +187,15 @@
 } while (0)
 
 /*
+ * Some C compiler address sanitizers complain if qsort is passed a NULL base
+ * reference, even if there are no elements to compare (note zero elements is
+ * allowed by the IEEE Std 1003.1-2017 standard). Avoid the complaint.
+ */
+#define	__wt_qsort(base, nmemb, size, compar)				\
+	if ((nmemb) != 0)						\
+		qsort(base, nmemb, size, compar)
+
+/*
  * Binary search for an integer key.
  */
 #define	WT_BINARY_SEARCH(key, arrayp, n, found) do {			\
@@ -195,12 +214,8 @@
 } while (0)
 
 /* Verbose messages. */
-#ifdef HAVE_VERBOSE
 #define	WT_VERBOSE_ISSET(session, f)					\
 	(FLD_ISSET(S2C(session)->verbose, f))
-#else
-#define	WT_VERBOSE_ISSET(session, f)	0
-#endif
 
 #define	WT_CLEAR(s)							\
 	memset(&(s), 0, sizeof(s))
@@ -214,10 +229,19 @@
 #define	WT_PREFIX_SKIP(str, pfx)					\
 	(WT_PREFIX_MATCH(str, pfx) ? ((str) += strlen(pfx), 1) : 0)
 
+/* Assert that a string matches a prefix, and move past it. */
+#define	WT_PREFIX_SKIP_REQUIRED(session, str, pfx) do {			\
+	WT_ASSERT(session, WT_PREFIX_MATCH(str, pfx));			\
+	(str) += strlen(pfx);						\
+} while (0)
+
 /*
- * Check if a variable string equals a constant string.  Inline the common
- * case for WiredTiger of a single byte string.  This is required because not
- * all compilers optimize this case in strcmp (e.g., clang).
+ * Check if a variable string equals a constant string. Inline the common case
+ * for WiredTiger of a single byte string. This is required because not all
+ * compilers optimize this case in strcmp (e.g., clang). While this macro works
+ * in the case of comparing two pointers (a sizeof operator on a pointer won't
+ * equal 2 and the extra code will be discarded at compile time), that's not its
+ * purpose.
  */
 #define	WT_STREQ(s, cs)							\
 	(sizeof(cs) == 2 ? (s)[0] == (cs)[0] && (s)[1] == '\0' :	\
@@ -255,11 +279,11 @@
  */
 #ifdef HAVE_DIAGNOSTIC
 #define	__wt_scr_alloc(session, size, scratchp)				\
-	__wt_scr_alloc_func(session, size, scratchp, __FILE__, __LINE__)
+	__wt_scr_alloc_func(session, size, scratchp, __func__, __LINE__)
 #define	__wt_page_in(session, ref, flags)				\
-	__wt_page_in_func(session, ref, flags, __FILE__, __LINE__)
+	__wt_page_in_func(session, ref, flags, __func__, __LINE__)
 #define	__wt_page_swap(session, held, want, flags)			\
-	__wt_page_swap_func(session, held, want, flags, __FILE__, __LINE__)
+	__wt_page_swap_func(session, held, want, flags, __func__, __LINE__)
 #else
 #define	__wt_scr_alloc(session, size, scratchp)				\
 	__wt_scr_alloc_func(session, size, scratchp)
@@ -276,3 +300,69 @@ union __wt_rand_state {
 		uint32_t w, z;
 	} x;
 };
+
+/*
+ * WT_TAILQ_SAFE_REMOVE_BEGIN/END --
+ *	Macro to safely walk a TAILQ where we're expecting some underlying
+ * function to remove elements from the list, but we don't want to stop on
+ * error, nor do we want an error to turn into an infinite loop. Used during
+ * shutdown, when we're shutting down various lists. Unlike TAILQ_FOREACH_SAFE,
+ * this macro works even when the next element gets removed along with the
+ * current one.
+ */
+#define	WT_TAILQ_SAFE_REMOVE_BEGIN(var, head, field, tvar)		\
+	for ((tvar) = NULL; ((var) = TAILQ_FIRST(head)) != NULL;	\
+	    (tvar) = (var)) {						\
+		if ((tvar) == (var)) {					\
+			/* Leak the structure. */			\
+			TAILQ_REMOVE(head, (var), field);		\
+			continue;					\
+		}
+#define	WT_TAILQ_SAFE_REMOVE_END }
+
+/*
+ * WT_VA_ARGS_BUF_FORMAT --
+ *	Format into a scratch buffer, extending it as necessary. This is a
+ * macro because we need to repeatedly call va_start/va_end and there's no
+ * way to do that inside a function call.
+ */
+#define	WT_VA_ARGS_BUF_FORMAT(session, buf, fmt, concatenate) do {	\
+	size_t __len, __space;						\
+	va_list __ap;							\
+	int __ret_xx;		/* __ret already used by WT_RET */	\
+	char *__p;							\
+									\
+	/*								\
+	 * This macro is used to both initialize and concatenate into a	\
+	 * buffer. If not concatenating, clear the size so we don't use	\
+	 * any existing contents.					\
+	 */								\
+	if (!(concatenate))						\
+		(buf)->size = 0;					\
+	for (;;) {							\
+		WT_ASSERT(session, (buf)->memsize >= (buf)->size);	\
+		__p = (char *)((uint8_t *)(buf)->mem + (buf)->size);	\
+		__space = (buf)->memsize - (buf)->size;			\
+									\
+		/* Format into the buffer. */				\
+		va_start(__ap, fmt);					\
+		__ret_xx = __wt_vsnprintf_len_set(			\
+		    __p, __space, &__len, fmt, __ap);			\
+		va_end(__ap);						\
+		WT_RET(__ret_xx);					\
+									\
+		/* Check if there was enough space. */			\
+		if (__len < __space) {					\
+			(buf)->data = (buf)->mem;			\
+			(buf)->size += __len;				\
+			break;						\
+		}							\
+									\
+		/*							\
+		 * If not, double the size of the buffer: we're dealing	\
+		 * with strings, we don't expect the size to get huge.	\
+		 */							\
+		WT_RET(__wt_buf_extend(					\
+		    session, buf, (buf)->size + __len + 1));		\
+	}								\
+} while (0)

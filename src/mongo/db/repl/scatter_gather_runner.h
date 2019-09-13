@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,7 +33,7 @@
 #include <vector>
 
 #include "mongo/base/disallow_copying.h"
-#include "mongo/db/repl/replication_executor.h"
+#include "mongo/executor/task_executor.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
 
@@ -54,9 +56,11 @@ public:
     /**
      * Constructs a new runner whose underlying algorithm is "algorithm".
      *
-     * "algorithm" and "executor" must remain in scope until the runner's destructor completes.
+     * "executor" must remain in scope until the runner's destructor completes.
+     * "algorithm" is shared between the runner and the caller.
      */
-    explicit ScatterGatherRunner(ScatterGatherAlgorithm* algorithm, ReplicationExecutor* executor);
+    explicit ScatterGatherRunner(std::shared_ptr<ScatterGatherAlgorithm> algorithm,
+                                 executor::TaskExecutor* executor);
 
     /**
      * Runs the scatter-gather process and blocks until it completes.
@@ -78,7 +82,7 @@ public:
      *
      * The returned event will eventually be signaled.
      */
-    StatusWith<ReplicationExecutor::EventHandle> start();
+    StatusWith<executor::TaskExecutor::EventHandle> start();
 
     /**
      * Informs the runner to cancel further processing.
@@ -87,11 +91,12 @@ public:
 
 private:
     /**
-     * Implementation of a scatter-gather behavior using a ReplicationExecutor.
+     * Implementation of a scatter-gather behavior using a TaskExecutor.
      */
     class RunnerImpl {
     public:
-        explicit RunnerImpl(ScatterGatherAlgorithm* algorithm, ReplicationExecutor* executor);
+        explicit RunnerImpl(std::shared_ptr<ScatterGatherAlgorithm> algorithm,
+                            executor::TaskExecutor* executor);
 
         /**
          * On success, returns an event handle that will be signaled when the runner has
@@ -100,8 +105,8 @@ private:
          *
          * The returned event will eventually be signaled.
          */
-        StatusWith<ReplicationExecutor::EventHandle> start(
-            const ReplicationExecutor::RemoteCommandCallbackFn cb);
+        StatusWith<executor::TaskExecutor::EventHandle> start(
+            const executor::TaskExecutor::RemoteCommandCallbackFn cb);
 
         /**
          * Informs the runner to cancel further processing.
@@ -111,7 +116,7 @@ private:
         /**
          * Callback invoked once for every response from the network.
          */
-        void processResponse(const ReplicationExecutor::RemoteCommandCallbackArgs& cbData);
+        void processResponse(const executor::TaskExecutor::RemoteCommandCallbackArgs& cbData);
 
     private:
         /**
@@ -120,15 +125,15 @@ private:
          */
         void _signalSufficientResponsesReceived();
 
-        ReplicationExecutor* _executor;      // Not owned here.
-        ScatterGatherAlgorithm* _algorithm;  // Not owned here.
-        ReplicationExecutor::EventHandle _sufficientResponsesReceived;
-        std::vector<ReplicationExecutor::CallbackHandle> _callbacks;
+        executor::TaskExecutor* _executor;  // Not owned here.
+        std::shared_ptr<ScatterGatherAlgorithm> _algorithm;
+        executor::TaskExecutor::EventHandle _sufficientResponsesReceived;
+        std::vector<executor::TaskExecutor::CallbackHandle> _callbacks;
         bool _started = false;
         stdx::mutex _mutex;
     };
 
-    ReplicationExecutor* _executor;  // Not owned here.
+    executor::TaskExecutor* _executor;  // Not owned here.
 
     // This pointer of RunnerImpl will be shared with remote command callbacks to make sure
     // callbacks can access the members safely.

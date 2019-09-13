@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,6 +41,7 @@
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/matcher/expression_geo.h"
+#include "mongo/db/matcher/expression_internal_expr_eq.h"
 #include "mongo/db/matcher/expression_text.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/index_tag.h"
@@ -66,6 +69,23 @@ bool elemMatchValueCompatible(const BSONElement& elt,
         }
     }
     return true;
+}
+
+// Can't index negations of {$eq: <Array>} or {$in: [<Array>, ...]}. Note that we could
+// use the index in principle, though we would need to generate special bounds.
+bool isEqualsArrayOrNotInArray(const MatchExpression* me) {
+    const auto type = me->matchType();
+    if (type == MatchExpression::EQ) {
+        return static_cast<const ComparisonMatchExpression*>(me)->getData().type() ==
+            BSONType::Array;
+    } else if (type == MatchExpression::MATCH_IN) {
+        const auto& equalities = static_cast<const InMatchExpression*>(me)->getEqualities();
+        return std::any_of(equalities.begin(), equalities.end(), [](BSONElement elt) {
+            return elt.type() == BSONType::Array;
+        });
+    }
+
+    return false;
 }
 
 }  // namespace
@@ -99,16 +119,14 @@ static bool twoDWontWrap(const Circle& circle, const IndexEntry& index) {
 // Checks whether 'node' contains any comparison to an element of type 'type'. Nested objects and
 // arrays are not checked recursively. We assume 'node' is bounds-generating or is a recursive child
 // of a bounds-generating node, i.e. it does not contain AND, OR, ELEM_MATCH_OBJECT, or NOR.
-// TODO SERVER-23172: Check nested objects and arrays.
 static bool boundsGeneratingNodeContainsComparisonToType(MatchExpression* node, BSONType type) {
     invariant(node->matchType() != MatchExpression::AND &&
               node->matchType() != MatchExpression::OR &&
               node->matchType() != MatchExpression::NOR &&
               node->matchType() != MatchExpression::ELEM_MATCH_OBJECT);
 
-    if (Indexability::isEqualityOrInequality(node)) {
-        const ComparisonMatchExpression* expr = static_cast<const ComparisonMatchExpression*>(node);
-        return expr->getData().type() == type;
+    if (const auto* comparisonExpr = dynamic_cast<const ComparisonMatchExpressionBase*>(node)) {
+        return comparisonExpr->getData().type() == type;
     }
 
     if (node->matchType() == MatchExpression::MATCH_IN) {
@@ -141,7 +159,7 @@ static bool boundsGeneratingNodeContainsComparisonToType(MatchExpression* node, 
 // static
 void QueryPlannerIXSelect::getFields(const MatchExpression* node,
                                      string prefix,
-                                     unordered_set<string>* out) {
+                                     stdx::unordered_set<string>* out) {
     // Do not traverse tree beyond a NOR negation node
     MatchExpression::MatchType exprtype = node->matchType();
     if (exprtype == MatchExpression::NOR) {
@@ -165,7 +183,7 @@ void QueryPlannerIXSelect::getFields(const MatchExpression* node,
         for (size_t i = 0; i < node->numChildren(); ++i) {
             getFields(node->getChild(i), prefix, out);
         }
-    } else if (node->isLogical()) {
+    } else if (node->getCategory() == MatchExpression::MatchCategory::kLogical) {
         for (size_t i = 0; i < node->numChildren(); ++i) {
             getFields(node->getChild(i), prefix, out);
         }
@@ -173,7 +191,7 @@ void QueryPlannerIXSelect::getFields(const MatchExpression* node,
 }
 
 // static
-void QueryPlannerIXSelect::findRelevantIndices(const unordered_set<string>& fields,
+void QueryPlannerIXSelect::findRelevantIndices(const stdx::unordered_set<string>& fields,
                                                const vector<IndexEntry>& allIndices,
                                                vector<IndexEntry>* out) {
     for (size_t i = 0; i < allIndices.size(); ++i) {
@@ -217,9 +235,19 @@ bool QueryPlannerIXSelect::compatible(const BSONElement& elt,
     // We know elt.fieldname() == node->path().
     MatchExpression::MatchType exprtype = node->matchType();
 
+    if (exprtype == MatchExpression::INTERNAL_EXPR_EQ &&
+        indexedFieldHasMultikeyComponents(elt.fieldNameStringData(), index)) {
+        // Expression language equality cannot be indexed if the field path has multikey components.
+        return false;
+    }
+
     if (indexedFieldType.empty()) {
         // Can't use a sparse index for $eq with a null element, unless the equality is within a
         // $elemMatch expression since the latter implies a match on the literal element 'null'.
+        //
+        // We can use a sparse index for $_internalExprEq with a null element. Expression language
+        // equality-to-null semantics are that only literal nulls match. Sparse indexes contain
+        // index keys for literal nulls, but not for missing elements.
         if (exprtype == MatchExpression::EQ && index.sparse && !elemMatchChild) {
             const EqualityMatchExpression* expr = static_cast<const EqualityMatchExpression*>(node);
             if (expr->getData().isNull()) {
@@ -259,10 +287,17 @@ bool QueryPlannerIXSelect::compatible(const BSONElement& elt,
             }
 
             // Can't index negations of MOD, REGEX, TYPE_OPERATOR, or ELEM_MATCH_VALUE.
-            MatchExpression::MatchType childtype = node->getChild(0)->matchType();
+            const auto* child = node->getChild(0);
+            MatchExpression::MatchType childtype = child->matchType();
             if (MatchExpression::REGEX == childtype || MatchExpression::MOD == childtype ||
                 MatchExpression::TYPE_OPERATOR == childtype ||
                 MatchExpression::ELEM_MATCH_VALUE == childtype) {
+                return false;
+            }
+
+            // Can't index negations of {$eq: <Array>} or {$in: [<Array>, ...]}. Note that we could
+            // use the index in principle, though we would need to generate special bounds.
+            if (isEqualsArrayOrNotInArray(child)) {
                 return false;
             }
 
@@ -314,10 +349,10 @@ bool QueryPlannerIXSelect::compatible(const BSONElement& elt,
 
         // NOTE: This shouldn't be reached.  Text index implies there is a separator implies we
         // will always hit the 'return true' above.
-        invariant(0);
+        MONGO_UNREACHABLE;
         return true;
     } else if (IndexNames::HASHED == indexedFieldType) {
-        if (exprtype == MatchExpression::EQ) {
+        if (ComparisonMatchExpressionBase::isEquality(exprtype)) {
             return true;
         }
         if (exprtype == MatchExpression::MATCH_IN) {
@@ -405,8 +440,8 @@ void QueryPlannerIXSelect::rateIndices(MatchExpression* node,
         }
 
         verify(NULL == node->getTag());
-        RelevantTag* rt = new RelevantTag();
-        node->setTag(rt);
+        node->setTag(new RelevantTag());
+        auto rt = static_cast<RelevantTag*>(node->getTag());
         rt->path = fullPath;
 
         // TODO: This is slow, with all the string compares.
@@ -446,7 +481,7 @@ void QueryPlannerIXSelect::rateIndices(MatchExpression* node,
         for (size_t i = 0; i < node->numChildren(); ++i) {
             rateIndices(node->getChild(i), prefix, indices, collator);
         }
-    } else if (node->isLogical()) {
+    } else if (node->getCategory() == MatchExpression::MatchCategory::kLogical) {
         for (size_t i = 0; i < node->numChildren(); ++i) {
             rateIndices(node->getChild(i), prefix, indices, collator);
         }
@@ -464,6 +499,24 @@ void QueryPlannerIXSelect::stripInvalidAssignments(MatchExpression* node,
     }
 
     stripInvalidAssignmentsToPartialIndices(node, indices);
+}
+
+bool QueryPlannerIXSelect::indexedFieldHasMultikeyComponents(StringData indexedField,
+                                                             const IndexEntry& index) {
+    if (index.multikeyPaths.empty()) {
+        // The index has no path-level multikeyness metadata.
+        return index.multikey;
+    }
+
+    size_t pos = 0;
+    for (auto&& key : index.keyPattern) {
+        if (key.fieldNameStringData() == indexedField) {
+            return !index.multikeyPaths[pos].empty();
+        }
+        ++pos;
+    }
+
+    MONGO_UNREACHABLE;
 }
 
 namespace {
@@ -881,6 +934,11 @@ void QueryPlannerIXSelect::stripInvalidAssignmentsTo2dsphereIndices(
         // Remove bad assignments from this index.
         stripInvalidAssignmentsTo2dsphereIndex(node, i);
     }
+}
+
+bool QueryPlannerIXSelect::logicalNodeMayBeSupportedByAnIndex(const MatchExpression* queryExpr) {
+    return !(queryExpr->matchType() == MatchExpression::NOT &&
+             isEqualsArrayOrNotInArray(queryExpr->getChild(0)));
 }
 
 }  // namespace mongo

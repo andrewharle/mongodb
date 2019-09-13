@@ -1,4 +1,5 @@
-// @tags: [requires_collmod_command]
+// @tags: [requires_non_retryable_commands]
+
 (function() {
     "use strict";
     let viewsDb = db.getSiblingDB("views_validation");
@@ -124,6 +125,9 @@
         "collMod modified view to have invalid pipeline");
     clear();
 
-    // Check that invalid pipelines are disallowed.
-    makeView("a", "b", [{"$lookup": {from: "a"}}], 4572);  // 4572 is for missing $lookup fields
+    // Check that invalid pipelines are disallowed. The following $lookup is missing the 'as' field.
+    makeView("a",
+             "b",
+             [{"$lookup": {from: "a", localField: "b", foreignField: "c"}}],
+             ErrorCodes.FailedToParse);
 }());

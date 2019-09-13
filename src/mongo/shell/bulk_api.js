@@ -15,9 +15,6 @@ var _bulk_api_module = (function() {
     var UNKNOWN_REPL_WRITE_CONCERN = 79;
     var NOT_MASTER = 10107;
 
-    // Constants
-    var IndexCollPattern = new RegExp('system\.indexes$');
-
     /**
      * Helper function to define properties
      */
@@ -403,6 +400,9 @@ var _bulk_api_module = (function() {
         // Define properties
         defineReadOnlyProperty(this, "code", commandError.code);
         defineReadOnlyProperty(this, "errmsg", commandError.errmsg);
+        if (commandError.hasOwnProperty("errorLabels")) {
+            defineReadOnlyProperty(this, "errorLabels", commandError.errorLabels);
+        }
 
         this.name = 'WriteCommandError';
         this.message = this.errmsg;
@@ -421,14 +421,6 @@ var _bulk_api_module = (function() {
 
         this.shellPrint = function() {
             return this.toString();
-        };
-
-        this.toSingleResult = function() {
-            // This is *only* safe to do with a WriteCommandError from the bulk api when the bulk is
-            // known to be of size == 1
-            var bulkResult = getEmptyBulkResult();
-            bulkResult.writeErrors.push({code: this.code, index: 0, errmsg: this.errmsg});
-            return new BulkWriteResult(bulkResult, NONE).toSingleResult();
         };
     };
 
@@ -659,10 +651,6 @@ var _bulk_api_module = (function() {
          * @param document {Object} the document to insert.
          */
         this.insert = function(document) {
-            if (!IndexCollPattern.test(coll.getName())) {
-                collection._validateForStorage(document);
-            }
-
             return addToOperationsList(INSERT, document);
         };
 
@@ -670,8 +658,6 @@ var _bulk_api_module = (function() {
         // Find based operations
         var findOperations = {
             update: function(updateDocument) {
-                collection._validateUpdateDoc(updateDocument);
-
                 // Set the top value for the update 0 = multi true, 1 = multi false
                 var upsert = typeof currentOp.upsert == 'boolean' ? currentOp.upsert : false;
                 // Establish the update command
@@ -683,6 +669,11 @@ var _bulk_api_module = (function() {
                     document.collation = currentOp.collation;
                 }
 
+                // Copy over the arrayFilters, if we have them.
+                if (currentOp.hasOwnProperty('arrayFilters')) {
+                    document.arrayFilters = currentOp.arrayFilters;
+                }
+
                 // Clear out current Op
                 currentOp = null;
                 // Add the update document to the list
@@ -690,8 +681,6 @@ var _bulk_api_module = (function() {
             },
 
             updateOne: function(updateDocument) {
-                collection._validateUpdateDoc(updateDocument);
-
                 // Set the top value for the update 0 = multi true, 1 = multi false
                 var upsert = typeof currentOp.upsert == 'boolean' ? currentOp.upsert : false;
                 // Establish the update command
@@ -701,6 +690,11 @@ var _bulk_api_module = (function() {
                 // Copy over the collation, if we have one.
                 if (currentOp.hasOwnProperty('collation')) {
                     document.collation = currentOp.collation;
+                }
+
+                // Copy over the arrayFilters, if we have them.
+                if (currentOp.hasOwnProperty('arrayFilters')) {
+                    document.arrayFilters = currentOp.arrayFilters;
                 }
 
                 // Clear out current Op
@@ -720,8 +714,6 @@ var _bulk_api_module = (function() {
             },
 
             removeOne: function() {
-                collection._validateRemoveDoc(currentOp.selector);
-
                 // Establish the removeOne command
                 var document = {q: currentOp.selector, limit: 1};
 
@@ -737,8 +729,6 @@ var _bulk_api_module = (function() {
             },
 
             remove: function() {
-                collection._validateRemoveDoc(currentOp.selector);
-
                 // Establish the remove command
                 var document = {q: currentOp.selector, limit: 0};
 
@@ -765,6 +755,21 @@ var _bulk_api_module = (function() {
                 }
 
                 currentOp.collation = collationSpec;
+                return findOperations;
+            },
+
+            arrayFilters: function(filters) {
+                if (!collection.getMongo().hasWriteCommands()) {
+                    throw new Error(
+                        "cannot use arrayFilters if server does not support write commands");
+                }
+
+                if (collection.getMongo().writeMode() !== "commands") {
+                    throw new Error("write mode must be 'commands' in order to use arrayFilters, " +
+                                    "but found write mode: " + collection.getMongo().writeMode());
+                }
+
+                currentOp.arrayFilters = filters;
                 return findOperations;
             },
         };
@@ -867,6 +872,20 @@ var _bulk_api_module = (function() {
                 cmd.writeConcern = writeConcern;
             }
 
+            {
+                const kWireVersionSupportingRetryableWrites = 6;
+                const serverSupportsRetryableWrites =
+                    coll.getMongo().getMinWireVersion() <= kWireVersionSupportingRetryableWrites &&
+                    kWireVersionSupportingRetryableWrites <= coll.getMongo().getMaxWireVersion();
+
+                const session = collection.getDB().getSession();
+                if (serverSupportsRetryableWrites && session.getOptions().shouldRetryWrites() &&
+                    session._serverSession.canRetryWrites(cmd) &&
+                    !session._serverSession.isTxnActive()) {
+                    cmd = session._serverSession.assignTransactionNumber(cmd);
+                }
+            }
+
             return cmd;
         };
 
@@ -877,26 +896,7 @@ var _bulk_api_module = (function() {
             var cmd = buildBatchCmd(batch);
 
             // Run the command (may throw)
-
-            // Get command collection
-            var cmdColl = collection._db.getCollection('$cmd');
-            // Bypass runCommand to ignore slaveOk and read pref settings
-            var cursor = new DBQuery(collection.getMongo(),
-                                     collection._db,
-                                     cmdColl,
-                                     cmdColl.getFullName(),
-                                     cmd,
-                                     {} /* proj */,
-                                     -1 /* limit */,
-                                     0 /* skip */,
-                                     0 /* batchSize */,
-                                     0 /* flags */);
-            var rc = collection.getMongo().getReadConcern();
-            if (rc) {
-                cursor.readConcern(rc);
-            }
-
-            result = cursor.next();
+            result = collection.runCommand(cmd);
 
             if (result.ok == 0) {
                 throw new WriteCommandError(result);
@@ -1206,6 +1206,7 @@ var _bulk_api_module = (function() {
     module.BulkWriteResult = BulkWriteResult;
     module.BulkWriteError = BulkWriteError;
     module.WriteCommandError = WriteCommandError;
+    module.WriteError = WriteError;
     module.initializeUnorderedBulkOp = function() {
         return new Bulk(this, false);
     };
@@ -1223,6 +1224,7 @@ WriteResult = _bulk_api_module.WriteResult;
 BulkWriteResult = _bulk_api_module.BulkWriteResult;
 BulkWriteError = _bulk_api_module.BulkWriteError;
 WriteCommandError = _bulk_api_module.WriteCommandError;
+WriteError = _bulk_api_module.WriteError;
 
 /***********************************************************
  * Adds the initializers of bulk operations to the db collection

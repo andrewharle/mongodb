@@ -1,29 +1,9 @@
 /*-
- * Public Domain 2014-2017 MongoDB, Inc.
- * Public Domain 2008-2014 WiredTiger, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2008-2014 WiredTiger, Inc.
+ *	All rights reserved.
  *
- * This is free and unencumbered software released into the public domain.
- *
- * Anyone is free to copy, modify, publish, use, compile, sell, or
- * distribute this software, either in source code form or as a compiled
- * binary, for any purpose, commercial or non-commercial, and by any
- * means.
- *
- * In jurisdictions that recognize copyright laws, the author or authors
- * of this software dedicate any and all copyright interest in the
- * software to the public domain. We make this dedication for the benefit
- * of the public at large and to the detriment of our heirs and
- * successors. We intend this dedication to be an overt act of
- * relinquishment in perpetuity of all present and future rights to this
- * software under copyright law.
- *
- * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
- * EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
- * MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
- * IN NO EVENT SHALL THE AUTHORS BE LIABLE FOR ANY CLAIM, DAMAGES OR
- * OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE,
- * ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR
- * OTHER DEALINGS IN THE SOFTWARE.
+ * See the file LICENSE for redistribution information.
  */
 
 #include "wt_internal.h"
@@ -55,8 +35,7 @@ __time_check_monotonic(WT_SESSION_IMPL *session, struct timespec *tsp)
 
 /*
  * __wt_epoch --
- *	Return the time since the Epoch, adjusted so it never appears to go
- *	backwards.
+ *	Return the time since the Epoch.
  */
 void
 __wt_epoch(WT_SESSION_IMPL *session, struct timespec *tsp)
@@ -65,9 +44,14 @@ __wt_epoch(WT_SESSION_IMPL *session, struct timespec *tsp)
 	struct timespec tmp;
 
 	/*
-	 * Read into a local variable so that we're comparing the correct
-	 * value when we check for monotonic increasing time.  There are
-	 * many places we read into an unlocked global variable.
+	 * Read into a local variable, then check for monotonically increasing
+	 * time, ensuring single threads never see time move backward. We don't
+	 * prevent multiple threads from seeing time move backwards (even when
+	 * reading time serially, the saved last-read time is per thread, not
+	 * per timer, so multiple threads can race the time). Nor do we prevent
+	 * multiple threads simultaneously reading the time from seeing random
+	 * time or time moving backwards (assigning the time structure to the
+	 * returned memory location implies multicycle writes to memory).
 	 */
 	__wt_epoch_raw(session, &tmp);
 	__time_check_monotonic(session, &tmp);
@@ -86,4 +70,24 @@ __wt_seconds(WT_SESSION_IMPL *session, time_t *timep)
 	__wt_epoch(session, &t);
 
 	*timep = t.tv_sec;
+}
+
+/*
+ * __wt_clock_to_nsec --
+ *	Convert from clock ticks to nanoseconds.
+ */
+uint64_t
+__wt_clock_to_nsec(uint64_t end, uint64_t begin)
+{
+	double clock_diff;
+
+	/*
+	 * If the ticks were reset, consider it an invalid check and just
+	 * return zero as the time difference because we cannot compute
+	 * anything meaningful.
+	 */
+	if (end < begin)
+		return (0);
+	clock_diff = (double)(end - begin);
+	return ((uint64_t)(clock_diff / __wt_process.tsc_nsec_ratio));
 }

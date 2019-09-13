@@ -1,5 +1,7 @@
 # -*- mode: python -*-
 
+import libdeps
+
 Import([
     'env',
     'get_option',
@@ -17,7 +19,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/client/clientdriver',
+        '$BUILD_DIR/mongo/client/clientdriver_network',
         '$BUILD_DIR/mongo/shell/mongojs',
         '$BUILD_DIR/mongo/util/md5',
     ],
@@ -137,24 +139,29 @@ if usemozjs:
             'mozjs/PosixNSPR.cpp',
             'mozjs/proxyscope.cpp',
             'mozjs/regexp.cpp',
+            'mozjs/session.cpp',
+            'mozjs/status.cpp',
             'mozjs/timestamp.cpp',
             'mozjs/uri.cpp',
             'mozjs/valuereader.cpp',
             'mozjs/valuewriter.cpp',
+            env.Idlc('mozjs/end_sessions.idl')[0],
         ],
         LIBDEPS=[
             'bson_template_evaluator',
             'scripting_common',
-            '$BUILD_DIR/third_party/shim_mozjs',
             '$BUILD_DIR/mongo/shell/mongojs',
             '$BUILD_DIR/mongo/db/service_context',
-            '$BUILD_DIR/mongo/s/local_sharding_info',
+        ],
+        LIBDEPS_PRIVATE=[
+            '$BUILD_DIR/third_party/shim_mozjs',
         ],
     )
 else:
     env.Library(
         target='scripting',
         source=[
+            'scripting_none.cpp'
         ],
         LIBDEPS=[
             'scripting_none',
@@ -164,6 +171,7 @@ else:
 env.Library(
     target='scripting_server',
     source=[
+        'scripting_server.cpp',
     ],
     LIBDEPS=[
         'scripting' if serverJs else 'scripting_none',

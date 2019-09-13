@@ -1,4 +1,10 @@
-// Check that doing updates done during a migrate all go to the right place
+/**
+ * Check that doing updates done during a migrate all go to the right place
+ *
+ * This test is labeled resource intensive because its total io_write is 36MB compared to a median
+ * of 5MB across all sharding tests in wiredTiger.
+ * @tags: [resource_intensive]
+ */
 (function() {
 
     var s = new ShardingTest({shards: 2, mongos: 1, other: {chunkSize: 1, enableAutoSplit: true}});
@@ -66,7 +72,7 @@
     }
     check("initial at end");
 
-    assert.lt(20, s.config.chunks.count(), "setup2");
+    assert.lt(20, s.config.chunks.count({"ns": "test.foo"}), "setup2");
 
     function check(msg, dontAssert) {
         for (var x in counts) {
@@ -140,7 +146,8 @@
         if (Math.random() > .999)
             printjson(x);
 
-        return Math.max(x.shard0000, x.shard0001) - Math.min(x.shard0000, x.shard0001);
+        return Math.max(x[s.shard0.shardName], x[s.shard1.shardName]) -
+            Math.min(x[s.shard0.shardName], x[s.shard1.shardName]);
     }
 
     assert.lt(20, diff1(), "initial load");

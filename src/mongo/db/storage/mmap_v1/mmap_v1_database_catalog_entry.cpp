@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -56,6 +58,7 @@
 #include "mongo/db/storage/mmap_v1/record_store_v1_simple.h"
 #include "mongo/db/storage/record_data.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -71,7 +74,7 @@ namespace {
  * - setting to false will fail.
  */
 // Unused, needed for server parameter.
-std::atomic<bool> newCollectionsUsePowerOf2SizesFlag(true);  // NOLINT
+AtomicBool newCollectionsUsePowerOf2SizesFlag(true);
 
 class NewCollectionsUsePowerOf2SizesParameter
     : public ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime> {
@@ -121,7 +124,7 @@ public:
         _entry->_removeFromCache(NULL, _ns);
     }
 
-    void commit() {}
+    void commit(boost::optional<Timestamp>) {}
 
 private:
     const std::string _ns;
@@ -144,7 +147,7 @@ public:
         _catalogEntry->_collections[_ns] = _cachedEntry;
     }
 
-    void commit() {
+    void commit(boost::optional<Timestamp>) {
         delete _cachedEntry;
     }
 
@@ -154,7 +157,7 @@ private:
     Entry* const _cachedEntry;
 };
 
-MMAPV1DatabaseCatalogEntry::MMAPV1DatabaseCatalogEntry(OperationContext* txn,
+MMAPV1DatabaseCatalogEntry::MMAPV1DatabaseCatalogEntry(OperationContext* opCtx,
                                                        StringData name,
                                                        StringData path,
                                                        bool directoryPerDB,
@@ -162,37 +165,42 @@ MMAPV1DatabaseCatalogEntry::MMAPV1DatabaseCatalogEntry(OperationContext* txn,
                                                        std::unique_ptr<ExtentManager> extentManager)
     : DatabaseCatalogEntry(name),
       _path(path.toString()),
-      _namespaceIndex(_path, name.toString()),
+      _namespaceIndex(opCtx, _path, name.toString()),
       _extentManager(std::move(extentManager)) {
+    ScopeGuard onErrorClose = MakeGuard([&] {
+        _namespaceIndex.close(opCtx);
+        _extentManager->close(opCtx);
+    });
     massert(34469,
             str::stream() << name << " is not a valid database name",
             NamespaceString::validDBName(name));
-    invariant(txn->lockState()->isDbLockedForMode(name, MODE_X));
+    invariant(opCtx->lockState()->isDbLockedForMode(name, MODE_X));
 
     try {
         // First init the .ns file. If this fails, we may leak the .ns file, but this is OK
         // because subsequent openDB will go through this code path again.
-        _namespaceIndex.init(txn);
+        _namespaceIndex.init(opCtx);
 
         // Initialize the extent manager. This will create the first data file (.0) if needed
         // and if this fails we would leak the .ns file above. Leaking the .ns or .0 file is
         // acceptable, because subsequent openDB calls will exercise the code path again.
-        Status s = _extentManager->init(txn);
+        Status s = _extentManager->init(opCtx);
         if (!s.isOK()) {
             msgasserted(16966, str::stream() << "_extentManager->init failed: " << s.toString());
         }
 
         // This is the actual loading of the on-disk structures into cache.
-        _init(txn);
+        _init(opCtx);
     } catch (const DBException& dbe) {
         warning() << "database " << path << " " << name
-                  << " could not be opened due to DBException " << dbe.getCode() << ": "
-                  << dbe.what();
+                  << " could not be opened due to DBException " << dbe.code() << ": " << dbe.what();
         throw;
     } catch (const std::exception& e) {
         warning() << "database " << path << " " << name << " could not be opened " << e.what();
         throw;
     }
+
+    onErrorClose.Dismiss();
 }
 
 MMAPV1DatabaseCatalogEntry::~MMAPV1DatabaseCatalogEntry() {
@@ -223,8 +231,8 @@ void MMAPV1DatabaseCatalogEntry::_removeFromCache(RecoveryUnit* ru, StringData n
     _collections.erase(i);
 }
 
-Status MMAPV1DatabaseCatalogEntry::dropCollection(OperationContext* txn, StringData ns) {
-    invariant(txn->lockState()->isCollectionLockedForMode(ns, MODE_X));
+Status MMAPV1DatabaseCatalogEntry::dropCollection(OperationContext* opCtx, StringData ns) {
+    invariant(opCtx->lockState()->isCollectionLockedForMode(ns, MODE_X));
 
     NamespaceDetails* details = _namespaceIndex.details(ns);
 
@@ -235,28 +243,28 @@ Status MMAPV1DatabaseCatalogEntry::dropCollection(OperationContext* txn, StringD
     invariant(details->nIndexes == 0);               // TODO: delete instead?
     invariant(details->indexBuildsInProgress == 0);  // TODO: delete instead?
 
-    _removeNamespaceFromNamespaceCollection(txn, ns);
-    _removeFromCache(txn->recoveryUnit(), ns);
+    _removeNamespaceFromNamespaceCollection(opCtx, ns);
+    _removeFromCache(opCtx->recoveryUnit(), ns);
 
     // free extents
     if (!details->firstExtent.isNull()) {
-        _extentManager->freeExtents(txn, details->firstExtent, details->lastExtent);
-        *txn->recoveryUnit()->writing(&details->firstExtent) = DiskLoc().setInvalid();
-        *txn->recoveryUnit()->writing(&details->lastExtent) = DiskLoc().setInvalid();
+        _extentManager->freeExtents(opCtx, details->firstExtent, details->lastExtent);
+        *opCtx->recoveryUnit()->writing(&details->firstExtent) = DiskLoc().setInvalid();
+        *opCtx->recoveryUnit()->writing(&details->lastExtent) = DiskLoc().setInvalid();
     }
 
     // remove from the catalog hashtable
-    _namespaceIndex.kill_ns(txn, ns);
+    _namespaceIndex.kill_ns(opCtx, ns);
 
     return Status::OK();
 }
 
 
-Status MMAPV1DatabaseCatalogEntry::renameCollection(OperationContext* txn,
+Status MMAPV1DatabaseCatalogEntry::renameCollection(OperationContext* opCtx,
                                                     StringData fromNS,
                                                     StringData toNS,
                                                     bool stayTemp) {
-    Status s = _renameSingleNamespace(txn, fromNS, toNS, stayTemp);
+    Status s = _renameSingleNamespace(opCtx, fromNS, toNS, stayTemp);
     if (!s.isOK())
         return s;
 
@@ -264,7 +272,7 @@ Status MMAPV1DatabaseCatalogEntry::renameCollection(OperationContext* txn,
     invariant(details);
 
     RecordStoreV1Base* systemIndexRecordStore = _getIndexRecordStore();
-    auto cursor = systemIndexRecordStore->getCursor(txn);
+    auto cursor = systemIndexRecordStore->getCursor(opCtx);
     while (auto record = cursor->next()) {
         BSONObj oldIndexSpec = record->data.releaseToBson();
         if (fromNS != oldIndexSpec["ns"].valuestrsafe())
@@ -283,9 +291,9 @@ Status MMAPV1DatabaseCatalogEntry::renameCollection(OperationContext* txn,
             }
             newIndexSpec = b.obj();
         }
-
+        // TODO SERVER-30638: using timestamp 0 for these inserts.
         StatusWith<RecordId> newIndexSpecLoc = systemIndexRecordStore->insertRecord(
-            txn, newIndexSpec.objdata(), newIndexSpec.objsize(), false);
+            opCtx, newIndexSpec.objdata(), newIndexSpec.objsize(), Timestamp(), false);
         if (!newIndexSpecLoc.isOK())
             return newIndexSpecLoc.getStatus();
 
@@ -293,10 +301,10 @@ Status MMAPV1DatabaseCatalogEntry::renameCollection(OperationContext* txn,
 
         {
             // Fix the IndexDetails pointer.
-            int indexI = getCollectionCatalogEntry(toNS)->_findIndexNumber(txn, indexName);
+            int indexI = getCollectionCatalogEntry(toNS)->_findIndexNumber(opCtx, indexName);
 
             IndexDetails& indexDetails = details->idx(indexI);
-            *txn->recoveryUnit()->writing(&indexDetails.info) =
+            *opCtx->recoveryUnit()->writing(&indexDetails.info) =
                 DiskLoc::fromRecordId(newIndexSpecLoc.getValue());
         }
 
@@ -305,31 +313,31 @@ Status MMAPV1DatabaseCatalogEntry::renameCollection(OperationContext* txn,
             std::string oldIndexNs = IndexDescriptor::makeIndexNamespace(fromNS, indexName);
             std::string newIndexNs = IndexDescriptor::makeIndexNamespace(toNS, indexName);
 
-            Status s = _renameSingleNamespace(txn, oldIndexNs, newIndexNs, false);
+            Status s = _renameSingleNamespace(opCtx, oldIndexNs, newIndexNs, false);
             if (!s.isOK())
                 return s;
         }
         // Invalidate index record for the old collection.
         invalidateSystemCollectionRecord(
-            txn, NamespaceString(name(), "system.indexes"), record->id);
+            opCtx, NamespaceString(name(), "system.indexes"), record->id);
 
-        systemIndexRecordStore->deleteRecord(txn, record->id);
+        systemIndexRecordStore->deleteRecord(opCtx, record->id);
     }
 
     return Status::OK();
 }
 
-Status MMAPV1DatabaseCatalogEntry::_renameSingleNamespace(OperationContext* txn,
+Status MMAPV1DatabaseCatalogEntry::_renameSingleNamespace(OperationContext* opCtx,
                                                           StringData fromNS,
                                                           StringData toNS,
                                                           bool stayTemp) {
     // some sanity checking
     NamespaceDetails* fromDetails = _namespaceIndex.details(fromNS);
     if (!fromDetails)
-        return Status(ErrorCodes::BadValue, "from namespace doesn't exist");
+        return Status(ErrorCodes::NamespaceNotFound, "from namespace doesn't exist");
 
     if (_namespaceIndex.details(toNS))
-        return Status(ErrorCodes::BadValue, "to namespace already exists");
+        return Status(ErrorCodes::NamespaceExists, "to namespace already exists");
 
     // at this point, we haven't done anything destructive yet
 
@@ -338,20 +346,20 @@ Status MMAPV1DatabaseCatalogEntry::_renameSingleNamespace(OperationContext* txn,
     // ----
 
     // this could throw, but if it does we're ok
-    _namespaceIndex.add_ns(txn, toNS, fromDetails);
+    _namespaceIndex.add_ns(opCtx, toNS, fromDetails);
     NamespaceDetails* toDetails = _namespaceIndex.details(toNS);
 
     try {
-        toDetails->copyingFrom(txn, toNS, _namespaceIndex, fromDetails);  // fixes extraOffset
+        toDetails->copyingFrom(opCtx, toNS, _namespaceIndex, fromDetails);  // fixes extraOffset
     } catch (DBException&) {
         // could end up here if .ns is full - if so try to clean up / roll back a little
-        _namespaceIndex.kill_ns(txn, toNS);
+        _namespaceIndex.kill_ns(opCtx, toNS);
         throw;
     }
 
     // at this point, code .ns stuff moved
 
-    _namespaceIndex.kill_ns(txn, fromNS);
+    _namespaceIndex.kill_ns(opCtx, fromNS);
     fromDetails = NULL;
 
     // fix system.namespaces
@@ -359,7 +367,8 @@ Status MMAPV1DatabaseCatalogEntry::_renameSingleNamespace(OperationContext* txn,
     RecordId oldSpecLocation = getCollectionCatalogEntry(fromNS)->getNamespacesRecordId();
     invariant(!oldSpecLocation.isNull());
     {
-        BSONObj oldSpec = _getNamespaceRecordStore()->dataFor(txn, oldSpecLocation).releaseToBson();
+        BSONObj oldSpec =
+            _getNamespaceRecordStore()->dataFor(opCtx, oldSpecLocation).releaseToBson();
         invariant(!oldSpec.isEmpty());
 
         BSONObjBuilder b;
@@ -376,33 +385,34 @@ Status MMAPV1DatabaseCatalogEntry::_renameSingleNamespace(OperationContext* txn,
         newSpec = b.obj();
     }
 
-    RecordId rid = _addNamespaceToNamespaceCollection(txn, toNS, newSpec.isEmpty() ? 0 : &newSpec);
+    RecordId rid =
+        _addNamespaceToNamespaceCollection(opCtx, toNS, newSpec.isEmpty() ? 0 : &newSpec);
 
     // Invalidate old namespace record
     invalidateSystemCollectionRecord(
-        txn, NamespaceString(name(), "system.namespaces"), oldSpecLocation);
+        opCtx, NamespaceString(name(), "system.namespaces"), oldSpecLocation);
 
-    _getNamespaceRecordStore()->deleteRecord(txn, oldSpecLocation);
+    _getNamespaceRecordStore()->deleteRecord(opCtx, oldSpecLocation);
 
     Entry*& entry = _collections[toNS.toString()];
     invariant(entry == NULL);
-    txn->recoveryUnit()->registerChange(new EntryInsertion(toNS, this));
+    opCtx->recoveryUnit()->registerChange(new EntryInsertion(toNS, this));
     entry = new Entry();
-    _removeFromCache(txn->recoveryUnit(), fromNS);
-    _insertInCache(txn, toNS, rid, entry);
+    _removeFromCache(opCtx->recoveryUnit(), fromNS);
+    _insertInCache(opCtx, toNS, rid, entry);
 
     return Status::OK();
 }
 
 void MMAPV1DatabaseCatalogEntry::invalidateSystemCollectionRecord(
-    OperationContext* txn, NamespaceString systemCollectionNamespace, RecordId record) {
+    OperationContext* opCtx, NamespaceString systemCollectionNamespace, RecordId record) {
     // Having to go back up through the DatabaseHolder is a bit of a layering
     // violation, but at this point we're not going to add more MMAPv1 specific interfaces.
     StringData dbName = systemCollectionNamespace.db();
-    invariant(txn->lockState()->isDbLockedForMode(dbName, MODE_X));
-    Database* db = dbHolder().get(txn, dbName);
-    Collection* systemCollection = db->getCollection(systemCollectionNamespace);
-    systemCollection->getCursorManager()->invalidateDocument(txn, record, INVALIDATION_DELETION);
+    invariant(opCtx->lockState()->isDbLockedForMode(dbName, MODE_X));
+    Database* db = DatabaseHolder::getDatabaseHolder().get(opCtx, dbName);
+    Collection* systemCollection = db->getCollection(opCtx, systemCollectionNamespace);
+    systemCollection->getCursorManager()->invalidateDocument(opCtx, record, INVALIDATION_DELETION);
 }
 
 void MMAPV1DatabaseCatalogEntry::appendExtraStats(OperationContext* opCtx,
@@ -484,7 +494,7 @@ void MMAPV1DatabaseCatalogEntry::getCollectionNamespaces(std::list<std::string>*
     _namespaceIndex.getCollectionNamespaces(tofill);
 }
 
-void MMAPV1DatabaseCatalogEntry::_ensureSystemCollection(OperationContext* txn, StringData ns) {
+void MMAPV1DatabaseCatalogEntry::_ensureSystemCollection(OperationContext* opCtx, StringData ns) {
     NamespaceDetails* details = _namespaceIndex.details(ns);
     if (details) {
         return;
@@ -495,14 +505,14 @@ void MMAPV1DatabaseCatalogEntry::_ensureSystemCollection(OperationContext* txn, 
         fassertFailed(34372);
     }
 
-    _namespaceIndex.add_ns(txn, ns, DiskLoc(), false);
+    _namespaceIndex.add_ns(opCtx, ns, DiskLoc(), false);
 }
 
-void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
+void MMAPV1DatabaseCatalogEntry::_init(OperationContext* opCtx) {
     // We wrap the WUOW in an optional as we can't create it if we are in RO mode.
     boost::optional<WriteUnitOfWork> wunit;
     if (!storageGlobalParams.readOnly) {
-        wunit.emplace(txn);
+        wunit.emplace(opCtx);
     }
 
     // Upgrade freelist
@@ -517,13 +527,13 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
 
         if (!freeListDetails->firstExtent.isNull()) {
             _extentManager->freeExtents(
-                txn, freeListDetails->firstExtent, freeListDetails->lastExtent);
+                opCtx, freeListDetails->firstExtent, freeListDetails->lastExtent);
         }
 
-        _namespaceIndex.kill_ns(txn, oldFreeList.ns());
+        _namespaceIndex.kill_ns(opCtx, oldFreeList.ns());
     }
 
-    DataFileVersion version = _extentManager->getFileFormat(txn);
+    DataFileVersion version = _extentManager->getFileFormat(opCtx);
     if (version.isCompatibleWithCurrentCode().isOK() && !version.mayHave30Freelist()) {
         if (storageGlobalParams.readOnly) {
             severe() << "Legacy storage format detected, but server was started with the "
@@ -533,7 +543,7 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
 
         // Any DB that can be opened and written to gets this flag set.
         version.setMayHave30Freelist();
-        _extentManager->setFileFormat(txn, version);
+        _extentManager->setFileFormat(opCtx, version);
     }
 
     const NamespaceString nsi(name(), "system.indexes");
@@ -542,16 +552,16 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
     bool isSystemNamespacesGoingToBeNew = _namespaceIndex.details(nsn.toString()) == NULL;
     bool isSystemIndexesGoingToBeNew = _namespaceIndex.details(nsi.toString()) == NULL;
 
-    _ensureSystemCollection(txn, nsn.toString());
-    _ensureSystemCollection(txn, nsi.toString());
+    _ensureSystemCollection(opCtx, nsn.toString());
+    _ensureSystemCollection(opCtx, nsi.toString());
 
     if (isSystemNamespacesGoingToBeNew) {
         invariant(!storageGlobalParams.readOnly);
-        txn->recoveryUnit()->registerChange(new EntryInsertion(nsn.toString(), this));
+        opCtx->recoveryUnit()->registerChange(new EntryInsertion(nsn.toString(), this));
     }
     if (isSystemIndexesGoingToBeNew) {
         invariant(!storageGlobalParams.readOnly);
-        txn->recoveryUnit()->registerChange(new EntryInsertion(nsi.toString(), this));
+        opCtx->recoveryUnit()->registerChange(new EntryInsertion(nsi.toString(), this));
     }
 
     Entry*& indexEntry = _collections[nsi.toString()];
@@ -571,7 +581,7 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
         NamespaceDetailsRSV1MetaData* md =
             new NamespaceDetailsRSV1MetaData(nsn.toString(), nsDetails);
         nsEntry->recordStore.reset(
-            new SimpleRecordStoreV1(txn, nsn.toString(), md, _extentManager.get(), false));
+            new SimpleRecordStoreV1(opCtx, nsn.toString(), md, _extentManager.get(), false));
     }
 
     if (!indexEntry) {
@@ -581,12 +591,12 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
             new NamespaceDetailsRSV1MetaData(nsi.toString(), indexDetails);
 
         indexEntry->recordStore.reset(
-            new SimpleRecordStoreV1(txn, nsi.toString(), md, _extentManager.get(), true));
+            new SimpleRecordStoreV1(opCtx, nsi.toString(), md, _extentManager.get(), true));
     }
 
     RecordId indexNamespaceId;
     if (isSystemIndexesGoingToBeNew) {
-        indexNamespaceId = _addNamespaceToNamespaceCollection(txn, nsi.toString(), NULL);
+        indexNamespaceId = _addNamespaceToNamespaceCollection(opCtx, nsi.toString(), NULL);
     }
 
     if (!nsEntry->catalogEntry) {
@@ -618,7 +628,7 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
     RecordStoreV1Base* rs = _getNamespaceRecordStore();
     invariant(rs);
 
-    auto cursor = rs->getCursor(txn);
+    auto cursor = rs->getCursor(opCtx);
     while (auto record = cursor->next()) {
         auto ns = record->data.releaseToBson()["name"].String();
         Entry*& entry = _collections[ns];
@@ -628,7 +638,7 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
         // because they don't have indexes on them anyway.
         if (entry) {
             if (entry->catalogEntry->getNamespacesRecordId().isNull()) {
-                entry->catalogEntry->setNamespacesRecordId(txn, record->id);
+                entry->catalogEntry->setNamespacesRecordId(opCtx, record->id);
             } else {
                 invariant(entry->catalogEntry->getNamespacesRecordId() == record->id);
             }
@@ -636,11 +646,11 @@ void MMAPV1DatabaseCatalogEntry::_init(OperationContext* txn) {
         }
 
         entry = new Entry();
-        _insertInCache(txn, ns, record->id, entry);
+        _insertInCache(opCtx, ns, record->id, entry);
     }
 }
 
-Status MMAPV1DatabaseCatalogEntry::createCollection(OperationContext* txn,
+Status MMAPV1DatabaseCatalogEntry::createCollection(OperationContext* opCtx,
                                                     StringData ns,
                                                     const CollectionOptions& options,
                                                     bool allocateDefaultSpace) {
@@ -650,36 +660,36 @@ Status MMAPV1DatabaseCatalogEntry::createCollection(OperationContext* txn,
     }
 
     BSONObj optionsAsBSON = options.toBSON();
-    RecordId rid = _addNamespaceToNamespaceCollection(txn, ns, &optionsAsBSON);
+    RecordId rid = _addNamespaceToNamespaceCollection(opCtx, ns, &optionsAsBSON);
 
-    _namespaceIndex.add_ns(txn, ns, DiskLoc(), options.capped);
+    _namespaceIndex.add_ns(opCtx, ns, DiskLoc(), options.capped);
     NamespaceDetails* details = _namespaceIndex.details(ns);
 
     // Set the flags.
-    NamespaceDetailsRSV1MetaData(ns, details).replaceUserFlags(txn, options.flags);
+    NamespaceDetailsRSV1MetaData(ns, details).replaceUserFlags(opCtx, options.flags);
 
     if (options.capped && options.cappedMaxDocs > 0) {
-        txn->recoveryUnit()->writingInt(details->maxDocsInCapped) = options.cappedMaxDocs;
+        opCtx->recoveryUnit()->writingInt(details->maxDocsInCapped) = options.cappedMaxDocs;
     }
 
     Entry*& entry = _collections[ns.toString()];
     invariant(!entry);
-    txn->recoveryUnit()->registerChange(new EntryInsertion(ns, this));
+    opCtx->recoveryUnit()->registerChange(new EntryInsertion(ns, this));
     entry = new Entry();
-    _insertInCache(txn, ns, rid, entry);
+    _insertInCache(opCtx, ns, rid, entry);
 
     if (allocateDefaultSpace) {
         RecordStoreV1Base* rs = _getRecordStore(ns);
         if (options.initialNumExtents > 0) {
             int size = _massageExtentSize(_extentManager.get(), options.cappedSize);
             for (int i = 0; i < options.initialNumExtents; i++) {
-                rs->increaseStorageSize(txn, size, false);
+                rs->increaseStorageSize(opCtx, size, false);
             }
         } else if (!options.initialExtentSizes.empty()) {
             for (size_t i = 0; i < options.initialExtentSizes.size(); i++) {
                 int size = options.initialExtentSizes[i];
                 size = _massageExtentSize(_extentManager.get(), size);
-                rs->increaseStorageSize(txn, size, false);
+                rs->increaseStorageSize(opCtx, size, false);
             }
         } else if (options.capped) {
             // normal
@@ -687,34 +697,34 @@ Status MMAPV1DatabaseCatalogEntry::createCollection(OperationContext* txn,
                 // Must do this at least once, otherwise we leave the collection with no
                 // extents, which is invalid.
                 int sz = _massageExtentSize(_extentManager.get(),
-                                            options.cappedSize - rs->storageSize(txn));
+                                            options.cappedSize - rs->storageSize(opCtx));
                 sz &= 0xffffff00;
-                rs->increaseStorageSize(txn, sz, false);
-            } while (rs->storageSize(txn) < options.cappedSize);
+                rs->increaseStorageSize(opCtx, sz, false);
+            } while (rs->storageSize(opCtx) < options.cappedSize);
         } else {
-            rs->increaseStorageSize(txn, _extentManager->initialSize(128), false);
+            rs->increaseStorageSize(opCtx, _extentManager->initialSize(128), false);
         }
     }
 
     if (!options.collation.isEmpty()) {
-        markCollationFeatureAsInUse(txn);
+        markCollationFeatureAsInUse(opCtx);
     }
 
     return Status::OK();
 }
 
-void MMAPV1DatabaseCatalogEntry::createNamespaceForIndex(OperationContext* txn, StringData name) {
+void MMAPV1DatabaseCatalogEntry::createNamespaceForIndex(OperationContext* opCtx, StringData name) {
     // This is a simplified form of createCollection.
     invariant(!_namespaceIndex.details(name));
 
-    RecordId rid = _addNamespaceToNamespaceCollection(txn, name, NULL);
-    _namespaceIndex.add_ns(txn, name, DiskLoc(), false);
+    RecordId rid = _addNamespaceToNamespaceCollection(opCtx, name, NULL);
+    _namespaceIndex.add_ns(opCtx, name, DiskLoc(), false);
 
     Entry*& entry = _collections[name.toString()];
     invariant(!entry);
-    txn->recoveryUnit()->registerChange(new EntryInsertion(name, this));
+    opCtx->recoveryUnit()->registerChange(new EntryInsertion(name, this));
     entry = new Entry();
-    _insertInCache(txn, name, rid, entry);
+    _insertInCache(opCtx, name, rid, entry);
 }
 
 NamespaceDetailsCollectionCatalogEntry* MMAPV1DatabaseCatalogEntry::getCollectionCatalogEntry(
@@ -728,7 +738,7 @@ NamespaceDetailsCollectionCatalogEntry* MMAPV1DatabaseCatalogEntry::getCollectio
     return i->second->catalogEntry.get();
 }
 
-void MMAPV1DatabaseCatalogEntry::_insertInCache(OperationContext* txn,
+void MMAPV1DatabaseCatalogEntry::_insertInCache(OperationContext* opCtx,
                                                 StringData ns,
                                                 RecordId rid,
                                                 Entry* entry) {
@@ -743,10 +753,10 @@ void MMAPV1DatabaseCatalogEntry::_insertInCache(OperationContext* txn,
 
     if (details->isCapped) {
         entry->recordStore.reset(new CappedRecordStoreV1(
-            txn, NULL, ns, md.release(), _extentManager.get(), nss.coll() == "system.indexes"));
+            opCtx, NULL, ns, md.release(), _extentManager.get(), nss.coll() == "system.indexes"));
     } else {
         entry->recordStore.reset(new SimpleRecordStoreV1(
-            txn, ns, md.release(), _extentManager.get(), nss.coll() == "system.indexes"));
+            opCtx, ns, md.release(), _extentManager.get(), nss.coll() == "system.indexes"));
     }
 }
 
@@ -764,7 +774,7 @@ RecordStoreV1Base* MMAPV1DatabaseCatalogEntry::_getRecordStore(StringData ns) co
     return i->second->recordStore.get();
 }
 
-IndexAccessMethod* MMAPV1DatabaseCatalogEntry::getIndex(OperationContext* txn,
+IndexAccessMethod* MMAPV1DatabaseCatalogEntry::getIndex(OperationContext* opCtx,
                                                         const CollectionCatalogEntry* collection,
                                                         IndexCatalogEntry* entry) {
     const std::string& type = entry->descriptor()->getAccessMethodName();
@@ -821,7 +831,7 @@ RecordStoreV1Base* MMAPV1DatabaseCatalogEntry::_getNamespaceRecordStore() const 
     return i->second->recordStore.get();
 }
 
-RecordId MMAPV1DatabaseCatalogEntry::_addNamespaceToNamespaceCollection(OperationContext* txn,
+RecordId MMAPV1DatabaseCatalogEntry::_addNamespaceToNamespaceCollection(OperationContext* opCtx,
                                                                         StringData ns,
                                                                         const BSONObj* options) {
     if (nsToCollectionSubstring(ns) == "system.namespaces") {
@@ -839,13 +849,14 @@ RecordId MMAPV1DatabaseCatalogEntry::_addNamespaceToNamespaceCollection(Operatio
 
     RecordStoreV1Base* rs = _getNamespaceRecordStore();
     invariant(rs);
-
-    StatusWith<RecordId> loc = rs->insertRecord(txn, obj.objdata(), obj.objsize(), false);
+    // TODO SERVER-30638: using timestamp 0 for these inserts.
+    StatusWith<RecordId> loc =
+        rs->insertRecord(opCtx, obj.objdata(), obj.objsize(), Timestamp(), false);
     massertStatusOK(loc.getStatus());
     return loc.getValue();
 }
 
-void MMAPV1DatabaseCatalogEntry::_removeNamespaceFromNamespaceCollection(OperationContext* txn,
+void MMAPV1DatabaseCatalogEntry::_removeNamespaceFromNamespaceCollection(OperationContext* opCtx,
                                                                          StringData ns) {
     if (nsToCollectionSubstring(ns) == "system.namespaces") {
         // system.namespaces holds all the others, so it is not explicitly listed in the catalog.
@@ -863,12 +874,12 @@ void MMAPV1DatabaseCatalogEntry::_removeNamespaceFromNamespaceCollection(Operati
     // Invalidate old namespace record
     RecordId oldSpecLocation = entry->second->catalogEntry->getNamespacesRecordId();
     invalidateSystemCollectionRecord(
-        txn, NamespaceString(name(), "system.namespaces"), oldSpecLocation);
+        opCtx, NamespaceString(name(), "system.namespaces"), oldSpecLocation);
 
-    rs->deleteRecord(txn, oldSpecLocation);
+    rs->deleteRecord(opCtx, oldSpecLocation);
 }
 
-CollectionOptions MMAPV1DatabaseCatalogEntry::getCollectionOptions(OperationContext* txn,
+CollectionOptions MMAPV1DatabaseCatalogEntry::getCollectionOptions(OperationContext* opCtx,
                                                                    StringData ns) const {
     if (nsToCollectionSubstring(ns) == "system.namespaces") {
         return {};
@@ -879,10 +890,10 @@ CollectionOptions MMAPV1DatabaseCatalogEntry::getCollectionOptions(OperationCont
         return {};
     }
 
-    return getCollectionOptions(txn, entry->second->catalogEntry->getNamespacesRecordId());
+    return getCollectionOptions(opCtx, entry->second->catalogEntry->getNamespacesRecordId());
 }
 
-CollectionOptions MMAPV1DatabaseCatalogEntry::getCollectionOptions(OperationContext* txn,
+CollectionOptions MMAPV1DatabaseCatalogEntry::getCollectionOptions(OperationContext* opCtx,
                                                                    RecordId rid) const {
     CollectionOptions options;
 
@@ -894,10 +905,11 @@ CollectionOptions MMAPV1DatabaseCatalogEntry::getCollectionOptions(OperationCont
     invariant(rs);
 
     RecordData data;
-    invariant(rs->findRecord(txn, rid, &data));
+    invariant(rs->findRecord(opCtx, rid, &data));
 
     if (data.releaseToBson()["options"].isABSONObj()) {
-        Status status = options.parse(data.releaseToBson()["options"].Obj());
+        Status status = options.parse(data.releaseToBson()["options"].Obj(),
+                                      CollectionOptions::parseForStorage);
         fassert(18523, status);
     }
     return options;

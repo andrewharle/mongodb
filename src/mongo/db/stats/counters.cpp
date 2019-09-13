@@ -1,24 +1,26 @@
 // counters.cpp
-/*
- *    Copyright (C) 2010 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -100,7 +102,6 @@ void OpCounters::gotOp(int op, bool isCommand) {
             break;
         case dbKillCursors:
         case opReply:
-        case dbMsg:
             break;
         default:
             log() << "OpCounters::gotOp unknown op: " << op << endl;
@@ -135,47 +136,69 @@ BSONObj OpCounters::getObj() const {
     return b.obj();
 }
 
-void NetworkCounter::hitPhysical(long long bytesIn, long long bytesOut) {
-    const int64_t MAX = 1ULL << 60;
+void NetworkCounter::hitPhysicalIn(long long bytes) {
+    static const int64_t MAX = 1ULL << 60;
 
     // don't care about the race as its just a counter
-    bool overflow = _physicalBytesIn.loadRelaxed() > MAX || _physicalBytesOut.loadRelaxed() > MAX;
+    const bool overflow = _physicalBytesIn.loadRelaxed() > MAX;
 
     if (overflow) {
-        _physicalBytesIn.store(bytesIn);
-        _physicalBytesOut.store(bytesOut);
+        _physicalBytesIn.store(bytes);
     } else {
-        _physicalBytesIn.fetchAndAdd(bytesIn);
-        _physicalBytesOut.fetchAndAdd(bytesOut);
+        _physicalBytesIn.fetchAndAdd(bytes);
     }
 }
 
-void NetworkCounter::hitLogical(long long bytesIn, long long bytesOut) {
-    const int64_t MAX = 1ULL << 60;
+void NetworkCounter::hitPhysicalOut(long long bytes) {
+    static const int64_t MAX = 1ULL << 60;
 
     // don't care about the race as its just a counter
-    bool overflow = _logicalBytesIn.loadRelaxed() > MAX || _logicalBytesOut.loadRelaxed() > MAX;
+    const bool overflow = _physicalBytesOut.loadRelaxed() > MAX;
 
     if (overflow) {
-        _logicalBytesIn.store(bytesIn);
-        _logicalBytesOut.store(bytesOut);
+        _physicalBytesOut.store(bytes);
+    } else {
+        _physicalBytesOut.fetchAndAdd(bytes);
+    }
+}
+
+void NetworkCounter::hitLogicalIn(long long bytes) {
+    static const int64_t MAX = 1ULL << 60;
+
+    // don't care about the race as its just a counter
+    const bool overflow = _together.logicalBytesIn.loadRelaxed() > MAX;
+
+    if (overflow) {
+        _together.logicalBytesIn.store(bytes);
         // The requests field only gets incremented here (and not in hitPhysical) because the
         // hitLogical and hitPhysical are each called for each operation. Incrementing it in both
         // functions would double-count the number of operations.
-        _requests.store(1);
+        _together.requests.store(1);
     } else {
-        _logicalBytesIn.fetchAndAdd(bytesIn);
-        _logicalBytesOut.fetchAndAdd(bytesOut);
-        _requests.fetchAndAdd(1);
+        _together.logicalBytesIn.fetchAndAdd(bytes);
+        _together.requests.fetchAndAdd(1);
+    }
+}
+
+void NetworkCounter::hitLogicalOut(long long bytes) {
+    static const int64_t MAX = 1ULL << 60;
+
+    // don't care about the race as its just a counter
+    const bool overflow = _logicalBytesOut.loadRelaxed() > MAX;
+
+    if (overflow) {
+        _logicalBytesOut.store(bytes);
+    } else {
+        _logicalBytesOut.fetchAndAdd(bytes);
     }
 }
 
 void NetworkCounter::append(BSONObjBuilder& b) {
-    b.append("bytesIn", static_cast<long long>(_logicalBytesIn.loadRelaxed()));
+    b.append("bytesIn", static_cast<long long>(_together.logicalBytesIn.loadRelaxed()));
     b.append("bytesOut", static_cast<long long>(_logicalBytesOut.loadRelaxed()));
     b.append("physicalBytesIn", static_cast<long long>(_physicalBytesIn.loadRelaxed()));
     b.append("physicalBytesOut", static_cast<long long>(_physicalBytesOut.loadRelaxed()));
-    b.append("numRequests", static_cast<long long>(_requests.loadRelaxed()));
+    b.append("numRequests", static_cast<long long>(_together.requests.loadRelaxed()));
 }
 
 

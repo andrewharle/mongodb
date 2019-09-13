@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -41,6 +43,7 @@
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/index_names.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/service_context.h"
@@ -51,6 +54,8 @@
 namespace mongo {
 namespace index_key_validate {
 
+std::function<void(std::set<StringData>&)> filterAllowedIndexFieldNames;
+
 using std::string;
 
 using IndexVersion = IndexDescriptor::IndexVersion;
@@ -59,9 +64,9 @@ namespace {
 // When the skipIndexCreateFieldNameValidation failpoint is enabled, validation for index field
 // names will be disabled. This will allow for creation of indexes with invalid field names in their
 // specification.
-MONGO_FP_DECLARE(skipIndexCreateFieldNameValidation);
+MONGO_FAIL_POINT_DEFINE(skipIndexCreateFieldNameValidation);
 
-static const std::set<StringData> allowedFieldNames = {
+static std::set<StringData> allowedFieldNames = {
     IndexDescriptor::k2dIndexMaxFieldName,
     IndexDescriptor::k2dIndexBitsFieldName,
     IndexDescriptor::k2dIndexMaxFieldName,
@@ -209,6 +214,7 @@ Status validateKeyPattern(const BSONObj& key, IndexDescriptor::IndexVersion inde
 }
 
 StatusWith<BSONObj> validateIndexSpec(
+    OperationContext* opCtx,
     const BSONObj& indexSpec,
     const NamespaceString& expectedNamespace,
     const ServerGlobalParams::FeatureCompatibility& featureCompatibility) {
@@ -333,6 +339,34 @@ StatusWith<BSONObj> validateIndexSpec(
             }
 
             hasCollationField = true;
+        } else if (IndexDescriptor::kPartialFilterExprFieldName == indexSpecElemFieldName) {
+            if (indexSpecElem.type() != BSONType::Object) {
+                return {ErrorCodes::TypeMismatch,
+                        str::stream() << "The field '"
+                                      << IndexDescriptor::kPartialFilterExprFieldName
+                                      << "' must be an object, but got "
+                                      << typeName(indexSpecElem.type())};
+            }
+
+            // Just use the simple collator, even though the index may have a separate collation
+            // specified or may inherit the default collation from the collection. It's legal to
+            // parse with the wrong collation, since the collation can be set on a MatchExpression
+            // after the fact. Here, we don't bother checking the collation after the fact, since
+            // this invocation of the parser is just for validity checking.
+            auto simpleCollator = nullptr;
+            boost::intrusive_ptr<ExpressionContext> expCtx(
+                new ExpressionContext(opCtx, simpleCollator));
+
+            // Special match expression features (e.g. $jsonSchema, $expr, ...) are not allowed in
+            // a partialFilterExpression on index creation.
+            auto statusWithMatcher =
+                MatchExpressionParser::parse(indexSpecElem.Obj(),
+                                             std::move(expCtx),
+                                             ExtensionsCallbackNoop(),
+                                             MatchExpressionParser::kBanAllSpecialFeatures);
+            if (!statusWithMatcher.isOK()) {
+                return statusWithMatcher.getStatus();
+            }
         } else {
             // We can assume field name is valid at this point. Validation of fieldname is handled
             // prior to this in validateIndexSpecFieldNames().
@@ -341,8 +375,7 @@ StatusWith<BSONObj> validateIndexSpec(
     }
 
     if (!resolvedIndexVersion) {
-        resolvedIndexVersion =
-            IndexDescriptor::getDefaultIndexVersion(featureCompatibility.version.load());
+        resolvedIndexVersion = IndexDescriptor::getDefaultIndexVersion();
     }
 
     if (!hasKeyPatternField) {
@@ -439,14 +472,14 @@ Status validateIndexSpecFieldNames(const BSONObj& indexSpec) {
     return Status::OK();
 }
 
-StatusWith<BSONObj> validateIndexSpecCollation(OperationContext* txn,
+StatusWith<BSONObj> validateIndexSpecCollation(OperationContext* opCtx,
                                                const BSONObj& indexSpec,
                                                const CollatorInterface* defaultCollator) {
     if (auto collationElem = indexSpec[IndexDescriptor::kCollationFieldName]) {
         // validateIndexSpec() should have already verified that 'collationElem' is an object.
         invariant(collationElem.type() == BSONType::Object);
 
-        auto collator = CollatorFactoryInterface::get(txn->getServiceContext())
+        auto collator = CollatorFactoryInterface::get(opCtx->getServiceContext())
                             ->makeFromBSON(collationElem.Obj());
         if (!collator.isOK()) {
             return collator.getStatus();
@@ -495,6 +528,13 @@ StatusWith<BSONObj> validateIndexSpecCollation(OperationContext* txn,
     }
     return indexSpec;
 }
+
+GlobalInitializerRegisterer filterAllowedIndexFieldNamesInitializer(
+    "FilterAllowedIndexFieldNames", [](InitializerContext* service) {
+        if (filterAllowedIndexFieldNames)
+            filterAllowedIndexFieldNames(allowedFieldNames);
+        return Status::OK();
+    });
 
 }  // namespace index_key_validate
 }  // namespace mongo

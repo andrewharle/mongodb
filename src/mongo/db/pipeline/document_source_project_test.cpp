@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -39,6 +41,7 @@
 #include "mongo/db/pipeline/dependencies.h"
 #include "mongo/db/pipeline/document_source_mock.h"
 #include "mongo/db/pipeline/document_source_project.h"
+#include "mongo/db/pipeline/document_value_test_util.h"
 #include "mongo/db/pipeline/value.h"
 #include "mongo/unittest/unittest.h"
 
@@ -87,7 +90,8 @@ TEST_F(ProjectStageTest, ShouldErrorOnNonObjectSpec) {
     BSONObj spec = BSON("$project"
                         << "foo");
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceProject::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceProject::createFromBson(specElement, getExpCtx()),
+                  AssertionException);
 }
 
 /**
@@ -243,6 +247,24 @@ TEST_F(ProjectStageTest, ExclusionProjectionReportsExcludedPathsWithIdExclusion)
     ASSERT_EQUALS(1U, modifiedPaths.paths.count("e.f.g"));
 }
 
+TEST_F(ProjectStageTest, CanUseRemoveSystemVariableToConditionallyExcludeProjectedField) {
+    auto project = DocumentSourceProject::create(
+        fromjson("{a: 1, b: {$cond: [{$eq: ['$b', 4]}, '$$REMOVE', '$b']}}"), getExpCtx());
+    auto source = DocumentSourceMock::create({"{a: 2, b: 2}", "{a: 3, b: 4}"});
+    project->setSource(source.get());
+    auto next = project->getNext();
+    ASSERT(next.isAdvanced());
+    Document expected{{"a", 2}, {"b", 2}};
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(), expected);
+
+    next = project->getNext();
+    ASSERT(next.isAdvanced());
+    expected = Document{{"a", 3}};
+    ASSERT_DOCUMENT_EQ(next.releaseDocument(), expected);
+
+    ASSERT(project->getNext().isEOF());
+}
+
 /**
  * Creates BSON for a DocumentSourceProject that represents projecting a new computed field nested
  * 'depth' levels deep.
@@ -271,7 +293,7 @@ TEST_F(ProjectStageTest, CannotAddNestedDocumentExceedingDepthLimit) {
     ASSERT_THROWS_CODE(
         DocumentSourceProject::create(
             makeProjectForNestedDocument(BSONDepth::getMaxAllowableDepth() + 1), getExpCtx()),
-        UserException,
+        AssertionException,
         ErrorCodes::Overflow);
 }
 }  // namespace

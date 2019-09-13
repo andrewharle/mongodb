@@ -19,6 +19,18 @@ function authAllNodes() {
 
 load("jstests/ssl/libs/ssl_helpers.js");
 
+// The mongo shell cannot authenticate as the internal __system user in tests that use x509 for
+// cluster authentication. Choosing the default value for wcMajorityJournalDefault in
+// ReplSetTest cannot be done automatically without the shell performing such authentication, so
+// in this test we must make the choice explicitly, based on the global test options.
+var wcMajorityJournalDefault;
+if (jsTestOptions().noJournal || jsTestOptions().storageEngine == "ephemeralForTest" ||
+    jsTestOptions().storageEngine == "inMemory") {
+    wcMajorityJournalDefault = false;
+} else {
+    wcMajorityJournalDefault = true;
+}
+
 opts = {
     sslMode: "allowSSL",
     sslPEMKeyFile: SERVER_CERT,
@@ -28,12 +40,18 @@ opts = {
     sslCAFile: CA_CERT
 };
 var NUM_NODES = 3;
-var rst = new ReplSetTest({name: 'sslSet', nodes: NUM_NODES, nodeOptions: opts});
+var rst = new ReplSetTest({
+    name: 'sslSet',
+    nodes: NUM_NODES,
+    nodeOptions: opts,
+    waitForKeys: false,
+});
 rst.startSet();
 
 // ReplSetTest.initiate() requires all nodes to be to be authorized to run replSetGetStatus.
 // TODO(SERVER-14017): Remove this in favor of using initiate() everywhere.
-rst.initiateWithAnyNodeAsPrimary();
+rst.initiateWithAnyNodeAsPrimary(Object.extend(
+    rst.getReplSetConfig(), {writeConcernMajorityJournalDefault: wcMajorityJournalDefault}));
 
 // Connect to master and do some basic operations
 var rstConn1 = rst.getPrimary();
@@ -82,3 +100,4 @@ authAllNodes();
 var rstConn4 = rst.getPrimary();
 rstConn4.getDB("test").a.insert({a: 4, str: "TESTTESTTEST"});
 assert.eq(4, rstConn4.getDB("test").a.count(), "Error interacting with replSet");
+rst.stopSet();

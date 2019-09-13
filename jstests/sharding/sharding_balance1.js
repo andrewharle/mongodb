@@ -4,7 +4,7 @@
     var s = new ShardingTest({shards: 2, mongos: 1, other: {chunkSize: 1, enableBalancer: true}});
 
     assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
 
     var db = s.getDB("test");
 
@@ -23,17 +23,18 @@
     assert.writeOK(bulk.execute());
 
     assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {_id: 1}}));
-    assert.lt(20, s.config.chunks.count(), "setup2");
+    assert.lt(20, s.config.chunks.count({"ns": "test.foo"}), "setup2");
 
     function diff1() {
         var x = s.chunkCounts("foo");
         printjson(x);
-        return Math.max(x.shard0000, x.shard0001) - Math.min(x.shard0000, x.shard0001);
+        return Math.max(x[s.shard0.shardName], x[s.shard1.shardName]) -
+            Math.min(x[s.shard0.shardName], x[s.shard1.shardName]);
     }
 
     function sum() {
         var x = s.chunkCounts("foo");
-        return x.shard0000 + x.shard0001;
+        return x[s.shard0.shardName] + x[s.shard1.shardName];
     }
 
     assert.lt(20, diff1(), "big differential here");

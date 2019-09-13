@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -48,7 +50,18 @@ class TaskExecutor;
  * Implements the catalog client for reading from replica set config servers.
  */
 class ShardingCatalogClientImpl final : public ShardingCatalogClient {
+
 public:
+    /*
+     * Updates (or if "upsert" is true, creates) catalog data for the sharded collection "collNs" by
+     * writing a document to the "config.collections" collection with the catalog information
+     * described by "coll."
+     */
+    static Status updateShardingCatalogEntryForCollection(OperationContext* opCtx,
+                                                          const NamespaceString& nss,
+                                                          const CollectionType& coll,
+                                                          const bool upsert);
+
     explicit ShardingCatalogClientImpl(std::unique_ptr<DistLockManager> distLockManager);
     virtual ~ShardingCatalogClientImpl();
 
@@ -56,208 +69,180 @@ public:
      * Safe to call multiple times as long as the calls are externally synchronized to be
      * non-overlapping.
      */
-    Status startup() override;
+    void startup() override;
 
-    void shutDown(OperationContext* txn) override;
+    void shutDown(OperationContext* opCtx) override;
 
-    Status enableSharding(OperationContext* txn, const std::string& dbName) override;
-
-    Status updateDatabase(OperationContext* txn,
-                          const std::string& dbName,
-                          const DatabaseType& db) override;
-
-    Status updateCollection(OperationContext* txn,
-                            const std::string& collNs,
-                            const CollectionType& coll) override;
-
-    Status createDatabase(OperationContext* txn, const std::string& dbName) override;
-
-    Status logAction(OperationContext* txn,
+    Status logAction(OperationContext* opCtx,
                      const std::string& what,
                      const std::string& ns,
                      const BSONObj& detail) override;
 
-    Status logChange(OperationContext* txn,
+    Status logChange(OperationContext* opCtx,
                      const std::string& what,
                      const std::string& ns,
                      const BSONObj& detail,
                      const WriteConcernOptions& writeConcern) override;
 
-    Status shardCollection(OperationContext* txn,
-                           const std::string& ns,
-                           const ShardKeyPattern& fieldsAndOrder,
-                           const BSONObj& defaultCollation,
-                           bool unique,
-                           const std::vector<BSONObj>& initPoints,
-                           const std::set<ShardId>& initShardsIds) override;
+    StatusWith<repl::OpTimeWith<DatabaseType>> getDatabase(
+        OperationContext* opCtx,
+        const std::string& dbName,
+        repl::ReadConcernLevel readConcernLevel) override;
 
-    StatusWith<ShardDrainingStatus> removeShard(OperationContext* txn,
-                                                const ShardId& name) override;
+    StatusWith<repl::OpTimeWith<std::vector<DatabaseType>>> getAllDBs(
+        OperationContext* opCtx, repl::ReadConcernLevel readConcern) override;
 
-    StatusWith<repl::OpTimeWith<DatabaseType>> getDatabase(OperationContext* txn,
-                                                           const std::string& dbName) override;
+    StatusWith<repl::OpTimeWith<CollectionType>> getCollection(
+        OperationContext* opCtx,
+        const NamespaceString& nss,
+        repl::ReadConcernLevel readConcernLevel) override;
 
-    StatusWith<repl::OpTimeWith<CollectionType>> getCollection(OperationContext* txn,
-                                                               const std::string& collNs) override;
+    StatusWith<std::vector<CollectionType>> getCollections(
+        OperationContext* opCtx,
+        const std::string* dbName,
+        repl::OpTime* optime,
+        repl::ReadConcernLevel readConcernLevel) override;
 
-    Status getCollections(OperationContext* txn,
-                          const std::string* dbName,
-                          std::vector<CollectionType>* collections,
-                          repl::OpTime* optime) override;
+    std::vector<NamespaceString> getAllShardedCollectionsForDb(
+        OperationContext* opCtx, StringData dbName, repl::ReadConcernLevel readConcern) override;
 
-    Status dropCollection(OperationContext* txn, const NamespaceString& ns) override;
+    StatusWith<std::vector<std::string>> getDatabasesForShard(OperationContext* opCtx,
+                                                              const ShardId& shardName) override;
 
-    Status getDatabasesForShard(OperationContext* txn,
-                                const ShardId& shardName,
-                                std::vector<std::string>* dbs) override;
+    StatusWith<std::vector<ChunkType>> getChunks(OperationContext* opCtx,
+                                                 const BSONObj& query,
+                                                 const BSONObj& sort,
+                                                 boost::optional<int> limit,
+                                                 repl::OpTime* opTime,
+                                                 repl::ReadConcernLevel readConcern) override;
 
-    Status getChunks(OperationContext* txn,
-                     const BSONObj& query,
-                     const BSONObj& sort,
-                     boost::optional<int> limit,
-                     std::vector<ChunkType>* chunks,
-                     repl::OpTime* opTime,
-                     repl::ReadConcernLevel readConcern) override;
-
-    Status getTagsForCollection(OperationContext* txn,
-                                const std::string& collectionNs,
-                                std::vector<TagsType>* tags) override;
+    StatusWith<std::vector<TagsType>> getTagsForCollection(OperationContext* opCtx,
+                                                           const NamespaceString& nss) override;
 
     StatusWith<repl::OpTimeWith<std::vector<ShardType>>> getAllShards(
-        OperationContext* txn, repl::ReadConcernLevel readConcern) override;
+        OperationContext* opCtx, repl::ReadConcernLevel readConcern) override;
 
-    bool runUserManagementWriteCommand(OperationContext* txn,
+    bool runUserManagementWriteCommand(OperationContext* opCtx,
                                        const std::string& commandName,
                                        const std::string& dbname,
                                        const BSONObj& cmdObj,
                                        BSONObjBuilder* result) override;
 
-    bool runUserManagementReadCommand(OperationContext* txn,
+    bool runUserManagementReadCommand(OperationContext* opCtx,
                                       const std::string& dbname,
                                       const BSONObj& cmdObj,
                                       BSONObjBuilder* result) override;
 
-    Status applyChunkOpsDeprecated(OperationContext* txn,
+    Status applyChunkOpsDeprecated(OperationContext* opCtx,
                                    const BSONArray& updateOps,
                                    const BSONArray& preCondition,
-                                   const std::string& nss,
+                                   const NamespaceString& nss,
                                    const ChunkVersion& lastChunkVersion,
                                    const WriteConcernOptions& writeConcern,
                                    repl::ReadConcernLevel readConcern) override;
 
-    StatusWith<BSONObj> getGlobalSettings(OperationContext* txn, StringData key) override;
+    StatusWith<BSONObj> getGlobalSettings(OperationContext* opCtx, StringData key) override;
 
-    StatusWith<VersionType> getConfigVersion(OperationContext* txn,
+    StatusWith<VersionType> getConfigVersion(OperationContext* opCtx,
                                              repl::ReadConcernLevel readConcern) override;
 
-    void writeConfigServerDirect(OperationContext* txn,
+    void writeConfigServerDirect(OperationContext* opCtx,
                                  const BatchedCommandRequest& request,
                                  BatchedCommandResponse* response) override;
 
-    Status insertConfigDocument(OperationContext* txn,
-                                const std::string& ns,
+    Status insertConfigDocument(OperationContext* opCtx,
+                                const NamespaceString& nss,
                                 const BSONObj& doc,
                                 const WriteConcernOptions& writeConcern) override;
 
-    StatusWith<bool> updateConfigDocument(OperationContext* txn,
-                                          const std::string& ns,
+    void insertConfigDocumentsAsRetryableWrite(OperationContext* opCtx,
+                                               const NamespaceString& nss,
+                                               std::vector<BSONObj> docs,
+                                               const WriteConcernOptions& writeConcern) override;
+
+    StatusWith<bool> updateConfigDocument(OperationContext* opCtx,
+                                          const NamespaceString& nss,
                                           const BSONObj& query,
                                           const BSONObj& update,
                                           bool upsert,
                                           const WriteConcernOptions& writeConcern) override;
 
-    Status removeConfigDocuments(OperationContext* txn,
-                                 const std::string& ns,
+    Status removeConfigDocuments(OperationContext* opCtx,
+                                 const NamespaceString& nss,
                                  const BSONObj& query,
                                  const WriteConcernOptions& writeConcern) override;
 
     DistLockManager* getDistLockManager() override;
 
-    Status appendInfoForConfigServerDatabases(OperationContext* txn,
-                                              const BSONObj& listDatabasesCmd,
-                                              BSONArrayBuilder* builder) override;
-
-    /**
-     * Runs a read command against the config server with majority read concern.
-     */
-    bool runReadCommandForTest(OperationContext* txn,
-                               const std::string& dbname,
-                               const BSONObj& cmdObj,
-                               BSONObjBuilder* result);
+    StatusWith<std::vector<KeysCollectionDocument>> getNewKeys(
+        OperationContext* opCtx,
+        StringData purpose,
+        const LogicalTime& newerThanThis,
+        repl::ReadConcernLevel readConcernLevel) override;
 
 private:
     /**
-     * Selects an optimal shard on which to place a newly created database from the set of
-     * available shards. Will return ShardNotFound if shard could not be found.
-     */
-    static StatusWith<ShardId> _selectShardForNewDatabase(OperationContext* txn,
-                                                          ShardRegistry* shardRegistry);
-
-    /**
-     * Checks that the given database name doesn't already exist in the config.databases
-     * collection, including under different casing. Optional db can be passed and will
-     * be set with the database details if the given dbName exists.
+     * Updates a single document in the specified namespace on the config server. The document must
+     * have an _id index. Must only be used for updates to the 'config' database.
      *
-     * Returns OK status if the db does not exist.
-     * Some known errors include:
-     *  NamespaceExists if it exists with the same casing
-     *  DatabaseDifferCase if it exists under different casing.
+     * This method retries the operation on NotMaster or network errors, so it should only be used
+     * with modifications which are idempotent.
+     *
+     * Returns non-OK status if the command failed to run for some reason. If the command was
+     * successful, returns true if a document was actually modified (that is, it did not exist and
+     * was upserted or it existed and any of the fields changed) and false otherwise (basically
+     * returns whether the update command's response update.n value is > 0).
      */
-    Status _checkDbDoesNotExist(OperationContext* txn, const std::string& dbName, DatabaseType* db);
+    static StatusWith<bool> _updateConfigDocument(OperationContext* opCtx,
+                                                  const NamespaceString& nss,
+                                                  const BSONObj& query,
+                                                  const BSONObj& update,
+                                                  bool upsert,
+                                                  const WriteConcernOptions& writeConcern);
 
     /**
      * Creates the specified collection name in the config database.
      */
-    Status _createCappedConfigCollection(OperationContext* txn,
+    Status _createCappedConfigCollection(OperationContext* opCtx,
                                          StringData collName,
                                          int cappedSize,
                                          const WriteConcernOptions& writeConcern);
 
-    /**
-     * Helper method for running a count command against the config server with appropriate
-     * error handling.
-     */
-    StatusWith<long long> _runCountCommandOnConfig(OperationContext* txn,
-                                                   const NamespaceString& ns,
-                                                   BSONObj query);
-
     StatusWith<repl::OpTimeWith<std::vector<BSONObj>>> _exhaustiveFindOnConfig(
-        OperationContext* txn,
+        OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
-        repl::ReadConcernLevel readConcern,
+        const repl::ReadConcernLevel& readConcern,
         const NamespaceString& nss,
         const BSONObj& query,
         const BSONObj& sort,
-        boost::optional<long long> limit);
-
-    /**
-     * Appends a read committed read concern to the request object.
-     */
-    void _appendReadConcern(BSONObjBuilder* builder);
+        boost::optional<long long> limit) override;
 
     /**
      * Queries the config servers for the database metadata for the given database, using the
      * given read preference.  Returns NamespaceNotFound if no database metadata is found.
      */
     StatusWith<repl::OpTimeWith<DatabaseType>> _fetchDatabaseMetadata(
-        OperationContext* txn, const std::string& dbName, const ReadPreferenceSetting& readPref);
+        OperationContext* opCtx,
+        const std::string& dbName,
+        const ReadPreferenceSetting& readPref,
+        repl::ReadConcernLevel readConcernLevel);
 
     /**
      * Best effort method, which logs diagnostic events on the config server. If the config server
      * write fails for any reason a warning will be written to the local service log and the method
      * will return a failed status.
      *
-     * @param txn Operation context in which the call is running
+     * @param opCtx Operation context in which the call is running
      * @param logCollName Which config collection to write to (excluding the database name)
      * @param what E.g. "split", "migrate" (not interpreted)
      * @param operationNS To which collection the metadata change is being applied (not interpreted)
      * @param detail Additional info about the metadata change (not interpreted)
      * @param writeConcern Write concern options to use for logging
      */
-    Status _log(OperationContext* txn,
+    Status _log(OperationContext* opCtx,
                 const StringData& logCollName,
                 const std::string& what,
-                const std::string& operationNS,
+                const std::string& operationNSS,
                 const BSONObj& detail,
                 const WriteConcernOptions& writeConcern);
 

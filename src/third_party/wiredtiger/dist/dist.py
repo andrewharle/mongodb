@@ -1,4 +1,4 @@
-import filecmp, glob, os, re, shutil
+import filecmp, fnmatch, glob, os, re, shutil
 
 # source_files --
 #    Return a list of the WiredTiger source file names.
@@ -12,6 +12,33 @@ def source_files():
     for line in open('extlist', 'r'):
         if file_re.match(line):
             yield os.path.join('..', line.split()[0])
+
+# all_c_files --
+#       Return list of all WiredTiger C source file names.
+def all_c_files():
+    file_re = re.compile(r'^\w')
+    for line in glob.iglob('../src/*/*.[ci]'):
+        yield line
+    files = list()
+    for (dirpath, dirnames, filenames) in os.walk('../test'):
+        files += [os.path.join(dirpath, file) for file in filenames]
+    for file in files:
+        if fnmatch.fnmatch(file, '*.[ci]'):
+            yield file
+
+# all_h_files --
+#       Return list of all WiredTiger C include file names.
+def all_h_files():
+    file_re = re.compile(r'^\w')
+    for line in glob.iglob('../src/*/*.h'):
+        yield line
+    yield "../src/include/wiredtiger.in"
+    files = list()
+    for (dirpath, dirnames, filenames) in os.walk('../test'):
+        files += [os.path.join(dirpath, file) for file in filenames]
+    for file in files:
+        if fnmatch.fnmatch(file, '*.h'):
+            yield file
 
 # source_dirs --
 #    Return a list of the WiredTiger source directory names.

@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
@@ -71,7 +73,7 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
             if (scope->isJavaScriptProtectionEnabled()) {
                 JS::AutoValueArray<2> args(_context);
 
-                ValueReader(_context, args[0]).fromStringData(elem.valueStringData());
+                ValueReader(_context, args[0]).fromStringData(elem.codeWScopeCode());
                 ValueReader(_context, args[1]).fromBSON(elem.codeWScopeObject(), nullptr, readOnly);
 
                 scope->getProto<CodeInfo>().newInstance(args, _value);
@@ -204,38 +206,23 @@ void ValueReader::fromBSONElement(const BSONElement& elem, const BSONObj& parent
 }
 
 void ValueReader::fromBSON(const BSONObj& obj, const BSONObj* parent, bool readOnly) {
+    JS::RootedObject child(_context);
+
+    bool filledDBRef = false;
     if (obj.firstElementType() == String && str::equals(obj.firstElementFieldName(), "$ref")) {
         BSONObjIterator it(obj);
-        const BSONElement ref = it.next();
+        it.next();
         const BSONElement id = it.next();
 
         if (id.ok() && str::equals(id.fieldName(), "$id")) {
-            JS::AutoValueArray<2> args(_context);
-
-            ValueReader(_context, args[0]).fromBSONElement(ref, parent ? *parent : obj, readOnly);
-
-            // id can be a subobject
-            ValueReader(_context, args[1]).fromBSONElement(id, parent ? *parent : obj, readOnly);
-
-            JS::RootedObject robj(_context);
-
-            auto scope = getScope(_context);
-
-            scope->getProto<DBRefInfo>().newInstance(args, &robj);
-            ObjectWrapper o(_context, robj);
-
-            while (it.more()) {
-                BSONElement elem = it.next();
-                o.setBSONElement(elem.fieldName(), elem, parent ? *parent : obj, readOnly);
-            }
-
-            _value.setObjectOrNull(robj);
-            return;
+            DBRefInfo::make(_context, &child, obj, parent, readOnly);
+            filledDBRef = true;
         }
     }
 
-    JS::RootedObject child(_context);
-    BSONInfo::make(_context, &child, obj, parent, readOnly);
+    if (!filledDBRef) {
+        BSONInfo::make(_context, &child, obj, parent, readOnly);
+    }
 
     _value.setObjectOrNull(child);
 }

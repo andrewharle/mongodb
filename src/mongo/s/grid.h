@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2010-2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,35 +30,36 @@
 
 #pragma once
 
-#include <memory>
-
 #include "mongo/db/repl/optime.h"
+#include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/catalog_cache.h"
+#include "mongo/s/client/shard_registry.h"
+#include "mongo/stdx/functional.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
 
 class BalancerConfiguration;
-class CatalogCache;
-class ShardingCatalogClient;
-class ShardingCatalogManager;
 class ClusterCursorManager;
 class OperationContext;
 class ServiceContext;
-class ShardRegistry;
 
 namespace executor {
+struct ConnectionPoolStats;
 class NetworkInterface;
 class TaskExecutorPool;
 }  // namespace executor
 
 /**
- * Holds the global sharding context. Single instance exists for a running server. Exists on
- * both MongoD and MongoS.
+ * Contains the sharding context for a running server. Exists on both MongoD and MongoS.
  */
 class Grid {
 public:
     Grid();
     ~Grid();
+
+    using CustomConnectionPoolStatsFn = stdx::function<void(executor::ConnectionPoolStats* stats)>;
 
     /**
      * Retrieves the instance of Grid associated with the current service/operation context.
@@ -72,13 +75,32 @@ public:
      *       state using clearForUnitTests.
      */
     void init(std::unique_ptr<ShardingCatalogClient> catalogClient,
-              std::unique_ptr<ShardingCatalogManager> catalogManager,
               std::unique_ptr<CatalogCache> catalogCache,
               std::unique_ptr<ShardRegistry> shardRegistry,
               std::unique_ptr<ClusterCursorManager> cursorManager,
               std::unique_ptr<BalancerConfiguration> balancerConfig,
               std::unique_ptr<executor::TaskExecutorPool> executorPool,
               executor::NetworkInterface* network);
+
+    /**
+     * Used to check if sharding is initialized for usage of global sharding services. Protected by
+     * an atomic access guard.
+     */
+    bool isShardingInitialized() const;
+
+    /**
+     * Used to indicate the sharding initialization process is complete. Should only be called once
+     * in the lifetime of a server. Protected by an atomic access guard.
+     */
+    void setShardingInitialized();
+
+    /**
+     * If the instance as which this sharding component is running (config/shard/mongos) uses
+     * additional connection pools other than the default, this function will be present and can be
+     * used to obtain statistics about them. Otherwise, the value will be unset.
+     */
+    CustomConnectionPoolStatsFn getCustomConnectionPoolStatsFn() const;
+    void setCustomConnectionPoolStatsFn(CustomConnectionPoolStatsFn statsFn);
 
     /**
      * Deprecated. This is only used on mongos, and once addShard is solely handled by the configs,
@@ -94,20 +116,8 @@ public:
      */
     void setAllowLocalHost(bool allow);
 
-    /**
-     * Returns a pointer to a ShardingCatalogClient to use for accessing catalog data stored on the
-     * config servers.
-     */
-    ShardingCatalogClient* catalogClient(OperationContext* txn) {
+    ShardingCatalogClient* catalogClient() const {
         return _catalogClient.get();
-    }
-
-    /**
-     * Returns a pointer to a ShardingCatalogManager to use for manipulating catalog data stored on
-     * the config servers.
-     */
-    ShardingCatalogManager* catalogManager() {
-        return _catalogManager.get();
     }
 
     CatalogCache* catalogCache() const {
@@ -122,7 +132,7 @@ public:
         return _cursorManager.get();
     }
 
-    executor::TaskExecutorPool* getExecutorPool() {
+    executor::TaskExecutorPool* getExecutorPool() const {
         return _executorPool.get();
     }
 
@@ -161,7 +171,6 @@ public:
 
 private:
     std::unique_ptr<ShardingCatalogClient> _catalogClient;
-    std::unique_ptr<ShardingCatalogManager> _catalogManager;
     std::unique_ptr<CatalogCache> _catalogCache;
     std::unique_ptr<ShardRegistry> _shardRegistry;
     std::unique_ptr<ClusterCursorManager> _cursorManager;
@@ -175,6 +184,10 @@ private:
     // questions about the network configuration, such as getting the current server's hostname.
     executor::NetworkInterface* _network{nullptr};
 
+    CustomConnectionPoolStatsFn _customConnectionPoolStatsFn;
+
+    AtomicBool _shardingInitialized{false};
+
     // Protects _configOpTime.
     mutable stdx::mutex _mutex;
 
@@ -187,9 +200,5 @@ private:
     // Can 'localhost' be used in shard addresses?
     bool _allowLocalShard{true};
 };
-
-// Reference to the global Grid instance. Do not use in new code. Use one of the Grid::get methods
-// instead.
-extern Grid grid;
 
 }  // namespace mongo

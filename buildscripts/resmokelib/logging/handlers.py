@@ -1,32 +1,42 @@
-"""
-Additional handlers that are used as the base classes of the buildlogger
-handler.
-"""
+"""Additional handlers that are used as the base classes of the buildlogger handler."""
 
 from __future__ import absolute_import
 
 import json
 import logging
+import sys
 import threading
-import urllib2
+import warnings
+
+import requests
+import requests.adapters
+import requests.auth
+
+try:
+    import requests.packages.urllib3.exceptions as urllib3_exceptions
+except ImportError:
+    # Versions of the requests package prior to 1.2.0 did not vendor the urllib3 package.
+    urllib3_exceptions = None
+
+import urllib3.util.retry as urllib3_retry
 
 from . import flush
 from .. import utils
 
 _TIMEOUT_SECS = 10
 
-class BufferedHandler(logging.Handler):
-    """
-    A handler class that buffers logging records in memory. Whenever
-    each record is added to the buffer, a check is made to see if the
-    buffer should be flushed. If it should, then flush() is expected to
-    do what's needed.
+
+class BufferedHandler(logging.Handler):  # pylint: disable=too-many-instance-attributes
+    """A handler class that buffers logging records in memory.
+
+    Whenever each record is added to the buffer, a check is made to see if the buffer
+    should be flushed. If it should, then flush() is expected to do what's needed.
     """
 
     def __init__(self, capacity, interval_secs):
-        """
-        Initializes the handler with the buffer size and timeout after
-        which the buffer is flushed regardless.
+        """Initialize the handler with the buffer size and timeout.
+
+        These values determine when the buffer is flushed regardless.
         """
 
         logging.Handler.__init__(self)
@@ -50,6 +60,7 @@ class BufferedHandler(logging.Handler):
         self.__emit_buffer = []
         self.__flush_event = None  # A handle to the event that calls self.flush().
         self.__flush_scheduled_by_emit = False
+        self.__close_called = False
 
         self.__flush_lock = threading.Lock()  # Serializes callers of self.flush().
 
@@ -57,18 +68,19 @@ class BufferedHandler(logging.Handler):
     # close() serialize accesses to 'self.__emit_buffer' in a more granular way via
     # 'self.__emit_lock'.
     def createLock(self):
+        """Create lock."""
         pass
 
     def acquire(self):
+        """Acquire."""
         pass
 
     def release(self):
+        """Release."""
         pass
 
-    def process_record(self, record):
-        """
-        Applies a transformation to the record before it gets added to
-        the buffer.
+    def process_record(self, record):  # pylint: disable=no-self-use
+        """Apply a transformation to the record before it gets added to the buffer.
 
         The default implementation returns 'record' unmodified.
         """
@@ -76,8 +88,7 @@ class BufferedHandler(logging.Handler):
         return record
 
     def emit(self, record):
-        """
-        Emits a record.
+        """Emit a record.
 
         Append the record to the buffer after it has been transformed by
         process_record(). If the length of the buffer is greater than or
@@ -106,14 +117,12 @@ class BufferedHandler(logging.Handler):
                     self.__flush_scheduled_by_emit = True
 
     def flush(self):
-        """
-        Ensures all logging output has been flushed.
-        """
+        """Ensure all logging output has been flushed."""
 
         self.__flush(close_called=False)
 
         with self.__emit_lock:
-            if self.__flush_event is not None:
+            if self.__flush_event is not None and not self.__close_called:
                 # We cancel 'self.__flush_event' in case flush() was called by someone other than
                 # the flush thread to avoid having multiple flush() events scheduled.
                 flush.cancel(self.__flush_event)
@@ -121,9 +130,7 @@ class BufferedHandler(logging.Handler):
                 self.__flush_scheduled_by_emit = False
 
     def __flush(self, close_called):
-        """
-        Ensures all logging output has been flushed.
-        """
+        """Ensure all logging output has been flushed."""
 
         with self.__emit_lock:
             buf = self.__emit_buffer
@@ -136,20 +143,17 @@ class BufferedHandler(logging.Handler):
                 self._flush_buffer_with_lock(buf, close_called)
 
     def _flush_buffer_with_lock(self, buf, close_called):
-        """
-        Ensures all logging output has been flushed.
-        """
+        """Ensure all logging output has been flushed."""
 
         raise NotImplementedError("_flush_buffer_with_lock must be implemented by BufferedHandler"
                                   " subclasses")
 
     def close(self):
-        """
-        Flushes the buffer and tidies up any resources used by this
-        handler.
-        """
+        """Flush the buffer and tidies up any resources used by this handler."""
 
         with self.__emit_lock:
+            self.__close_called = True
+
             if self.__flush_event is not None:
                 flush.cancel(self.__flush_event)
 
@@ -159,35 +163,35 @@ class BufferedHandler(logging.Handler):
 
 
 class HTTPHandler(object):
-    """
-    A class which sends data to a web server using POST requests.
-    """
+    """A class which sends data to a web server using POST requests."""
 
-    def __init__(self, realm, url_root, username, password):
-        """
-        Initializes the handler with the necessary authenticaton
-        credentials.
-        """
+    def __init__(self, url_root, username, password, should_retry=False):
+        """Initialize the handler with the necessary authentication credentials."""
 
-        auth_handler = urllib2.HTTPBasicAuthHandler()
-        auth_handler.add_password(
-            realm=realm,
-            uri=url_root,
-            user=username,
-            passwd=password)
+        self.auth_handler = requests.auth.HTTPBasicAuth(username, password)
+
+        self.session = requests.Session()
+
+        if should_retry:
+            retry_status = [500, 502, 503, 504]  # Retry for these statuses.
+            retry = urllib3_retry.Retry(
+                backoff_factor=0.1,  # Enable backoff starting at 0.1s.
+                method_whitelist=False,  # Support all HTTP verbs.
+                status_forcelist=retry_status)
+
+            adapter = requests.adapters.HTTPAdapter(max_retries=retry)
+            self.session.mount('http://', adapter)
+            self.session.mount('https://', adapter)
 
         self.url_root = url_root
-        self.url_opener = urllib2.build_opener(auth_handler, urllib2.HTTPErrorProcessor())
 
     def _make_url(self, endpoint):
         return "%s/%s/" % (self.url_root.rstrip("/"), endpoint.strip("/"))
 
     def post(self, endpoint, data=None, headers=None, timeout_secs=_TIMEOUT_SECS):
-        """
-        Sends a POST request to the specified endpoint with the supplied
-        data.
+        """Send a POST request to the specified endpoint with the supplied data.
 
-        Returns the response, either as a string or a JSON object based
+        Return the response, either as a string or a JSON object based
         on the content type.
         """
 
@@ -198,14 +202,40 @@ class HTTPHandler(object):
         headers["Content-Type"] = "application/json; charset=utf-8"
 
         url = self._make_url(endpoint)
-        request = urllib2.Request(url=url, data=data, headers=headers)
 
-        response = self.url_opener.open(request, timeout=timeout_secs)
-        headers = response.info()
+        # Versions of Python earlier than 2.7.9 do not support certificate validation. So we
+        # disable certificate validation for older Python versions.
+        should_validate_certificates = sys.version_info >= (2, 7, 9)
+        with warnings.catch_warnings():
+            if urllib3_exceptions is not None and not should_validate_certificates:
+                try:
+                    warnings.simplefilter("ignore", urllib3_exceptions.InsecurePlatformWarning)
+                except AttributeError:
+                    # Versions of urllib3 prior to 1.10.3 didn't define InsecurePlatformWarning.
+                    # Versions of requests prior to 2.6.0 didn't have a vendored copy of urllib3
+                    # that defined InsecurePlatformWarning.
+                    pass
 
-        content_type = headers.gettype()
-        if content_type == "application/json":
-            encoding = headers.getparam("charset") or "utf-8"
-            return json.load(response, encoding=encoding)
+                try:
+                    warnings.simplefilter("ignore", urllib3_exceptions.InsecureRequestWarning)
+                except AttributeError:
+                    # Versions of urllib3 prior to 1.9 didn't define InsecureRequestWarning.
+                    # Versions of requests prior to 2.4.0 didn't have a vendored copy of urllib3
+                    # that defined InsecureRequestWarning.
+                    pass
 
-        return response.read()
+            response = self.session.post(url, data=data, headers=headers, timeout=timeout_secs,
+                                         auth=self.auth_handler,
+                                         verify=should_validate_certificates)
+
+        response.raise_for_status()
+
+        if not response.encoding:
+            response.encoding = "utf-8"
+
+        headers = response.headers
+
+        if headers["Content-Type"].startswith("application/json"):
+            return response.json()
+
+        return response.text

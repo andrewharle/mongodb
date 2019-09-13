@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,16 +35,16 @@
 #include "mongo/db/repl/elect_cmd_runner.h"
 
 #include "mongo/base/status.h"
-#include "mongo/db/repl/member_heartbeat_data.h"
 #include "mongo/db/repl/repl_set_config.h"
-#include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_runner.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 namespace repl {
 
 using executor::RemoteCommandRequest;
+using executor::RemoteCommandResponse;
 
 ElectCmdRunner::Algorithm::Algorithm(const ReplSetConfig& rsConfig,
                                      int selfIndex,
@@ -104,7 +106,7 @@ bool ElectCmdRunner::Algorithm::hasReceivedSufficientResponses() const {
 }
 
 void ElectCmdRunner::Algorithm::processResponse(const RemoteCommandRequest& request,
-                                                const ResponseStatus& response) {
+                                                const RemoteCommandResponse& response) {
     ++_actualResponses;
 
     if (response.isOK()) {
@@ -128,13 +130,13 @@ void ElectCmdRunner::Algorithm::processResponse(const RemoteCommandRequest& requ
 ElectCmdRunner::ElectCmdRunner() : _isCanceled(false) {}
 ElectCmdRunner::~ElectCmdRunner() {}
 
-StatusWith<ReplicationExecutor::EventHandle> ElectCmdRunner::start(
-    ReplicationExecutor* executor,
+StatusWith<executor::TaskExecutor::EventHandle> ElectCmdRunner::start(
+    executor::TaskExecutor* executor,
     const ReplSetConfig& currentConfig,
     int selfIndex,
     const std::vector<HostAndPort>& targets) {
-    _algorithm.reset(new Algorithm(currentConfig, selfIndex, targets, OID::gen()));
-    _runner.reset(new ScatterGatherRunner(_algorithm.get(), executor));
+    _algorithm = std::make_shared<Algorithm>(currentConfig, selfIndex, targets, OID::gen());
+    _runner = stdx::make_unique<ScatterGatherRunner>(_algorithm, executor);
     return _runner->start();
 }
 

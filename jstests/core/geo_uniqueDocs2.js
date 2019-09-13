@@ -1,3 +1,5 @@
+// @tags: [requires_non_retryable_writes]
+
 // Additional checks for geo uniqueDocs and includeLocs SERVER-3139.
 // SERVER-12120 uniqueDocs is deprecated.
 // Server always returns results with implied uniqueDocs=true

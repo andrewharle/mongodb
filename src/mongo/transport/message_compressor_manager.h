@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,6 +33,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status_with.h"
 #include "mongo/transport/message_compressor_base.h"
+#include "mongo/transport/session.h"
 
 #include <vector>
 
@@ -89,14 +92,18 @@ public:
     void serverNegotiate(const BSONObj& input, BSONObjBuilder* output);
 
     /*
-     * Returns a new Message compressed with the compressor pointed to by _preferred.
+     * Returns a new Message containing the compressed contentx of 'msg'. If compressorId is null,
+     * then it selects the first negotiated compressor. Otherwise, it uses the compressor with the
+     * given identifier. It is intended that this value echo back a value returned as the out
+     * parameter value for compressorId from a call to decompressMessage.
      *
      * If _negotiated is empty (meaning compression was not negotiated or is not supported), then
      * it will return a ref-count bumped copy of the input message.
      *
      * If an error occurs in the compressor, it will return a Status error.
      */
-    StatusWith<Message> compressMessage(const Message& msg);
+    StatusWith<Message> compressMessage(const Message& msg,
+                                        const MessageCompressorId* compressorId = nullptr);
 
     /*
      * Returns a new Message containing the decompressed copy of the input message.
@@ -110,8 +117,15 @@ public:
      * pointer to the global MessageCompressorRegistry and can lookup any message's compressor
      * by ID number through that registry. As long as the compressor has been enabled process-wide,
      * it can decompress any message without negotiation.
+     *
+     * If the 'compressorId' parameter is non-null, it will be populated with the compressor
+     * used. If 'decompressMessage' returns succesfully, then that value can be fed back into
+     * compressMessage, ensuring that the same compressor is used on both sides of a conversation.
      */
-    StatusWith<Message> decompressMessage(const Message& msg);
+    StatusWith<Message> decompressMessage(const Message& msg,
+                                          MessageCompressorId* compressorId = nullptr);
+
+    static MessageCompressorManager& forSession(const transport::SessionHandle& session);
 
 private:
     std::vector<MessageCompressorBase*> _negotiated;

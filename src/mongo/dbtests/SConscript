@@ -1,6 +1,9 @@
 # -*- mode: python; -*-
 
 Import("env")
+Import("get_option")
+
+env = env.Clone()
 
 env.Library(
     target="framework_options",
@@ -22,15 +25,13 @@ env.Library(
         'framework_options_init.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/op_observer_noop',
-        '$BUILD_DIR/mongo/db/s/sharding',
-        '$BUILD_DIR/mongo/s/coreshard',
+        '$BUILD_DIR/mongo/db/dbdirectclient',
+        '$BUILD_DIR/mongo/db/op_observer',
+        '$BUILD_DIR/mongo/db/service_context_d',
+        '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
+        '$BUILD_DIR/mongo/scripting/scripting_common',
         '$BUILD_DIR/mongo/unittest/unittest',
         'framework_options',
-    ],
-    LIBDEPS_TAGS=[
-        # Depends on service_context_d.cpp which is in serveronly
-        'incomplete',
     ],
 )
 
@@ -44,7 +45,7 @@ env.Library(
         'mock/mock_replica_set.cpp'
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/client/clientdriver',
+        '$BUILD_DIR/mongo/client/clientdriver_network',
         '$BUILD_DIR/mongo/db/repl/replica_set_messages'
     ],
 )
@@ -58,6 +59,7 @@ dbtest = env.Program(
         'counttests.cpp',
         'dbhelper_tests.cpp',
         'dbtests.cpp',
+        'deferred_writer.cpp',
         'directclienttests.cpp',
         'documentsourcetests.cpp',
         'executor_registry.cpp',
@@ -70,6 +72,7 @@ dbtest = env.Program(
         'jsobjtests.cpp',
         'jsontests.cpp',
         'jstests.cpp',
+        'logical_sessions_tests.cpp',
         'matchertests.cpp',
         'mmaptests.cpp',
         'mock_dbclient_conn_test.cpp',
@@ -78,10 +81,10 @@ dbtest = env.Program(
         'namespacetests.cpp',
         'oplogstarttests.cpp',
         'pdfiletests.cpp',
-        'perftests.cpp',
         'plan_ranking.cpp',
         'query_stage_multiplan.cpp',
         'query_plan_executor.cpp',
+        'cursor_manager_test.cpp',
         'query_stage_and.cpp',
         'query_stage_cached_plan.cpp',
         'query_stage_collscan.cpp',
@@ -97,6 +100,7 @@ dbtest = env.Program(
         'query_stage_merge_sort.cpp',
         'query_stage_near.cpp',
         'query_stage_sort.cpp',
+        'query_stage_sort_key_generator.cpp',
         'query_stage_subplan.cpp',
         'query_stage_tests.cpp',
         'query_stage_update.cpp',
@@ -106,31 +110,49 @@ dbtest = env.Program(
         'repltests.cpp',
         'rollbacktests.cpp',
         'socktests.cpp',
-        'sort_key_generator_test.cpp',
+        'storage_timestamp_tests.cpp',
         'threadedtests.cpp',
         'updatetests.cpp',
         'validate_tests.cpp',
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/bson/mutable/mutable_bson_test_utils",
-        "$BUILD_DIR/mongo/db/auth/authmocks",
+        "$BUILD_DIR/mongo/db/auth/authmongod",
         "$BUILD_DIR/mongo/db/bson/dotted_path_support",
+        "$BUILD_DIR/mongo/db/commands/mongod",
+        "$BUILD_DIR/mongo/db/commands/test_commands_enabled",
+        "$BUILD_DIR/mongo/db/concurrency/deferred_writer",
+        "$BUILD_DIR/mongo/db/logical_clock",
+        "$BUILD_DIR/mongo/db/logical_time_metadata_hook",
+        "$BUILD_DIR/mongo/db/pipeline/document_value_test_util",
         "$BUILD_DIR/mongo/db/query/collation/collator_interface_mock",
-        "$BUILD_DIR/mongo/db/query/query",
+        "$BUILD_DIR/mongo/db/query_exec",
+        "$BUILD_DIR/mongo/db/query/query_planner_test_lib",
         "$BUILD_DIR/mongo/db/query/query_test_service_context",
-        "$BUILD_DIR/mongo/db/repl/repl_coordinator_global",
+        "$BUILD_DIR/mongo/db/repl/drop_pending_collection_reaper",
+        "$BUILD_DIR/mongo/db/repl/repl_coordinator_interface",
+        "$BUILD_DIR/mongo/db/repl/replication_consistency_markers_impl",
         "$BUILD_DIR/mongo/db/repl/replmocks",
+        "$BUILD_DIR/mongo/db/repl/storage_interface_impl",
+        "$BUILD_DIR/mongo/db/s/op_observer_sharding_impl",
         "$BUILD_DIR/mongo/db/serveronly",
-        "$BUILD_DIR/mongo/db/storage/paths",
-        "$BUILD_DIR/mongo/util/concurrency/rwlock",
+        "$BUILD_DIR/mongo/db/sessions_collection_standalone",
+        "$BUILD_DIR/mongo/db/storage/mmap_v1/paths",
+        "$BUILD_DIR/mongo/db/storage/kv/kv_engine_core",
+        "$BUILD_DIR/mongo/transport/transport_layer_manager",
+        "$BUILD_DIR/mongo/util/clock_source_mock",
         "$BUILD_DIR/mongo/util/net/network",
         "$BUILD_DIR/mongo/util/progress_meter",
         "$BUILD_DIR/mongo/util/version_impl",
-        '$BUILD_DIR/mongo/db/pipeline/document_value_test_util',
-        '$BUILD_DIR/mongo/util/clock_source_mock',
+        "$BUILD_DIR/mongo/shell_core",
         "mocklib",
         "testframework",
     ],
+    INSTALL_ALIAS=[
+        'tests'
+    ],
 )
 
-env.Alias("dbtest", env.Install('#/', dbtest))
+hygienic = get_option('install-mode') == 'hygienic'
+if not hygienic:
+    env.Alias("dbtest", env.Install('#/', dbtest))

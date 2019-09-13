@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -49,7 +51,7 @@ namespace mongo {
  * Defines common attributes for all index filter related commands
  * such as slaveOk.
  */
-class IndexFilterCommand : public Command {
+class IndexFilterCommand : public BasicCommand {
 public:
     IndexFilterCommand(const std::string& name, const std::string& helpText);
 
@@ -63,20 +65,16 @@ public:
      * implement plan cache command functionality.
      */
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbname,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result);
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override;
 
-    virtual bool slaveOk() const;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override;
 
-    virtual bool slaveOverrideOk() const;
-
-    virtual void help(std::stringstream& ss) const;
+    std::string help() const override;
 
     /**
      * One action type defined for index filter commands:
@@ -84,7 +82,7 @@ public:
      */
     virtual Status checkAuthForCommand(Client* client,
                                        const std::string& dbname,
-                                       const BSONObj& cmdObj);
+                                       const BSONObj& cmdObj) const;
 
     /**
      * Subset of command arguments used by index filter commands
@@ -92,9 +90,9 @@ public:
      * Should contain just enough logic to invoke run*Command() function
      * in query_settings.h
      */
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob) = 0;
 
 private:
@@ -111,9 +109,9 @@ class ListFilters : public IndexFilterCommand {
 public:
     ListFilters();
 
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob);
 
     /**
@@ -133,9 +131,9 @@ class ClearFilters : public IndexFilterCommand {
 public:
     ClearFilters();
 
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob);
 
     /**
@@ -144,7 +142,7 @@ public:
      * Namespace argument ns is ignored if we are clearing the entire cache.
      * Removes corresponding entries from plan cache.
      */
-    static Status clear(OperationContext* txn,
+    static Status clear(OperationContext* opCtx,
                         QuerySettings* querySettings,
                         PlanCache* planCache,
                         const std::string& ns,
@@ -167,16 +165,16 @@ class SetFilter : public IndexFilterCommand {
 public:
     SetFilter();
 
-    virtual Status runIndexFilterCommand(OperationContext* txn,
+    virtual Status runIndexFilterCommand(OperationContext* opCtx,
                                          const std::string& ns,
-                                         BSONObj& cmdObj,
+                                         const BSONObj& cmdObj,
                                          BSONObjBuilder* bob);
 
     /**
      * Sets index filter for a query shape.
      * Removes entry for query shape from plan cache.
      */
-    static Status set(OperationContext* txn,
+    static Status set(OperationContext* opCtx,
                       QuerySettings* querySettings,
                       PlanCache* planCache,
                       const std::string& ns,

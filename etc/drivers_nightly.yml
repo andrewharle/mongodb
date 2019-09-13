@@ -3,7 +3,7 @@
 #####################################################
 
 ### Instructions for Adding a Driver ###
-## The Major sections are:
+# The Major sections are:
 
 # VARIABLES
 # FUNCTIONS (MongoDB and Drivers)
@@ -87,7 +87,7 @@ variables:
 
       # This script converts the generated version string into a sanitized version string for
       # use by scons and uploading artifacts as well as information about for the scons cache.
-      echo $MONGO_VERSION | SCONS_CACHE_MODE=${scons_cache_mode|nolinked} USE_SCONS_CACHE=${use_scons_cache|false} ${python|python} buildscripts/generate_compile_expansions.py | tee compile_expansions.yml
+      MONGO_VERSION=$MONGO_VERSION SCONS_CACHE_MODE=${scons_cache_mode|nolinked} USE_SCONS_CACHE=${use_scons_cache|false} ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/generate_compile_expansions.py --out compile_expansions.yml
 
 - &apply_compile_expansions
   command: expansions.update
@@ -122,7 +122,7 @@ functions:
   "get buildnumber" : &get_buildnumber
     command: keyval.inc
     params:
-      key: "v3.4"
+      key: "v4.0"
       destination: "builder_num"
 
   "setup credentials" : &setup_credentials
@@ -146,7 +146,7 @@ functions:
   - *setup_credentials
 
 
-  ### FOR MONGODB TESTS ### 
+  ### FOR MONGODB TESTS ###
   "set up virtualenv" :
     command: shell.exec
     type: test
@@ -188,7 +188,7 @@ functions:
         fi
 
         ${rlp_environment}   \
-        ${python|python} buildscripts/resmoke.py ${resmoke_args} $extra_args ${test_flags} --log=buildlogger --reportFile=report.json
+        ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/resmoke.py ${resmoke_args} $extra_args ${test_flags} --log=buildlogger --reportFile=report.json
 
   "cleanup environment" :
     command: shell.exec
@@ -218,7 +218,7 @@ functions:
     - command: shell.exec
       type: test
       params:
-        working_dir: src
+        working_dir: "src"
         script: |
           cd ${DRIVER_WORKING_DIRECTORY}
           ${PREPARE_SHELL}
@@ -319,9 +319,9 @@ functions:
   "setup drivers environment":
     - command: shell.exec
       params:
-        working_dir: src
+        working_dir: "src"
         script: |
-           cd "${DRIVER_WORKING_DIRECTORY}"
+           cd ${DRIVER_WORKING_DIRECTORY}
            # Get the current unique version of this checkout
            if [ "${is_patch}" = "true" ]; then
               CURRENT_VERSION=$(git describe)-patch-${version_id}
@@ -428,7 +428,7 @@ tasks:
 
           rm -rf ${install_directory|/data/mongo-install-directory}
 
-          ${python|python} ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} core unittests ${additional_targets|} MONGO_VERSION=${version}
+          ${compile_env|} ${python|/opt/mongodbtoolchain/v2/bin/python2} ./buildscripts/scons.py ${compile_flags|} ${scons_cache_args|} core unittests MONGO_VERSION=${version}
 
           # Pack up the binaries
           mkdir -p mongodb-binaries/bin
@@ -468,7 +468,7 @@ tasks:
 - name: "test-nightly-standalone"
   depends_on:
    - variant: ".compile-variant"
-     name: "jsCore_WT" 
+     name: "jsCore_WT"
   tags: ["nightly", "standalone"]
   commands:
     - *git_get_project
@@ -523,7 +523,7 @@ tasks:
 #                AXES                 #
 #######################################
 axes:
-  ### GENERAL FOR ALL DRIVERS TESTS ### 
+  ### GENERAL FOR ALL DRIVERS TESTS ###
   - id: os
     display_name: OS
     values:
@@ -579,13 +579,6 @@ axes:
   - id: python-linux
     display_name: "Python"
     values:
-      - id: "2.6"
-        display_name: "Python 2.6"
-        variables:
-           ### There is no python toolchain on RHEL 6.2, using system python
-           PYTHON_BINARY: "/usr/bin/python"
-           DRIVER_WORKING_DIRECTORY: "mongo-python-driver"
-           DRIVER_TEST_UPLOAD_DIRECTORY: "src/mongo-python-driver/xunit-results/TEST-*.xml"
       - id: "2.7"
         display_name: "Python 2.7"
         variables:
@@ -612,12 +605,12 @@ modules:
 - name: enterprise
   repo: git@github.com:10gen/mongo-enterprise-modules.git
   prefix: src/mongo/db/modules
-  branch: v3.4 
+  branch: v4.0
 
 # Shared by all drivers projects
 - name: drivers-evergreen-tools
   repo: git@github.com:mongodb-labs/drivers-evergreen-tools.git
-  branch: master 
+  branch: master
 
 ### DRIVER REPOS ###
 ### DRIVERS ADD YOUR GIT REPO HERE ###
@@ -647,12 +640,12 @@ buildvariants:
   expansions:
     rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
     platform: linux
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release CC=/opt/mongodbtoolchain/v2/bin/gcc CXX=/opt/mongodbtoolchain/v2/bin/g++ OBJCOPY=/opt/mongodbtoolchain/v2/bin/objcopy CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include"
     multiversion_platform_arch: "rhel62"
     multiversion_edition: "targeted"
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     use_scons_cache: true
-    build_mongoreplay: true
+    ### build_mongoreplay: true
     ext: tgz
   tags: ["compile-variant"]
   tasks:
@@ -672,10 +665,11 @@ buildvariants:
     platform: "windows64"
     exe: ".exe"
     content_type: application/zip
-    compile_flags: --ssl MONGO_DISTMOD=windows-64 --release CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 2 )) --dynamic-windows --win-version-min=ws08r2 VARIANT_DIR=win32
+    compile_flags: --ssl MONGO_DISTMOD=windows-64 --release CPPPATH="c:/openssl/include c:/sasl/include c:/snmp/include c:/curl/include" LIBPATH="c:/openssl/lib c:/sasl/lib c:/snmp/lib c:/curl/lib" -j$(( $(grep -c ^processor /proc/cpuinfo) / 4 )) --dynamic-windows --win-version-min=ws08r2 VARIANT_DIR=win32
     num_jobs_available: $(grep -c ^processor /proc/cpuinfo)
     ext: zip
     use_scons_cache: true
+    python: python
   tags: ["compile-variant"]
   tasks:
   - name: compile
@@ -688,7 +682,7 @@ buildvariants:
 
 ### Python Matrix Linux
 - matrix_name: "python-driver-linux"
-  matrix_spec: {auth: "*", ssl: "*", os: "rhel62", python-linux: "2.6" }
+  matrix_spec: {auth: "*", ssl: "*", os: "rhel62", python-linux: "2.7" }
   display_name: "Python Driver ${os} ${python-linux} ${auth} ${ssl}"
   modules: [ "mongo-python-driver", "drivers-evergreen-tools" ]
   tasks:

@@ -3,6 +3,9 @@
  * also checks that fields that should not be in the document are absent
  */
 
+// Skip db hash check because node 2 is slave delayed and may time out on awaitReplication.
+TestData.skipCheckDBHashes = true;
+
 load("jstests/replsets/rslib.js");
 
 // function create the error message if an assert fails
@@ -137,7 +140,7 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[0],
+    conn: replTest._slaves[0],
     name: "slave",
     goodValues: {
         setName: "ismaster",
@@ -153,7 +156,7 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[1],
+    conn: replTest._slaves[1],
     name: "delayed_slave",
     goodValues: {
         setName: "ismaster",
@@ -171,7 +174,7 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[2],
+    conn: replTest._slaves[2],
     name: "arbiter",
     goodValues: {
         setName: "ismaster",
@@ -230,7 +233,7 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[0],
+    conn: replTest._slaves[0],
     name: "first_slave",
     goodValues: {
         setName: "ismaster",
@@ -247,7 +250,7 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[1],
+    conn: replTest._slaves[1],
     name: "very_delayed_slave",
     goodValues: {
         setName: "ismaster",
@@ -266,7 +269,7 @@ checkMember({
 });
 
 checkMember({
-    conn: replTest.liveNodes.slaves[2],
+    conn: replTest._slaves[2],
     name: "arbiter",
     goodValues: {
         setName: "ismaster",

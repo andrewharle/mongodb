@@ -1,5 +1,15 @@
-// This tests that slaveOk'd queries in sharded setups get correctly routed when a slave goes into
-// RECOVERING state, and don't break
+/**
+ * This tests that slaveOk'd queries in sharded setups get correctly routed when a slave goes into
+ * RECOVERING state, and don't break
+ *
+ * This test is labeled resource intensive because its total io_write is 748MB compared to a median
+ * of 135MB across all sharding tests in mmapv1.
+ * @tags: [resource_intensive]
+ */
+
+// Shard secondaries are restarted, which may cause that shard's primary to stepdown while it does
+// not see the secondaries. Either the primary connection gets reset, or the primary could change.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
 
 (function() {
     'use strict';
@@ -15,13 +25,14 @@
     var admin = mongos.getDB("admin");
     var config = mongos.getDB("config");
 
-    var dbase = mongos.getDB("test");
+    const dbName = "test";
+    var dbase = mongos.getDB(dbName);
     var coll = dbase.getCollection("foo");
     var dbaseSOk = mongosSOK.getDB("" + dbase);
     var collSOk = mongosSOK.getCollection("" + coll);
 
-    var rsA = shardTest._rs[0].test;
-    var rsB = shardTest._rs[1].test;
+    var rsA = shardTest.rs0;
+    var rsB = shardTest.rs1;
 
     assert.writeOK(rsA.getPrimary().getDB("test_a").dummy.insert({x: 1}));
     assert.writeOK(rsB.getPrimary().getDB("test_b").dummy.insert({x: 1}));
@@ -31,12 +42,17 @@
 
     print("1: initial insert");
 
-    coll.save({_id: -1, a: "a", date: new Date()});
-    coll.save({_id: 1, b: "b", date: new Date()});
+    assert.writeOK(coll.save({_id: -1, a: "a", date: new Date()}));
+    assert.writeOK(coll.save({_id: 1, b: "b", date: new Date()}));
 
     print("2: shard collection");
 
-    shardTest.shardColl(coll, /* shardBy */ {_id: 1}, /* splitAt */ {_id: 0});
+    shardTest.shardColl(coll,
+                        /* shardBy */ {_id: 1},
+                        /* splitAt */ {_id: 0},
+                        /* move chunk */ {_id: 0},
+                        /* dbname */ null,
+                        /* waitForDelete */ true);
 
     print("3: test normal and slaveOk queries");
 

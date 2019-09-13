@@ -15,7 +15,10 @@
  *     will start an initial sync in this scenario, invalidating the test.
  *  2. It uses a single node replica set, which cannot be restarted in any meaningful way with an
  *     ephemeral storage engine.
- * @tags: [requires_persistence]
+ *
+ * This test requires mmapv1 because rollback to a stable timestamp does not allow arbitrary
+ * writes to the minValid document. This has been replaced by unittests.
+ * @tags: [requires_persistence, requires_mmapv1]
  */
 (function() {
     "use strict";
@@ -36,6 +39,7 @@
     var testDB = master.getDB("test");
     var localDB = master.getDB("local");
     var minvalidColl = localDB["replset.minvalid"];
+    var oplogTruncateAfterColl = localDB["replset.oplogTruncateAfterPoint"];
 
     // Write op
     log(assert.writeOK(testDB.foo.save({_id: 1, a: 1}, {writeConcern: {w: 1}})));
@@ -63,13 +67,23 @@
                                              ts: farFutureTS,
                                              t: NumberLong(-1),
                                              begin: primaryOpTime,
-                                             oplogDeleteFromPoint: divergedTS
                                            },
                                            {upsert: true, writeConcern: {w: 1}})));
 
+    log(assert.writeOK(oplogTruncateAfterColl.update({_id: "oplogTruncateAfterPoint"},
+                                                     {oplogTruncateAfterPoint: divergedTS},
+                                                     {upsert: true, writeConcern: {w: 1}})));
+
     // Insert a diverged oplog entry that will be truncated after restart.
-    log(assert.writeOK(localDB.oplog.rs.insert(
-        {_id: 0, ts: divergedTS, op: "n", h: NumberLong(0), t: NumberLong(-1)})));
+    log(assert.writeOK(localDB.oplog.rs.insert({
+        _id: ObjectId(),
+        ns: "",
+        ts: divergedTS,
+        op: "n",
+        h: NumberLong(0),
+        t: NumberLong(-1),
+        o: {}
+    })));
     log(localDB.oplog.rs.find().toArray());
     log(assert.commandWorked(localDB.adminCommand("replSetGetStatus")));
     log("restart primary");

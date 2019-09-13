@@ -7,8 +7,6 @@
  * built on a shared underlying collection.
  */
 
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');  // for dropCollections
-
 var $config = (function() {
 
     var data = {
@@ -74,18 +72,21 @@ var $config = (function() {
         drop: {create: 1}
     };
 
-    function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + this.prefix + '_\\d+$');
-        dropCollections(db, pattern);
-    }
+    // This test performs createCollection concurrently from many threads, and createCollection on a
+    // sharded cluster takes a distributed lock. Since a distributed lock is acquired by repeatedly
+    // attempting to grab the lock every half second for 20 seconds (a max of 40 attempts), it's
+    // possible that some thread will be starved by the other threads and fail to grab the lock
+    // after 40 attempts. To reduce the likelihood of this, we choose threadCount and iterations so
+    // that threadCount * iterations < 40.
+    // The threadCount and iterations can be increased once PM-697 ("Remove all usages of
+    // distributed lock") is complete.
 
     return {
-        threadCount: 10,
-        iterations: 100,
+        threadCount: 5,
+        iterations: 5,
         data: data,
         states: states,
         transitions: transitions,
-        teardown: teardown
     };
 
 })();

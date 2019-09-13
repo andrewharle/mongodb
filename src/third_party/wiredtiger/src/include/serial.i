@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -156,14 +156,15 @@ __wt_col_append_serial(WT_SESSION_IMPL *session, WT_PAGE *page,
     WT_INSERT_HEAD *ins_head, WT_INSERT ***ins_stack, WT_INSERT **new_insp,
     size_t new_ins_size, uint64_t *recnop, u_int skipdepth, bool exclusive)
 {
-	WT_INSERT *new_ins = *new_insp;
 	WT_DECL_RET;
+	WT_INSERT *new_ins;
+
+	/* Clear references to memory we now own and must free on error. */
+	new_ins = *new_insp;
+	*new_insp = NULL;
 
 	/* Check for page write generation wrap. */
 	WT_RET(__page_write_gen_wrapped_check(page));
-
-	/* Clear references to memory we now own and must free on error. */
-	*new_insp = NULL;
 
 	/*
 	 * Acquire the page's spinlock unless we already have exclusive access.
@@ -205,16 +206,17 @@ __wt_insert_serial(WT_SESSION_IMPL *session, WT_PAGE *page,
     WT_INSERT_HEAD *ins_head, WT_INSERT ***ins_stack, WT_INSERT **new_insp,
     size_t new_ins_size, u_int skipdepth, bool exclusive)
 {
-	WT_INSERT *new_ins = *new_insp;
 	WT_DECL_RET;
+	WT_INSERT *new_ins;
 	u_int i;
 	bool simple;
 
+	/* Clear references to memory we now own and must free on error. */
+	new_ins = *new_insp;
+	*new_insp = NULL;
+
 	/* Check for page write generation wrap. */
 	WT_RET(__page_write_gen_wrapped_check(page));
-
-	/* Clear references to memory we now own and must free on error. */
-	*new_insp = NULL;
 
 	simple = true;
 	for (i = 0; i < skipdepth; i++)
@@ -259,18 +261,20 @@ __wt_insert_serial(WT_SESSION_IMPL *session, WT_PAGE *page,
  */
 static inline int
 __wt_update_serial(WT_SESSION_IMPL *session, WT_PAGE *page,
-    WT_UPDATE **srch_upd, WT_UPDATE **updp, size_t upd_size,
-    bool exclusive)
+    WT_UPDATE **srch_upd, WT_UPDATE **updp, size_t upd_size, bool exclusive)
 {
 	WT_DECL_RET;
-	WT_UPDATE *obsolete, *upd = *updp;
+	WT_UPDATE *obsolete, *upd;
+	wt_timestamp_t obsolete_timestamp;
+	size_t size;
 	uint64_t txn;
+
+	/* Clear references to memory we now own and must free on error. */
+	upd = *updp;
+	*updp = NULL;
 
 	/* Check for page write generation wrap. */
 	WT_RET(__page_write_gen_wrapped_check(page));
-
-	/* Clear references to memory we now own and must free on error. */
-	*updp = NULL;
 
 	/*
 	 * All structure setup must be flushed before the structure is entered
@@ -290,19 +294,17 @@ __wt_update_serial(WT_SESSION_IMPL *session, WT_PAGE *page,
 	}
 
 	/*
-	 * Increment in-memory footprint after releasing the mutex: that's safe
-	 * because the structures we added cannot be discarded while visible to
-	 * any running transaction, and we're a running transaction, which means
-	 * there can be no corresponding delete until we complete.
+	 * Increment in-memory footprint after swapping the update into place.
+	 * Safe because the structures we added cannot be discarded while
+	 * visible to any running transaction, and we're a running transaction,
+	 * which means there can be no corresponding delete until we complete.
 	 */
 	__wt_cache_page_inmem_incr(session, page, upd_size);
 
 	/* Mark the page dirty after updating the footprint. */
 	__wt_page_modify_set(session, page);
 
-	/*
-	 * If there are no subsequent WT_UPDATE structures we are done here.
-	 */
+	/* If there are no subsequent WT_UPDATE structures we are done here. */
 	if (upd->next == NULL || exclusive)
 		return (0);
 
@@ -312,11 +314,13 @@ __wt_update_serial(WT_SESSION_IMPL *session, WT_PAGE *page,
 	 * is used as an indicator of there being further updates on this page.
 	 */
 	if ((txn = page->modify->obsolete_check_txn) != WT_TXN_NONE) {
-		if (!__wt_txn_visible_all(session, txn)) {
+		obsolete_timestamp = page->modify->obsolete_check_timestamp;
+		if (!__wt_txn_visible_all(session, txn, obsolete_timestamp)) {
 			/* Try to move the oldest ID forward and re-check. */
 			WT_RET(__wt_txn_update_oldest(session, 0));
 
-			if (!__wt_txn_visible_all(session, txn))
+			if (!__wt_txn_visible_all(
+			    session, txn, obsolete_timestamp))
 				return (0);
 		}
 
@@ -328,9 +332,20 @@ __wt_update_serial(WT_SESSION_IMPL *session, WT_PAGE *page,
 		return (0);
 
 	obsolete = __wt_update_obsolete_check(session, page, upd->next);
+
+	/*
+	 * Decrement the dirty byte count while holding the page lock, else we
+	 * can race with checkpoints cleaning a page.
+	 */
+	for (size = 0, upd = obsolete; upd != NULL; upd = upd->next)
+		size += WT_UPDATE_MEMSIZE(upd);
+	if (size != 0)
+		__wt_cache_page_inmem_decr(session, page, size);
+
 	WT_PAGE_UNLOCK(session, page);
+
 	if (obsolete != NULL)
-		__wt_update_obsolete_free(session, page, obsolete);
+		__wt_free_update_list(session, obsolete);
 
 	return (0);
 }

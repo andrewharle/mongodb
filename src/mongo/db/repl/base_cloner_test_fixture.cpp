@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -76,6 +78,11 @@ BSONObj BaseClonerTest::createCursorResponse(CursorId cursorId, const BSONArray&
 }
 
 // static
+BSONObj BaseClonerTest::createFinalCursorResponse(const BSONArray& docs) {
+    return createCursorResponse(0, docs, "nextBatch");
+}
+
+// static
 BSONObj BaseClonerTest::createListCollectionsResponse(CursorId cursorId,
                                                       const BSONArray& colls,
                                                       const char* fieldName) {
@@ -99,26 +106,44 @@ BSONObj BaseClonerTest::createListIndexesResponse(CursorId cursorId, const BSONA
     return createListIndexesResponse(cursorId, specs, "firstBatch");
 }
 
+namespace {
+struct EnsureClientHasBeenInitialized : public executor::ThreadPoolMock::Options {
+    EnsureClientHasBeenInitialized() : executor::ThreadPoolMock::Options() {
+        onCreateThread = []() { Client::initThread("CollectionClonerTestThread"); };
+    }
+};
+}  // namespace
+
 BaseClonerTest::BaseClonerTest()
-    : _mutex(), _setStatusCondition(), _status(getDetectableErrorStatus()) {}
+    : ThreadPoolExecutorTest(EnsureClientHasBeenInitialized()),
+      _mutex(),
+      _setStatusCondition(),
+      _status(getDetectableErrorStatus()) {}
 
 void BaseClonerTest::setUp() {
     executor::ThreadPoolExecutorTest::setUp();
     clear();
     launchExecutorThread();
-    dbWorkThreadPool = stdx::make_unique<OldThreadPool>(1);
+
+    Client::initThread("CollectionClonerTest");
+    ThreadPool::Options options;
+    options.minThreads = 1U;
+    options.maxThreads = 1U;
+    options.onCreateThread = [](StringData threadName) { Client::initThread(threadName); };
+    dbWorkThreadPool = stdx::make_unique<ThreadPool>(options);
+    dbWorkThreadPool->startup();
+
     storageInterface.reset(new StorageInterfaceMock());
 }
 
 void BaseClonerTest::tearDown() {
-    executor::ThreadPoolExecutorTest::shutdownExecutorThread();
-    executor::ThreadPoolExecutorTest::joinExecutorThread();
+    getExecutor().shutdown();
+    getExecutor().join();
 
     storageInterface.reset();
-    dbWorkThreadPool->join();
-    dbWorkThreadPool.reset();
 
-    executor::ThreadPoolExecutorTest::tearDown();
+    dbWorkThreadPool.reset();
+    Client::releaseCurrent();
 }
 
 void BaseClonerTest::clear() {
@@ -140,16 +165,15 @@ void BaseClonerTest::scheduleNetworkResponse(NetworkOperationIterator noi, const
     auto net = getNet();
     Milliseconds millis(0);
     RemoteCommandResponse response(obj, BSONObj(), millis);
-    executor::TaskExecutor::ResponseStatus responseStatus(response);
     log() << "Scheduling response to request:" << noi->getDiagnosticString() << " -- resp:" << obj;
-    net->scheduleResponse(noi, net->now(), responseStatus);
+    net->scheduleResponse(noi, net->now(), response);
 }
 
 void BaseClonerTest::scheduleNetworkResponse(NetworkOperationIterator noi,
                                              ErrorCodes::Error code,
                                              const std::string& reason) {
     auto net = getNet();
-    executor::TaskExecutor::ResponseStatus responseStatus(code, reason);
+    RemoteCommandResponse responseStatus(code, reason);
     log() << "Scheduling error response to request:" << noi->getDiagnosticString()
           << " -- status:" << responseStatus.status.toString();
     net->scheduleResponse(noi, net->now(), responseStatus);
@@ -157,8 +181,10 @@ void BaseClonerTest::scheduleNetworkResponse(NetworkOperationIterator noi,
 
 void BaseClonerTest::scheduleNetworkResponse(const BSONObj& obj) {
     if (!getNet()->hasReadyRequests()) {
+        BSONObjBuilder b;
+        getExecutor().appendDiagnosticBSON(&b);
         log() << "Expected network request for resp: " << obj;
-        log() << "      replExec: " << getExecutor().getDiagnosticString();
+        log() << "      replExec: " << b.done();
         log() << "      net:" << getNet()->getDiagnosticString();
     }
     if (getStatus() != getDetectableErrorStatus()) {
@@ -190,9 +216,6 @@ void BaseClonerTest::finishProcessingNetworkResponse() {
 }
 
 void BaseClonerTest::testLifeCycle() {
-    // GetDiagnosticString
-    ASSERT_FALSE(getCloner()->getDiagnosticString().empty());
-
     // IsActiveAfterStart
     ASSERT_FALSE(getCloner()->isActive());
     ASSERT_OK(getCloner()->startup());

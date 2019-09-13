@@ -10,7 +10,7 @@
     });
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
 
     s.config.settings.find().forEach(printjson);
 
@@ -30,12 +30,13 @@
     assert.writeOK(bulk.execute());
 
     s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
-    assert.lt(20, s.config.chunks.count(), "setup2");
+    assert.lt(20, s.config.chunks.count({"ns": "test.foo"}), "setup2");
 
     function diff1() {
         var x = s.chunkCounts("foo");
         printjson(x);
-        return Math.max(x.shard0000, x.shard0001) - Math.min(x.shard0000, x.shard0001);
+        return Math.max(x[s.shard0.shardName], x[s.shard1.shardName]) -
+            Math.min(x[s.shard0.shardName], x[s.shard1.shardName]);
     }
 
     assert.lt(10, diff1());

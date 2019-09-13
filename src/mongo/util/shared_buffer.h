@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -48,7 +50,7 @@ public:
     }
 
     static SharedBuffer allocate(size_t bytes) {
-        return takeOwnership(mongoMalloc(sizeof(Holder) + bytes));
+        return takeOwnership(mongoMalloc(sizeof(Holder) + bytes), bytes);
     }
 
     /**
@@ -67,7 +69,7 @@ public:
 
         // Get newPtr into _holder with a ref-count of 1 without touching the current pointee of
         // _holder which is now invalid.
-        auto tmp = SharedBuffer::takeOwnership(newPtr);
+        auto tmp = SharedBuffer::takeOwnership(newPtr, size);
         _holder.detach();
         _holder = std::move(tmp._holder);
     }
@@ -80,11 +82,29 @@ public:
         return bool(_holder);
     }
 
+    /**
+     * Returns true if this object has exclusive access to the underlying buffer.
+     * (That is, reference count == 1).
+     */
+    bool isShared() const {
+        return _holder && _holder->isShared();
+    }
+
+    /**
+     * Returns the allocation size of the underlying buffer.
+     * Users of this type must maintain the "used" size separately.
+     */
+    size_t capacity() const {
+        return _holder ? _holder->_capacity : 0;
+    }
+
 private:
     class Holder {
     public:
-        explicit Holder(AtomicUInt32::WordType initial = AtomicUInt32::WordType())
-            : _refCount(initial) {}
+        explicit Holder(AtomicUInt32::WordType initial, size_t capacity)
+            : _refCount(initial), _capacity(capacity) {
+            invariant(capacity == _capacity);
+        }
 
         // these are called automatically by boost::intrusive_ptr
         friend void intrusive_ptr_add_ref(Holder* h) {
@@ -113,6 +133,7 @@ private:
         }
 
         AtomicUInt32 _refCount;
+        uint32_t _capacity;
     };
 
     explicit SharedBuffer(Holder* holder) : _holder(holder, /*add_ref=*/false) {
@@ -127,12 +148,12 @@ private:
      * This class will call free(holderPrefixedData), so it must have been allocated in a way
      * that makes that valid.
      */
-    static SharedBuffer takeOwnership(void* holderPrefixedData) {
+    static SharedBuffer takeOwnership(void* holderPrefixedData, size_t capacity) {
         // Initialize the refcount to 1 so we don't need to increment it in the constructor
         // (see private Holder* constructor above).
         //
         // TODO: Should dassert alignment of holderPrefixedData here if possible.
-        return SharedBuffer(new (holderPrefixedData) Holder(1U));
+        return SharedBuffer(new (holderPrefixedData) Holder(1U, capacity));
     }
 
     boost::intrusive_ptr<Holder> _holder;
@@ -162,6 +183,19 @@ public:
 
     explicit operator bool() const {
         return bool(_buffer);
+    }
+
+    bool isShared() const {
+        return _buffer.isShared();
+    }
+
+    /**
+     * Converts to a mutable SharedBuffer.
+     * This is only legal to call if you have exclusive access to the underlying buffer.
+     */
+    SharedBuffer constCast() && {
+        invariant(!isShared());
+        return std::move(_buffer);
     }
 
 private:

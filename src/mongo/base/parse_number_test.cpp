@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -80,6 +82,7 @@ public:
 
     static void TestParsingNegatives() {
         if (Limits::is_signed) {
+            ASSERT_PARSES(NumberType, "-0", 0);
             ASSERT_PARSES(NumberType, "-10", -10);
             ASSERT_PARSES(NumberType, "-0xff", -0xff);
             ASSERT_PARSES(NumberType, "-077", -077);
@@ -120,6 +123,8 @@ public:
         ASSERT_PARSES_WITH_BASE(NumberType, "15b", 16, 0x15b);
         ASSERT_PARSES_WITH_BASE(NumberType, "77", 8, 077);
         ASSERT_PARSES_WITH_BASE(NumberType, "z", 36, 35);
+        ASSERT_PARSES_WITH_BASE(NumberType, "09", 10, 9);
+        ASSERT_PARSES_WITH_BASE(NumberType, "00000000000z0", 36, 35 * 36);
         ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromStringWithBase("1b", 10, &x));
         ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromStringWithBase("80", 8, &x));
         ASSERT_EQUALS(ErrorCodes::FailedToParse, parseNumberFromStringWithBase("0X", 16, &x));
@@ -151,10 +156,21 @@ public:
             ErrorCodes::FailedToParse,
             parseNumberFromString(std::string(str::stream() << Limits::max() << '0'), &ignored));
 
-        if (Limits::is_signed)
+        if (Limits::is_signed) {
+            // Max + 1
+            ASSERT_EQUALS(
+                ErrorCodes::FailedToParse,
+                parseNumberFromString(std::to_string(uint64_t(Limits::max()) + 1), &ignored));
+
+            // Min - 1 (equivalent to -(Max + 2))
+            ASSERT_EQUALS(
+                ErrorCodes::FailedToParse,
+                parseNumberFromString("-" + std::to_string(uint64_t(Limits::max()) + 2), &ignored));
+
             ASSERT_EQUALS(ErrorCodes::FailedToParse,
                           parseNumberFromString(std::string(str::stream() << Limits::min() << '0'),
                                                 &ignored));
+        }
     }
 };
 
@@ -226,6 +242,32 @@ TEST(ParseNumber, UInt8) {
         ASSERT_PARSES(uint8_t, std::string(mongoutils::str::stream() << i), i);
 }
 
+TEST(ParseNumber, TestParsingOverflow) {
+    uint64_t u64;
+    // These both have one too many hex digits and will overflow the multiply. The second overflows
+    // such that the truncated result is still greater than either input and can catch overly
+    // simplistic overflow checks.
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  parseNumberFromStringWithBase("0xfffffffffffffffff", 16, &u64));
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  parseNumberFromStringWithBase("0x7ffffffffffffffff", 16, &u64));
+
+    // 2**64 exactly. This will overflow the add.
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  parseNumberFromStringWithBase("18446744073709551616", 10, &u64));
+
+    uint32_t u32;
+    // Too large when down-converting.
+    ASSERT_EQUALS(ErrorCodes::FailedToParse,
+                  parseNumberFromStringWithBase("0xfffffffff", 16, &u32));
+
+    int32_t i32;
+    // Too large when down-converting.
+    ASSERT_EQUALS(
+        ErrorCodes::FailedToParse,
+        parseNumberFromString(std::to_string(std::numeric_limits<uint32_t>::max()), &i32));
+}
+
 TEST(Double, TestRejectingBadBases) {
     double ignored;
 
@@ -264,6 +306,13 @@ TEST(Double, TestParsingNan) {
     double d = 0;
     ASSERT_OK(parseNumberFromString("NaN", &d));
     ASSERT_TRUE(std::isnan(d));
+}
+
+TEST(Double, TestParsingNegativeZero) {
+    double d = 0;
+    ASSERT_OK(parseNumberFromString("-0.0", &d));
+    ASSERT_EQ(d, -0.0);
+    ASSERT_TRUE(std::signbit(d));
 }
 
 TEST(Double, TestParsingInfinity) {

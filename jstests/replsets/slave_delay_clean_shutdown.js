@@ -5,6 +5,9 @@ load('jstests/replsets/rslib.js');
 (function() {
     "use strict";
 
+    // Skip db hash check since secondary has slave delay.
+    TestData.skipCheckDBHashes = true;
+
     var ns = "test.coll";
 
     var rst = new ReplSetTest({
@@ -53,6 +56,8 @@ load('jstests/replsets/rslib.js');
     assert.lt(Date.timeFunc(() => rst.stop(1)), 60 * 1000);
 
     secondary = rst.restart(1);
+    rst.awaitSecondaryNodes();
+
     assert.eq(getLatestOp(secondary), lastOp);
     sleep(2000);  // Prevent the test from passing by chance.
     assert.eq(getLatestOp(secondary), lastOp);

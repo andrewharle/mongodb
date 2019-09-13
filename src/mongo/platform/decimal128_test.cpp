@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/decimal128.h"
@@ -1289,4 +1292,36 @@ TEST(Decimal128Test, TestDecimal128GetLargestNegativeExponentZero) {
     ASSERT_EQUALS(d.getValue().low64, largestNegativeExponentZeroLow64);
 }
 
+/**
+ * Test data was generated using 64 bit versions of these functions, so we must test
+ * approximate results.
+ */
+
+void assertDecimal128ApproxEqual(Decimal128 x, Decimal128 y) {
+    ASSERT_TRUE(x.subtract(y).toAbs().isLess(Decimal128("0.00000005")));
+}
+
+TEST(Decimal128Test, TestExp) {
+    assertDecimal128ApproxEqual(Decimal128("-1").exponential(),
+                                Decimal128("0.3678794411714423215955237701614609"));
+    assertDecimal128ApproxEqual(Decimal128("0").exponential(), Decimal128("1"));
+    assertDecimal128ApproxEqual(Decimal128("1").exponential(),
+                                Decimal128("2.718281828459045235360287471352662"));
+    assertDecimal128ApproxEqual(Decimal128("1.5").exponential(),
+                                Decimal128("4.481689070338064822602055460119276"));
+    assertDecimal128ApproxEqual(Decimal128("1.79769313486231E+308")
+                                    .exponential(Decimal128::RoundingMode::kRoundTowardNegative),
+                                Decimal128("9.999999999999999999999999999999999E+6144"));
+}
+
+TEST(Decimal128Test, TestSqrt) {
+    assertDecimal128ApproxEqual(Decimal128("0").squareRoot(), Decimal128("0"));
+    assertDecimal128ApproxEqual(Decimal128("1").squareRoot(), Decimal128("1"));
+    assertDecimal128ApproxEqual(Decimal128("25").squareRoot(), Decimal128("5"));
+    assertDecimal128ApproxEqual(Decimal128("25.5").squareRoot(),
+                                Decimal128("5.049752469181038976681692958534800"));
+    assertDecimal128ApproxEqual(Decimal128("1.79769313486231E+308")
+                                    .squareRoot(Decimal128::RoundingMode::kRoundTowardNegative),
+                                Decimal128("1.340780792994257506864497209340836E+154"));
+}
 }  // namespace mongo

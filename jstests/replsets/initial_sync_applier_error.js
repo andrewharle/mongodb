@@ -13,12 +13,6 @@
     "use strict";
     load("jstests/libs/check_log.js");
 
-    var parameters = TestData.setParameters;
-    if (parameters && parameters.indexOf("use3dot2InitialSync=true") != -1) {
-        jsTest.log("Skipping this test because use3dot2InitialSync was provided.");
-        return;
-    }
-
     var name = 'initial_sync_applier_error';
     var replSet = new ReplSetTest({
         name: name,
@@ -50,7 +44,6 @@
     assert.commandWorked(secondary.getDB('admin').runCommand(
         {configureFailPoint: 'initialSyncHangBeforeCopyingDatabases', mode: 'off'}));
 
-    checkLog.contains(secondary, 'Applying renameCollection not supported');
     checkLog.contains(secondary, 'initial sync done');
 
     replSet.awaitReplication();
@@ -59,4 +52,5 @@
     assert.eq(0, secondary.getDB('test').getCollection(name).count());
     assert.eq(1, secondary.getDB('test').getCollection(newCollName).count());
     assert.eq("hi", secondary.getDB('test').getCollection(newCollName).findOne({_id: 0}).content);
+    replSet.stopSet();
 })();

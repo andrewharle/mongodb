@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,8 +32,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include <string>
-
 #include "mongo/base/status.h"
 #include "mongo/db/auth/authorization_session.h"
 #include "mongo/db/commands.h"
@@ -40,54 +40,76 @@
 namespace mongo {
 namespace {
 
-/**
- * Implements the aggregation (pipeline command for sharding).
- */
-class PipelineCommand : public Command {
+class ClusterPipelineCommand : public BasicCommand {
 public:
-    PipelineCommand() : Command(AggregationRequest::kCommandName, false) {}
+    ClusterPipelineCommand() : BasicCommand("aggregate") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    std::string help() const override {
+        return "Runs the sharded aggregation command. See "
+               "http://dochub.mongodb.org/core/aggregation for more details.";
     }
 
-    virtual bool adminOnly() const {
+    std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const final {
+        return AggregationRequest::parseNs(dbname, cmdObj).ns();
+    }
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    bool adminOnly() const override {
         return false;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return Pipeline::aggSupportsWriteConcern(cmd);
     }
 
-    virtual void help(std::stringstream& help) const {
-        help << "Runs the sharded aggregation command";
+    bool supportsReadConcern(const std::string& dbName,
+                             const BSONObj& cmdObj,
+                             repl::ReadConcernLevel level) const final {
+        return true;
     }
 
-    // virtuals from Command
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) final {
-        NamespaceString nss(parseNs(dbname, cmdObj));
-        return AuthorizationSession::get(client)->checkAuthForAggregate(nss, cmdObj);
+                               const BSONObj& cmdObj) const override {
+        const NamespaceString nss(AggregationRequest::parseNs(dbname, cmdObj));
+        return AuthorizationSession::get(client)->checkAuthForAggregate(nss, cmdObj, true);
     }
 
-    virtual bool run(OperationContext* txn,
-                     const std::string& dbname,
-                     BSONObj& cmdObj,
-                     int options,
-                     std::string& errmsg,
-                     BSONObjBuilder& result) {
-        const std::string fullns = parseNs(dbname, cmdObj);
-        const NamespaceString nss(fullns);
-
-        ClusterAggregate::Namespaces nsStruct;
-        nsStruct.requestedNss = nss;
-        nsStruct.executionNss = std::move(nss);
-        auto status = ClusterAggregate::runAggregate(txn, nsStruct, cmdObj, options, &result);
-        appendCommandStatus(result, status);
-        return status.isOK();
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        uassertStatusOK(_runAggCommand(opCtx, dbname, cmdObj, boost::none, &result));
+        return true;
     }
+
+    Status explain(OperationContext* opCtx,
+                   const OpMsgRequest& request,
+                   ExplainOptions::Verbosity verbosity,
+                   BSONObjBuilder* out) const override {
+        std::string dbname = request.getDatabase().toString();
+        const BSONObj& cmdObj = request.body;
+        return _runAggCommand(opCtx, dbname, cmdObj, verbosity, out);
+    }
+
+private:
+    static Status _runAggCommand(OperationContext* opCtx,
+                                 const std::string& dbname,
+                                 const BSONObj& cmdObj,
+                                 boost::optional<ExplainOptions::Verbosity> verbosity,
+                                 BSONObjBuilder* result) {
+        const auto aggregationRequest =
+            uassertStatusOK(AggregationRequest::parseFromBSON(dbname, cmdObj, verbosity));
+
+        const auto& nss = aggregationRequest.getNamespaceString();
+
+        return ClusterAggregate::runAggregate(
+            opCtx, ClusterAggregate::Namespaces{nss, nss}, aggregationRequest, cmdObj, result);
+    }
+
 } clusterPipelineCmd;
 
 }  // namespace

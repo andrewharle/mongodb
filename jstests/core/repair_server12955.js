@@ -1,15 +1,23 @@
+// @tags: [
+//     # repairDatabase command is not available on embedded
+//     incompatible_with_embedded,
+// ]
 
 mydb = db.getSisterDB("repair_server12955");
-mydb.dropDatabase();
+assert.commandWorked(mydb.dropDatabase());
 
-mydb.foo.ensureIndex({a: "text"});
-mydb.foo.insert({a: "hello world"});
+assert.commandWorked(mydb.foo.ensureIndex({a: "text"}));
+assert.writeOK(mydb.foo.insert({a: "hello world"}));
 
-before = mydb.stats().dataFileVersion;
+var res = mydb.stats();
+assert.commandWorked(res);
+before = res.dataFileVersion;
 
-mydb.repairDatabase();
+assert.commandWorked(mydb.repairDatabase());
 
-after = mydb.stats().dataFileVersion;
+res = mydb.stats();
+assert.commandWorked(res);
+after = res.dataFileVersion;
 
 assert.eq(before, after);
-mydb.dropDatabase();
+assert.commandWorked(mydb.dropDatabase());

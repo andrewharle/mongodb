@@ -51,9 +51,11 @@ DBCollection.prototype.addIdIfNeeded = function(obj) {
 *
 *  { insertOne: { document: { a: 1 } } }
 *
-*  { updateOne: { filter: {a:2}, update: {$set: {a:2}}, upsert:true, collation: {locale: "fr"} } }
+*  { updateOne: { filter: {a:2}, update: {$set: {"a.$[i]":2}}, upsert:true, collation: {locale:
+* "fr"}, arrayFilters: [{i: 0}] } }
 *
-*  { updateMany: { filter: {a:2}, update: {$set: {a:2}}, upsert:true collation: {locale: "fr"} } }
+*  { updateMany: { filter: {a:2}, update: {$set: {"a.$[i]":2}}, upsert:true collation: {locale:
+* "fr"}, arrayFilters: [{i: 0}] } }
 *
 *  { deleteOne: { filter: {c:1}, collation: {locale: "fr"} } }
 *
@@ -117,6 +119,10 @@ DBCollection.prototype.bulkWrite = function(operations, options) {
                 operation.collation(op.updateOne.collation);
             }
 
+            if (op.updateOne.arrayFilters) {
+                operation.arrayFilters(op.updateOne.arrayFilters);
+            }
+
             operation.updateOne(op.updateOne.update);
         } else if (op.updateMany) {
             if (!op.updateMany.filter) {
@@ -135,6 +141,10 @@ DBCollection.prototype.bulkWrite = function(operations, options) {
 
             if (op.updateMany.collation) {
                 operation.collation(op.updateMany.collation);
+            }
+
+            if (op.updateMany.arrayFilters) {
+                operation.arrayFilters(op.updateMany.arrayFilters);
             }
 
             operation.update(op.updateMany.update);
@@ -241,12 +251,14 @@ DBCollection.prototype.insertOne = function(document, options) {
         // Execute insert
         bulk.execute(writeConcern);
     } catch (err) {
-        if (err.hasWriteErrors()) {
-            throw err.getWriteErrorAt(0);
-        }
+        if (err instanceof BulkWriteError) {
+            if (err.hasWriteErrors()) {
+                throw err.getWriteErrorAt(0);
+            }
 
-        if (err.hasWriteConcernError()) {
-            throw err.getWriteConcernError();
+            if (err.hasWriteConcernError()) {
+                throw err.getWriteConcernError();
+            }
         }
 
         throw err;
@@ -350,12 +362,14 @@ DBCollection.prototype.deleteOne = function(filter, options) {
         // Remove the first document that matches the selector
         var r = bulk.execute(writeConcern);
     } catch (err) {
-        if (err.hasWriteErrors()) {
-            throw err.getWriteErrorAt(0);
-        }
+        if (err instanceof BulkWriteError) {
+            if (err.hasWriteErrors()) {
+                throw err.getWriteErrorAt(0);
+            }
 
-        if (err.hasWriteConcernError()) {
-            throw err.getWriteConcernError();
+            if (err.hasWriteConcernError()) {
+                throw err.getWriteConcernError();
+            }
         }
 
         throw err;
@@ -405,12 +419,14 @@ DBCollection.prototype.deleteMany = function(filter, options) {
         // Remove all documents that matche the selector
         var r = bulk.execute(writeConcern);
     } catch (err) {
-        if (err.hasWriteErrors()) {
-            throw err.getWriteErrorAt(0);
-        }
+        if (err instanceof BulkWriteError) {
+            if (err.hasWriteErrors()) {
+                throw err.getWriteErrorAt(0);
+            }
 
-        if (err.hasWriteConcernError()) {
-            throw err.getWriteConcernError();
+            if (err.hasWriteConcernError()) {
+                throw err.getWriteConcernError();
+            }
         }
 
         throw err;
@@ -472,12 +488,14 @@ DBCollection.prototype.replaceOne = function(filter, replacement, options) {
         // Replace the document
         var r = bulk.execute(writeConcern);
     } catch (err) {
-        if (err.hasWriteErrors()) {
-            throw err.getWriteErrorAt(0);
-        }
+        if (err instanceof BulkWriteError) {
+            if (err.hasWriteErrors()) {
+                throw err.getWriteErrorAt(0);
+            }
 
-        if (err.hasWriteConcernError()) {
-            throw err.getWriteConcernError();
+            if (err.hasWriteConcernError()) {
+                throw err.getWriteConcernError();
+            }
         }
 
         throw err;
@@ -543,18 +561,24 @@ DBCollection.prototype.updateOne = function(filter, update, options) {
         op.collation(opts.collation);
     }
 
+    if (opts.arrayFilters) {
+        op.arrayFilters(opts.arrayFilters);
+    }
+
     op.updateOne(update);
 
     try {
         // Update the first document that matches the selector
         var r = bulk.execute(writeConcern);
     } catch (err) {
-        if (err.hasWriteErrors()) {
-            throw err.getWriteErrorAt(0);
-        }
+        if (err instanceof BulkWriteError) {
+            if (err.hasWriteErrors()) {
+                throw err.getWriteErrorAt(0);
+            }
 
-        if (err.hasWriteConcernError()) {
-            throw err.getWriteConcernError();
+            if (err.hasWriteConcernError()) {
+                throw err.getWriteConcernError();
+            }
         }
 
         throw err;
@@ -620,18 +644,24 @@ DBCollection.prototype.updateMany = function(filter, update, options) {
         op.collation(opts.collation);
     }
 
+    if (opts.arrayFilters) {
+        op.arrayFilters(opts.arrayFilters);
+    }
+
     op.update(update);
 
     try {
         // Update all documents that match the selector
         var r = bulk.execute(writeConcern);
     } catch (err) {
-        if (err.hasWriteErrors()) {
-            throw err.getWriteErrorAt(0);
-        }
+        if (err instanceof BulkWriteError) {
+            if (err.hasWriteErrors()) {
+                throw err.getWriteErrorAt(0);
+            }
 
-        if (err.hasWriteConcernError()) {
-            throw err.getWriteConcernError();
+            if (err.hasWriteConcernError()) {
+                throw err.getWriteConcernError();
+            }
         }
 
         throw err;
@@ -667,7 +697,7 @@ DBCollection.prototype.updateMany = function(filter, update, options) {
 DBCollection.prototype.findOneAndDelete = function(filter, options) {
     var opts = Object.extend({}, options || {});
     // Set up the command
-    var cmd = {query: filter, remove: true};
+    var cmd = {query: filter || {}, remove: true};
 
     if (opts.sort) {
         cmd.sort = opts.sort;
@@ -725,7 +755,7 @@ DBCollection.prototype.findOneAndReplace = function(filter, replacement, options
     }
 
     // Set up the command
-    var cmd = {query: filter, update: replacement};
+    var cmd = {query: filter || {}, update: replacement};
     if (opts.sort) {
         cmd.sort = opts.sort;
     }
@@ -790,7 +820,7 @@ DBCollection.prototype.findOneAndUpdate = function(filter, update, options) {
     }
 
     // Set up the command
-    var cmd = {query: filter, update: update};
+    var cmd = {query: filter || {}, update: update};
     if (opts.sort) {
         cmd.sort = opts.sort;
     }
@@ -805,6 +835,10 @@ DBCollection.prototype.findOneAndUpdate = function(filter, update, options) {
 
     if (opts.collation) {
         cmd.collation = opts.collation;
+    }
+
+    if (opts.arrayFilters) {
+        cmd.arrayFilters = opts.arrayFilters;
     }
 
     // Set flags

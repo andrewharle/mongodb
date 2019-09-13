@@ -35,6 +35,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
 
     if (!startSetIfSupportsReadMajority(replTest)) {
         log("skipping test since storage engine doesn't support committed reads");
+        replTest.stopSet();
         return;
     }
 
@@ -52,7 +53,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
 
     // Get connections and collection.
     var primary = replTest.getPrimary();
-    var secondary = replTest.liveNodes.slaves[0];
+    var secondary = replTest._slaves[0];
     var secondaryId = replTest.getNodeId(secondary);
 
     var dbPrimary = primary.getDB(name);
@@ -63,11 +64,10 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
 
     function saveDoc(state) {
         log("saving doc.");
-        var res = dbPrimary.runCommandWithMetadata(
-            'update',
+        var res = dbPrimary.runCommandWithMetadata(  //
             {
               update: name,
-              writeConcern: {w: 2, wtimeout: 60 * 1000},
+              writeConcern: {w: 2, wtimeout: ReplSetTest.kDefaultTimeoutMS},
               updates: [{q: {_id: 1}, u: {_id: 1, state: state}, upsert: true}],
             },
             {"$replData": 1});
@@ -85,7 +85,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
         });
         assert.commandWorked(res);
         log("done doing dirty read.");
-        return new DBCommandCursor(secondary, res).toArray()[0].state;
+        return new DBCommandCursor(dbSecondary, res).toArray()[0].state;
     }
 
     function doCommittedRead(lastOp) {
@@ -96,7 +96,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
         });
         assert.commandWorked(res);
         log("done doing committed read.");
-        return new DBCommandCursor(secondary, res).toArray()[0].state;
+        return new DBCommandCursor(dbSecondary, res).toArray()[0].state;
     }
 
     // Do a write, wait for it to replicate, and ensure it is visible.
@@ -125,11 +125,13 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
     // state.
     log("turning off failpoint");
     secondary.adminCommand({configureFailPoint: 'disableSnapshotting', mode: 'off'});
-    assert.eq(doDirtyRead(op1), 1);
+    // Do another write in order to update the committedSnapshot value.
+    var op2 = saveDoc(2);
+    assert.eq(doDirtyRead(op2), 2);
     log(replTest.status());
     replTest.awaitReplication();
     log(replTest.status());
-    assert.eq(doCommittedRead(op1), 1);
+    assert.eq(doCommittedRead(op2), 2);
     log("test success!");
     replTest.stopSet();
 }());

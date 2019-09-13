@@ -1,9 +1,10 @@
 // Test background index creation w/ constraints
-// @tags: [requires_document_locking]
+// @tags: [SERVER-40561, requires_document_locking]
 
 (function() {
     "use strict";
 
+    load("jstests/noPassthrough/libs/index_build.js");
     load("jstests/libs/check_log.js");
 
     const conn = MongoRunner.runMongod({smallfiles: "", nojournal: ""});

@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -31,8 +33,10 @@
 #include "mongo/s/write_ops/batched_command_response.h"
 
 #include "mongo/bson/util/bson_extract.h"
+#include "mongo/db/commands.h"
 #include "mongo/db/field_parser.h"
 #include "mongo/db/repl/bson_extract_optime.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
@@ -42,9 +46,6 @@ using std::string;
 
 using mongoutils::str::stream;
 
-const BSONField<int> BatchedCommandResponse::ok("ok");
-const BSONField<int> BatchedCommandResponse::errCode("code", ErrorCodes::UnknownError);
-const BSONField<string> BatchedCommandResponse::errMessage("errmsg");
 const BSONField<long long> BatchedCommandResponse::n("n", 0);
 const BSONField<long long> BatchedCommandResponse::nModified("nModified", 0);
 const BSONField<std::vector<BatchedUpsertDetail*>> BatchedCommandResponse::upsertDetails(
@@ -70,8 +71,8 @@ bool BatchedCommandResponse::isValid(std::string* errMsg) const {
     }
 
     // All the mandatory fields must be present.
-    if (!_isOkSet) {
-        *errMsg = stream() << "missing " << ok.name() << " field";
+    if (!_isStatusSet) {
+        *errMsg = stream() << "missing status fields";
         return false;
     }
 
@@ -81,14 +82,8 @@ bool BatchedCommandResponse::isValid(std::string* errMsg) const {
 BSONObj BatchedCommandResponse::toBSON() const {
     BSONObjBuilder builder;
 
-    if (_isOkSet)
-        builder.append(ok(), _ok);
-
-    if (_isErrCodeSet)
-        builder.append(errCode(), _errCode);
-
-    if (_isErrMessageSet)
-        builder.append(errMessage(), _errMessage);
+    invariant(_isStatusSet);
+    uassertStatusOK(_status);
 
     if (_isNModifiedSet)
         builder.appendNumber(nModified(), _nModified);
@@ -117,12 +112,36 @@ BSONObj BatchedCommandResponse::toBSON() const {
         builder.appendOID(electionId(), const_cast<OID*>(&_electionId));
 
     if (_writeErrorDetails.get()) {
+        auto errorMessage =
+            [ errorCount = size_t(0), errorSize = size_t(0) ](StringData rawMessage) mutable {
+            // Start truncating error messages once both of these limits are exceeded.
+            constexpr size_t kErrorSizeTruncationMin = 1024 * 1024;
+            constexpr size_t kErrorCountTruncationMin = 2;
+            if (errorSize >= kErrorSizeTruncationMin && errorCount >= kErrorCountTruncationMin) {
+                return ""_sd;
+            }
+
+            errorCount++;
+            errorSize += rawMessage.size();
+            return rawMessage;
+        };
+
         BSONArrayBuilder errDetailsBuilder(builder.subarrayStart(writeErrors()));
-        for (std::vector<WriteErrorDetail*>::const_iterator it = _writeErrorDetails->begin();
-             it != _writeErrorDetails->end();
-             ++it) {
-            BSONObj errDetailsDocument = (*it)->toBSON();
-            errDetailsBuilder.append(errDetailsDocument);
+        for (auto&& writeError : *_writeErrorDetails) {
+            BSONObjBuilder errDetailsDocument(errDetailsBuilder.subobjStart());
+
+            if (writeError->isIndexSet())
+                builder.append(WriteErrorDetail::index(), writeError->getIndex());
+
+            auto status = writeError->toStatus();
+            builder.append(WriteErrorDetail::errCode(), status.code());
+            builder.append(WriteErrorDetail::errCodeName(), status.codeString());
+            builder.append(WriteErrorDetail::errMessage(), errorMessage(status.reason()));
+            if (auto extra = _status.extraInfo())
+                extra->serialize(&builder);  // TODO consider extra info size for truncation.
+
+            if (writeError->isErrInfoSet())
+                builder.append(WriteErrorDetail::errInfo(), writeError->getErrInfo());
         }
         errDetailsBuilder.done();
     }
@@ -141,27 +160,14 @@ bool BatchedCommandResponse::parseBSON(const BSONObj& source, string* errMsg) {
     if (!errMsg)
         errMsg = &dummy;
 
-    FieldParser::FieldState fieldState;
-    fieldState = FieldParser::extractNumber(source, ok, &_ok, errMsg);
-    if (fieldState == FieldParser::FIELD_INVALID)
-        return false;
-    _isOkSet = fieldState == FieldParser::FIELD_SET;
-
-    fieldState = FieldParser::extract(source, errCode, &_errCode, errMsg);
-    if (fieldState == FieldParser::FIELD_INVALID)
-        return false;
-    _isErrCodeSet = fieldState == FieldParser::FIELD_SET;
-
-    fieldState = FieldParser::extract(source, errMessage, &_errMessage, errMsg);
-    if (fieldState == FieldParser::FIELD_INVALID)
-        return false;
-    _isErrMessageSet = fieldState == FieldParser::FIELD_SET;
+    _status = getStatusFromCommandResult(source);
+    _isStatusSet = true;
 
     // We're using appendNumber on generation so we'll try a smaller type
     // (int) first and then fall back to the original type (long long).
     BSONField<int> fieldN(n());
     int tempN;
-    fieldState = FieldParser::extract(source, fieldN, &tempN, errMsg);
+    auto fieldState = FieldParser::extract(source, fieldN, &tempN, errMsg);
     if (fieldState == FieldParser::FIELD_INVALID) {
         // try falling back to a larger type
         fieldState = FieldParser::extract(source, n, &_n, errMsg);
@@ -233,14 +239,8 @@ bool BatchedCommandResponse::parseBSON(const BSONObj& source, string* errMsg) {
 }
 
 void BatchedCommandResponse::clear() {
-    _ok = false;
-    _isOkSet = false;
-
-    _errCode = 0;
-    _isErrCodeSet = false;
-
-    _errMessage.clear();
-    _isErrMessageSet = false;
+    _status = Status::OK();
+    _isStatusSet = false;
 
     _nModified = 0;
     _isNModifiedSet = false;
@@ -278,108 +278,13 @@ void BatchedCommandResponse::clear() {
     _wcErrDetails.reset();
 }
 
-void BatchedCommandResponse::cloneTo(BatchedCommandResponse* other) const {
-    other->clear();
-
-    other->_ok = _ok;
-    other->_isOkSet = _isOkSet;
-
-    other->_errCode = _errCode;
-    other->_isErrCodeSet = _isErrCodeSet;
-
-    other->_errMessage = _errMessage;
-    other->_isErrMessageSet = _isErrMessageSet;
-
-    other->_nModified = _nModified;
-    other->_isNModifiedSet = _isNModifiedSet;
-
-    other->_n = _n;
-    other->_isNSet = _isNSet;
-
-    other->_singleUpserted = _singleUpserted;
-    other->_isSingleUpsertedSet = _isSingleUpsertedSet;
-
-    other->unsetUpsertDetails();
-    if (_upsertDetails.get()) {
-        for (std::vector<BatchedUpsertDetail*>::const_iterator it = _upsertDetails->begin();
-             it != _upsertDetails->end();
-             ++it) {
-            BatchedUpsertDetail* upsertDetailsItem = new BatchedUpsertDetail;
-            (*it)->cloneTo(upsertDetailsItem);
-            other->addToUpsertDetails(upsertDetailsItem);
-        }
-    }
-
-    other->_lastOp = _lastOp;
-    other->_isLastOpSet = _isLastOpSet;
-
-    other->_electionId = _electionId;
-    other->_isElectionIdSet = _isElectionIdSet;
-
-    other->unsetErrDetails();
-    if (_writeErrorDetails.get()) {
-        for (std::vector<WriteErrorDetail*>::const_iterator it = _writeErrorDetails->begin();
-             it != _writeErrorDetails->end();
-             ++it) {
-            WriteErrorDetail* errDetailsItem = new WriteErrorDetail;
-            (*it)->cloneTo(errDetailsItem);
-            other->addToErrDetails(errDetailsItem);
-        }
-    }
-
-    if (_wcErrDetails.get()) {
-        other->_wcErrDetails.reset(new WriteConcernErrorDetail());
-        _wcErrDetails->cloneTo(other->_wcErrDetails.get());
-    }
-}
-
 std::string BatchedCommandResponse::toString() const {
     return toBSON().toString();
 }
 
-void BatchedCommandResponse::setOk(int ok) {
-    _ok = ok;
-    _isOkSet = true;
-}
-
-int BatchedCommandResponse::getOk() const {
-    dassert(_isOkSet);
-    return _ok;
-}
-
-void BatchedCommandResponse::setErrCode(int errCode) {
-    _errCode = errCode;
-    _isErrCodeSet = true;
-}
-
-void BatchedCommandResponse::unsetErrCode() {
-    _isErrCodeSet = false;
-}
-
-bool BatchedCommandResponse::isErrCodeSet() const {
-    return _isErrCodeSet;
-}
-
-int BatchedCommandResponse::getErrCode() const {
-    if (_isErrCodeSet) {
-        return _errCode;
-    } else {
-        return errCode.getDefault();
-    }
-}
-
-void BatchedCommandResponse::setErrMessage(StringData errMessage) {
-    _errMessage = errMessage.toString();
-    _isErrMessageSet = true;
-}
-
-bool BatchedCommandResponse::isErrMessageSet() const {
-    return _isErrMessageSet;
-}
-
-const std::string& BatchedCommandResponse::getErrMessage() const {
-    dassert(_isErrMessageSet);
-    return _errMessage;
+void BatchedCommandResponse::setStatus(Status status) {
+    _status = std::move(status);
+    _isStatusSet = true;
 }
 
 void BatchedCommandResponse::setNModified(long long n) {
@@ -577,19 +482,15 @@ const WriteConcernErrorDetail* BatchedCommandResponse::getWriteConcernError() co
 
 Status BatchedCommandResponse::toStatus() const {
     if (!getOk()) {
-        return Status(ErrorCodes::fromInt(getErrCode()), getErrMessage());
+        return _status;
     }
 
     if (isErrDetailsSet()) {
-        const WriteErrorDetail* errDetail = getErrDetails().front();
-
-        return Status(ErrorCodes::fromInt(errDetail->getErrCode()), errDetail->getErrMessage());
+        return getErrDetails().front()->toStatus();
     }
 
     if (isWriteConcernErrorSet()) {
-        const WriteConcernErrorDetail* errDetail = getWriteConcernError();
-
-        return Status(ErrorCodes::fromInt(errDetail->getErrCode()), errDetail->getErrMessage());
+        return getWriteConcernError()->toStatus();
     }
 
     return Status::OK();

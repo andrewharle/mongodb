@@ -1,32 +1,34 @@
 // mmap_v1_extent_manager.h
 
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -90,29 +92,36 @@ public:
     MmapV1ExtentManager(StringData dbname, StringData path, bool directoryPerDB);
 
     /**
+     * Must be called before destruction.
+     */
+    void close(OperationContext* opCtx) {
+        _files.close(opCtx);
+    }
+
+    /**
      * opens all current files, not thread safe
      */
-    Status init(OperationContext* txn);
+    Status init(OperationContext* opCtx);
 
     int numFiles() const;
     long long fileSize() const;
 
     // must call Extent::reuse on the returned extent
-    DiskLoc allocateExtent(OperationContext* txn, bool capped, int size, bool enforceQuota);
+    DiskLoc allocateExtent(OperationContext* opCtx, bool capped, int size, bool enforceQuota);
 
     /**
      * firstExt has to be == lastExt or a chain
      */
-    void freeExtents(OperationContext* txn, DiskLoc firstExt, DiskLoc lastExt);
+    void freeExtents(OperationContext* opCtx, DiskLoc firstExt, DiskLoc lastExt);
 
     /**
      * frees a single extent
      * ignores all fields in the Extent except: magic, myLoc, length
      */
-    void freeExtent(OperationContext* txn, DiskLoc extent);
+    void freeExtent(OperationContext* opCtx, DiskLoc extent);
 
 
-    void freeListStats(OperationContext* txn, int* numExtents, int64_t* totalFreeSizeBytes) const;
+    void freeListStats(OperationContext* opCtx, int* numExtents, int64_t* totalFreeSizeBytes) const;
 
     /**
      * @param loc - has to be for a specific MmapV1RecordHeader
@@ -145,8 +154,8 @@ public:
     /**
      * Not thread safe, requires a database exclusive lock
      */
-    DataFileVersion getFileFormat(OperationContext* txn) const final;
-    void setFileFormat(OperationContext* txn, DataFileVersion newVersion) final;
+    DataFileVersion getFileFormat(OperationContext* opCtx) const final;
+    void setFileFormat(OperationContext* opCtx, DataFileVersion newVersion) final;
 
     const DataFile* getOpenFile(int n) const final {
         return _getOpenFile(n);
@@ -160,13 +169,13 @@ private:
     /**
      * will return NULL if nothing suitable in free list
      */
-    DiskLoc _allocFromFreeList(OperationContext* txn, int approxSize, bool capped);
+    DiskLoc _allocFromFreeList(OperationContext* opCtx, int approxSize, bool capped);
 
     /* allocate a new Extent, does not check free list
     */
-    DiskLoc _createExtent(OperationContext* txn, int approxSize, bool enforceQuota);
+    DiskLoc _createExtent(OperationContext* opCtx, int approxSize, bool enforceQuota);
 
-    DataFile* _addAFile(OperationContext* txn, int sizeNeeded, bool preallocateNextFile);
+    DataFile* _addAFile(OperationContext* opCtx, int sizeNeeded, bool preallocateNextFile);
 
 
     /**
@@ -177,14 +186,14 @@ private:
 
     DiskLoc _getFreeListStart() const;
     DiskLoc _getFreeListEnd() const;
-    void _setFreeListStart(OperationContext* txn, DiskLoc loc);
-    void _setFreeListEnd(OperationContext* txn, DiskLoc loc);
+    void _setFreeListStart(OperationContext* opCtx, DiskLoc loc);
+    void _setFreeListEnd(OperationContext* opCtx, DiskLoc loc);
 
     const DataFile* _getOpenFile(int fileId) const;
     DataFile* _getOpenFile(int fileId);
 
     DiskLoc _createExtentInFile(
-        OperationContext* txn, int fileNo, DataFile* f, int size, bool enforceQuota);
+        OperationContext* opCtx, int fileNo, DataFile* f, int size, bool enforceQuota);
 
     boost::filesystem::path _fileName(int n) const;
 
@@ -208,6 +217,11 @@ private:
     public:
         FilesArray() : _size(0) {}
         ~FilesArray();
+
+        /**
+         * Must be called before destruction.
+         */
+        void close(OperationContext* opCtx);
 
         /**
          * Returns file at location 'n' in the array, with 'n' less than number of files added.

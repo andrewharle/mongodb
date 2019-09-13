@@ -16,11 +16,11 @@
  *
  */
 (function() {
+    'use strict';
+
     load("jstests/libs/write_concern_util.js");  // for stopReplicationOnSecondaries, //
                                                  // restartServerReplication,
                                                  // restartReplSetReplication
-
-    'use strict';
 
     function assertStepDownFailsWithExceededTimeLimit(node) {
         assert.commandFailedWithCode(
@@ -52,7 +52,7 @@
     var testDB = primary.getDB('testdb');
     var coll = testDB[name];
     var dummy_doc = {"dummy_key": "dummy_val"};
-    var timeout = 5 * 60 * 1000;
+    var timeout = ReplSetTest.kDefaultTimeoutMS;
 
     //
     // Block writes to all secondaries

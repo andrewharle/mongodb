@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2016 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -41,8 +43,10 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
 #include "mongo/db/query/query_test_service_context.h"
+#include "mongo/db/repl/replication_coordinator_mock.h"
+#include "mongo/db/repl/storage_interface_mock.h"
 #include "mongo/db/server_options.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/service_context.h"
 #include "mongo/db/views/durable_view_catalog.h"
 #include "mongo/db/views/view.h"
 #include "mongo/db/views/view_catalog.h"
@@ -53,12 +57,6 @@
 #include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
-
-// Stub to avoid including the server_options library.
-bool isMongos() {
-    return false;
-}
-
 namespace {
 
 constexpr auto kLargeString =
@@ -76,27 +74,20 @@ constexpr auto kLargeString =
 const auto kOneKiBMatchStage = BSON("$match" << BSON("data" << kLargeString));
 const auto kTinyMatchStage = BSON("$match" << BSONObj());
 
-MONGO_INITIALIZER_WITH_PREREQUISITES(SetFeatureCompatibilityVersion34, ("EndStartupOptionStorage"))
-(InitializerContext* context) {
-    mongo::serverGlobalParams.featureCompatibility.version.store(
-        ServerGlobalParams::FeatureCompatibility::Version::k34);
-    return Status::OK();
-}
-
 class DurableViewCatalogDummy final : public DurableViewCatalog {
 public:
     explicit DurableViewCatalogDummy() : _upsertCount(0), _iterateCount(0) {}
     static const std::string name;
 
     using Callback = stdx::function<Status(const BSONObj& view)>;
-    virtual Status iterate(OperationContext* txn, Callback callback) {
+    virtual Status iterate(OperationContext* opCtx, Callback callback) {
         ++_iterateCount;
         return Status::OK();
     }
-    virtual void upsert(OperationContext* txn, const NamespaceString& name, const BSONObj& view) {
+    virtual void upsert(OperationContext* opCtx, const NamespaceString& name, const BSONObj& view) {
         ++_upsertCount;
     }
-    virtual void remove(OperationContext* txn, const NamespaceString& name) {}
+    virtual void remove(OperationContext* opCtx, const NamespaceString& name) {}
     virtual const std::string& getName() const {
         return name;
     };
@@ -127,11 +118,34 @@ private:
     std::unique_ptr<QueryTestServiceContext> _queryServiceContext;
 
 protected:
+    ServiceContext* getServiceContext() const {
+        return _queryServiceContext->getServiceContext();
+    }
+
     DurableViewCatalogDummy durableViewCatalog;
     ServiceContext::UniqueOperationContext opCtx;
     ViewCatalog viewCatalog;
     const BSONArray emptyPipeline;
     const BSONObj emptyCollation;
+};
+
+// For tests which need to run in a replica set context.
+class ReplViewCatalogFixture : public ViewCatalogFixture {
+public:
+    void setUp() override {
+        Test::setUp();
+        auto service = getServiceContext();
+        repl::ReplSettings settings;
+
+        settings.setReplSetString("viewCatalogTestSet/node1:12345");
+
+        repl::StorageInterface::set(service, stdx::make_unique<repl::StorageInterfaceMock>());
+        auto replCoord = stdx::make_unique<repl::ReplicationCoordinatorMock>(service, settings);
+
+        // Ensure that we are primary.
+        ASSERT_OK(replCoord->setFollowerMode(repl::MemberState::RS_PRIMARY));
+        repl::ReplicationCoordinator::set(service, std::move(replCoord));
+    }
 };
 
 TEST_F(ViewCatalogFixture, CreateExistingView) {
@@ -151,14 +165,80 @@ TEST_F(ViewCatalogFixture, CreateViewOnDifferentDatabase) {
         viewCatalog.createView(opCtx.get(), viewName, viewOn, emptyPipeline, emptyCollation));
 }
 
+TEST_F(ViewCatalogFixture, CanCreateViewWithExprPredicate) {
+    const NamespaceString viewOn("db.coll");
+    ASSERT_OK(viewCatalog.createView(opCtx.get(),
+                                     NamespaceString("db.view1"),
+                                     viewOn,
+                                     BSON_ARRAY(BSON("$match" << BSON("$expr" << 1))),
+                                     emptyCollation));
+
+    ASSERT_OK(viewCatalog.createView(
+        opCtx.get(),
+        NamespaceString("db.view2"),
+        viewOn,
+        BSON_ARRAY(
+            BSON("$facet" << BSON("output" << BSON_ARRAY(BSON("$match" << BSON("$expr" << 1)))))),
+        emptyCollation));
+}
+
+TEST_F(ViewCatalogFixture, CanCreateViewWithJSONSchemaPredicate) {
+    const NamespaceString viewOn("db.coll");
+    ASSERT_OK(viewCatalog.createView(
+        opCtx.get(),
+        NamespaceString("db.view1"),
+        viewOn,
+        BSON_ARRAY(BSON("$match" << BSON("$jsonSchema" << BSON("required" << BSON_ARRAY("x"))))),
+        emptyCollation));
+
+    ASSERT_OK(viewCatalog.createView(
+        opCtx.get(),
+        NamespaceString("db.view2"),
+        viewOn,
+        BSON_ARRAY(BSON(
+            "$facet" << BSON(
+                "output" << BSON_ARRAY(BSON(
+                    "$match" << BSON("$jsonSchema" << BSON("required" << BSON_ARRAY("x")))))))),
+        emptyCollation));
+}
+
+TEST_F(ViewCatalogFixture, CanCreateViewWithLookupUsingPipelineSyntax) {
+    const NamespaceString viewOn("db.coll");
+    ASSERT_OK(viewCatalog.createView(opCtx.get(),
+                                     NamespaceString("db.view"),
+                                     viewOn,
+                                     BSON_ARRAY(BSON("$lookup" << BSON("from"
+                                                                       << "fcoll"
+                                                                       << "as"
+                                                                       << "as"
+                                                                       << "pipeline"
+                                                                       << BSONArray()))),
+                                     emptyCollation));
+}
+
 TEST_F(ViewCatalogFixture, CreateViewWithPipelineFailsOnInvalidStageName) {
     const NamespaceString viewName("db.view");
     const NamespaceString viewOn("db.coll");
 
     auto invalidPipeline = BSON_ARRAY(BSON("INVALID_STAGE_NAME" << 1));
     ASSERT_THROWS(
-        viewCatalog.createView(opCtx.get(), viewName, viewOn, invalidPipeline, emptyCollation),
-        UserException);
+        viewCatalog.createView(opCtx.get(), viewName, viewOn, invalidPipeline, emptyCollation)
+            .transitional_ignore(),
+        AssertionException);
+}
+
+TEST_F(ReplViewCatalogFixture, CreateViewWithPipelineFailsOnIneligibleStage) {
+    const NamespaceString viewName("db.view");
+    const NamespaceString viewOn("db.coll");
+
+    // $changeStream cannot be used in a view definition pipeline.
+    auto invalidPipeline = BSON_ARRAY(BSON("$changeStream" << BSONObj()));
+
+    ASSERT_THROWS_CODE(
+        viewCatalog.createView(opCtx.get(), viewName, viewOn, invalidPipeline, emptyCollation)
+            .ignore(),
+        AssertionException,
+        ErrorCodes::OptionNotSupportedOnView);
 }
 
 TEST_F(ViewCatalogFixture, CreateViewOnInvalidCollectionName) {
@@ -318,6 +398,23 @@ TEST_F(ViewCatalogFixture, ModifyViewOnInvalidCollectionName) {
     const NamespaceString viewOn("db.$coll");
 
     ASSERT_NOT_OK(viewCatalog.modifyView(opCtx.get(), viewName, viewOn, emptyPipeline));
+}
+
+TEST_F(ReplViewCatalogFixture, ModifyViewWithPipelineFailsOnIneligibleStage) {
+    const NamespaceString viewName("db.view");
+    const NamespaceString viewOn("db.coll");
+
+    auto validPipeline = BSON_ARRAY(BSON("$match" << BSON("_id" << 1)));
+    auto invalidPipeline = BSON_ARRAY(BSON("$changeStream" << BSONObj()));
+
+    // Create the initial, valid view.
+    ASSERT_OK(viewCatalog.createView(opCtx.get(), viewName, viewOn, validPipeline, emptyCollation));
+
+    // Now attempt to replace it with a pipeline containing $changeStream.
+    ASSERT_THROWS_CODE(
+        viewCatalog.modifyView(opCtx.get(), viewName, viewOn, invalidPipeline).ignore(),
+        AssertionException,
+        ErrorCodes::OptionNotSupportedOnView);
 }
 
 TEST_F(ViewCatalogFixture, LookupMissingView) {

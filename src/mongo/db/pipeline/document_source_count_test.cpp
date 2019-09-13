@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -45,25 +47,26 @@
 
 namespace mongo {
 namespace {
-using std::vector;
 using boost::intrusive_ptr;
+using std::list;
+using std::vector;
 
 class CountReturnsGroupAndProjectStages : public AggregationContextFixture {
 public:
     void testCreateFromBsonResult(BSONObj countSpec) {
-        vector<intrusive_ptr<DocumentSource>> result =
+        list<intrusive_ptr<DocumentSource>> result =
             DocumentSourceCount::createFromBson(countSpec.firstElement(), getExpCtx());
 
         ASSERT_EQUALS(result.size(), 2UL);
 
-        const auto* groupStage = dynamic_cast<DocumentSourceGroup*>(result[0].get());
+        const auto* groupStage = dynamic_cast<DocumentSourceGroup*>(result.front().get());
         ASSERT(groupStage);
 
         const auto* projectStage =
-            dynamic_cast<DocumentSourceSingleDocumentTransformation*>(result[1].get());
+            dynamic_cast<DocumentSourceSingleDocumentTransformation*>(result.back().get());
         ASSERT(projectStage);
 
-        const bool explain = true;
+        auto explain = ExplainOptions::Verbosity::kQueryPlanner;
         vector<Value> explainedStages;
         groupStage->serializeToArray(explainedStages, explain);
         projectStage->serializeToArray(explainedStages, explain);
@@ -94,7 +97,7 @@ TEST_F(CountReturnsGroupAndProjectStages, ValidStringSpec) {
 
 class InvalidCountSpec : public AggregationContextFixture {
 public:
-    vector<intrusive_ptr<DocumentSource>> createCount(BSONObj countSpec) {
+    list<intrusive_ptr<DocumentSource>> createCount(BSONObj countSpec) {
         auto specElem = countSpec.firstElement();
         return DocumentSourceCount::createFromBson(specElem, getExpCtx());
     }
@@ -102,35 +105,35 @@ public:
 
 TEST_F(InvalidCountSpec, NonStringSpec) {
     BSONObj spec = BSON("$count" << 1);
-    ASSERT_THROWS_CODE(createCount(spec), UserException, 40156);
+    ASSERT_THROWS_CODE(createCount(spec), AssertionException, 40156);
 
     spec = BSON("$count" << BSON("field1"
                                  << "test"));
-    ASSERT_THROWS_CODE(createCount(spec), UserException, 40156);
+    ASSERT_THROWS_CODE(createCount(spec), AssertionException, 40156);
 }
 
 TEST_F(InvalidCountSpec, EmptyStringSpec) {
     BSONObj spec = BSON("$count"
                         << "");
-    ASSERT_THROWS_CODE(createCount(spec), UserException, 40157);
+    ASSERT_THROWS_CODE(createCount(spec), AssertionException, 40157);
 }
 
 TEST_F(InvalidCountSpec, FieldPathSpec) {
     BSONObj spec = BSON("$count"
                         << "$x");
-    ASSERT_THROWS_CODE(createCount(spec), UserException, 40158);
+    ASSERT_THROWS_CODE(createCount(spec), AssertionException, 40158);
 }
 
 TEST_F(InvalidCountSpec, EmbeddedNullByteSpec) {
     BSONObj spec = BSON("$count"
                         << "te\0st"_sd);
-    ASSERT_THROWS_CODE(createCount(spec), UserException, 40159);
+    ASSERT_THROWS_CODE(createCount(spec), AssertionException, 40159);
 }
 
 TEST_F(InvalidCountSpec, PeriodInStringSpec) {
     BSONObj spec = BSON("$count"
                         << "test.string");
-    ASSERT_THROWS_CODE(createCount(spec), UserException, 40160);
+    ASSERT_THROWS_CODE(createCount(spec), AssertionException, 40160);
 }
 }  // namespace
 }  // namespace mongo

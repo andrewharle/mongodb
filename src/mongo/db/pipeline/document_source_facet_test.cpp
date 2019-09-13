@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -50,11 +52,6 @@ namespace mongo {
 using std::deque;
 using std::vector;
 
-// Crutch.
-bool isMongos() {
-    return false;
-}
-
 namespace {
 
 using std::deque;
@@ -71,88 +68,104 @@ TEST_F(DocumentSourceFacetTest, ShouldRejectNonObjectSpec) {
     auto ctx = getExpCtx();
     auto spec = BSON("$facet"
                      << "string");
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = BSON("$facet" << 1);
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = BSON("$facet" << BSON_ARRAY(1 << 2));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldRejectEmptyObject) {
     auto ctx = getExpCtx();
     auto spec = BSON("$facet" << BSONObj());
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldRejectFacetsWithInvalidNames) {
     auto ctx = getExpCtx();
     auto spec = BSON("$facet" << BSON("" << BSON_ARRAY(BSON("$skip" << 4))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = BSON("$facet" << BSON("a.b" << BSON_ARRAY(BSON("$skip" << 4))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = BSON("$facet" << BSON("$a" << BSON_ARRAY(BSON("$skip" << 4))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldRejectNonArrayFacets) {
     auto ctx = getExpCtx();
     auto spec = BSON("$facet" << BSON("a" << 1));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = BSON("$facet" << BSON("a" << BSON_ARRAY(BSON("$skip" << 4)) << "b" << 2));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldRejectEmptyPipelines) {
     auto ctx = getExpCtx();
     auto spec = BSON("$facet" << BSON("a" << BSONArray()));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = BSON("$facet" << BSON("a" << BSON_ARRAY(BSON("$skip" << 4)) << "b" << BSONArray()));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 }
 
-TEST_F(DocumentSourceFacetTest, ShouldRejectFacetsWithStagesThatMustBeTheFirstStage) {
+TEST_F(DocumentSourceFacetTest, ShouldSucceedWhenNamespaceIsCollectionless) {
     auto ctx = getExpCtx();
-    auto spec = BSON("$facet" << BSON("a" << BSON_ARRAY(BSON("$indexStats" << BSONObj()))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    auto spec = fromjson("{$facet: {a: [{$match: {}}]}}");
 
-    spec = BSON("$facet" << BSON(
-                    "a" << BSON_ARRAY(BSON("$limit" << 1) << BSON("$indexStats" << BSONObj()))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ctx->ns = NamespaceString::makeCollectionlessAggregateNSS("unittests");
+
+    ASSERT_TRUE(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx).get());
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldRejectFacetsContainingAnOutStage) {
     auto ctx = getExpCtx();
     auto spec = BSON("$facet" << BSON("a" << BSON_ARRAY(BSON("$out"
                                                              << "out_collection"))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec =
         BSON("$facet" << BSON("a" << BSON_ARRAY(BSON("$skip" << 1) << BSON("$out"
                                                                            << "out_collection"))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = BSON("$facet" << BSON("a" << BSON_ARRAY(BSON("$out"
                                                         << "out_collection")
                                                    << BSON("$skip" << 1))));
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldRejectFacetsContainingAFacetStage) {
     auto ctx = getExpCtx();
     auto spec = fromjson("{$facet: {a: [{$facet: {a: [{$skip: 2}]}}]}}");
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = fromjson("{$facet: {a: [{$skip: 2}, {$facet: {a: [{$skip: 2}]}}]}}");
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 
     spec = fromjson("{$facet: {a: [{$skip: 2}], b: [{$facet: {a: [{$skip: 2}]}}]}}");
-    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx), UserException);
+    ASSERT_THROWS(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                  AssertionException);
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldAcceptLegalSpecification) {
@@ -161,6 +174,32 @@ TEST_F(DocumentSourceFacetTest, ShouldAcceptLegalSpecification) {
                                           << BSON_ARRAY(BSON("$limit" << 3))));
     auto facetStage = DocumentSourceFacet::createFromBson(spec.firstElement(), ctx);
     ASSERT_TRUE(facetStage.get());
+}
+
+TEST_F(DocumentSourceFacetTest, ShouldRejectConflictingHostTypeRequirementsWithinSinglePipeline) {
+    auto ctx = getExpCtx();
+    ctx->inMongos = true;
+
+    auto spec = fromjson(
+        "{$facet: {badPipe: [{$_internalSplitPipeline: {mergeType: 'anyShard'}}, "
+        "{$_internalSplitPipeline: {mergeType: 'mongos'}}]}}");
+
+    ASSERT_THROWS_CODE(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                       AssertionException,
+                       ErrorCodes::IllegalOperation);
+}
+
+TEST_F(DocumentSourceFacetTest, ShouldRejectConflictingHostTypeRequirementsAcrossPipelines) {
+    auto ctx = getExpCtx();
+    ctx->inMongos = true;
+
+    auto spec = fromjson(
+        "{$facet: {shardPipe: [{$_internalSplitPipeline: {mergeType: 'anyShard'}}], mongosPipe: "
+        "[{$_internalSplitPipeline: {mergeType: 'mongos'}}]}}");
+
+    ASSERT_THROWS_CODE(DocumentSourceFacet::createFromBson(spec.firstElement(), ctx),
+                       AssertionException,
+                       ErrorCodes::IllegalOperation);
 }
 
 //
@@ -174,9 +213,13 @@ class DocumentSourcePassthrough : public DocumentSourceMock {
 public:
     DocumentSourcePassthrough() : DocumentSourceMock({}) {}
 
-    // We need this to be false so that it can be used in a $facet stage.
-    bool isValidInitialSource() const final {
-        return false;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const override {
+        return {StreamType::kStreaming,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed};
     }
 
     DocumentSource::GetNextResult getNext() final {
@@ -191,17 +234,19 @@ public:
 TEST_F(DocumentSourceFacetTest, SingleFacetShouldReceiveAllDocuments) {
     auto ctx = getExpCtx();
 
-    auto dummy = DocumentSourcePassthrough::create();
-
-    auto statusWithPipeline = Pipeline::create({dummy}, ctx);
-    ASSERT_OK(statusWithPipeline.getStatus());
-    auto pipeline = std::move(statusWithPipeline.getValue());
-
-    auto facetStage = DocumentSourceFacet::create({{"results", pipeline}}, ctx);
-
     deque<DocumentSource::GetNextResult> inputs = {
         Document{{"_id", 0}}, Document{{"_id", 1}}, Document{{"_id", 2}}};
     auto mock = DocumentSourceMock::create(inputs);
+
+    auto dummy = DocumentSourcePassthrough::create();
+
+    auto statusWithPipeline = Pipeline::createFacetPipeline({dummy}, ctx);
+    ASSERT_OK(statusWithPipeline.getStatus());
+    auto pipeline = std::move(statusWithPipeline.getValue());
+
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("results", std::move(pipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
     facetStage->setSource(mock.get());
 
     auto output = facetStage->getNext();
@@ -218,18 +263,21 @@ TEST_F(DocumentSourceFacetTest, SingleFacetShouldReceiveAllDocuments) {
 TEST_F(DocumentSourceFacetTest, MultipleFacetsShouldSeeTheSameDocuments) {
     auto ctx = getExpCtx();
 
-    auto firstDummy = DocumentSourcePassthrough::create();
-    auto firstPipeline = uassertStatusOK(Pipeline::create({firstDummy}, ctx));
-
-    auto secondDummy = DocumentSourcePassthrough::create();
-    auto secondPipeline = uassertStatusOK(Pipeline::create({secondDummy}, ctx));
-
-    auto facetStage =
-        DocumentSourceFacet::create({{"first", firstPipeline}, {"second", secondPipeline}}, ctx);
-
     deque<DocumentSource::GetNextResult> inputs = {
         Document{{"_id", 0}}, Document{{"_id", 1}}, Document{{"_id", 2}}};
     auto mock = DocumentSourceMock::create(inputs);
+
+    auto firstDummy = DocumentSourcePassthrough::create();
+    auto firstPipeline = uassertStatusOK(Pipeline::createFacetPipeline({firstDummy}, ctx));
+
+    auto secondDummy = DocumentSourcePassthrough::create();
+    auto secondPipeline = uassertStatusOK(Pipeline::createFacetPipeline({secondDummy}, ctx));
+
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("first", std::move(firstPipeline));
+    facets.emplace_back("second", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
+
     facetStage->setSource(mock.get());
 
     auto output = facetStage->getNext();
@@ -254,18 +302,21 @@ TEST_F(DocumentSourceFacetTest,
        ShouldCorrectlyHandleSubPipelinesYieldingDifferentNumbersOfResults) {
     auto ctx = getExpCtx();
 
-    auto passthrough = DocumentSourcePassthrough::create();
-    auto passthroughPipe = uassertStatusOK(Pipeline::create({passthrough}, ctx));
-
-    auto limit = DocumentSourceLimit::create(ctx, 1);
-    auto limitedPipe = uassertStatusOK(Pipeline::create({limit}, ctx));
-
-    auto facetStage =
-        DocumentSourceFacet::create({{"all", passthroughPipe}, {"first", limitedPipe}}, ctx);
-
     deque<DocumentSource::GetNextResult> inputs = {
         Document{{"_id", 0}}, Document{{"_id", 1}}, Document{{"_id", 2}}, Document{{"_id", 3}}};
     auto mock = DocumentSourceMock::create(inputs);
+
+    auto passthrough = DocumentSourcePassthrough::create();
+    auto passthroughPipe = uassertStatusOK(Pipeline::createFacetPipeline({passthrough}, ctx));
+
+    auto limit = DocumentSourceLimit::create(ctx, 1);
+    auto limitedPipe = uassertStatusOK(Pipeline::createFacetPipeline({limit}, ctx));
+
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("all", std::move(passthroughPipe));
+    facets.emplace_back("first", std::move(limitedPipe));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
+
     facetStage->setSource(mock.get());
 
     vector<Value> expectedPassthroughOutput;
@@ -290,14 +341,17 @@ TEST_F(DocumentSourceFacetTest,
 TEST_F(DocumentSourceFacetTest, ShouldBeAbleToEvaluateMultipleStagesWithinOneSubPipeline) {
     auto ctx = getExpCtx();
 
-    auto firstDummy = DocumentSourcePassthrough::create();
-    auto secondDummy = DocumentSourcePassthrough::create();
-    auto pipeline = uassertStatusOK(Pipeline::create({firstDummy, secondDummy}, ctx));
-
-    auto facetStage = DocumentSourceFacet::create({{"subPipe", pipeline}}, ctx);
-
     deque<DocumentSource::GetNextResult> inputs = {Document{{"_id", 0}}, Document{{"_id", 1}}};
     auto mock = DocumentSourceMock::create(inputs);
+
+    auto firstDummy = DocumentSourcePassthrough::create();
+    auto secondDummy = DocumentSourcePassthrough::create();
+    auto pipeline = uassertStatusOK(Pipeline::createFacetPipeline({firstDummy, secondDummy}, ctx));
+
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("subPipe", std::move(pipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
+
     facetStage->setSource(mock.get());
 
     auto output = facetStage->getNext();
@@ -305,18 +359,41 @@ TEST_F(DocumentSourceFacetTest, ShouldBeAbleToEvaluateMultipleStagesWithinOneSub
     ASSERT_DOCUMENT_EQ(output.getDocument(), Document(fromjson("{subPipe: [{_id: 0}, {_id: 1}]}")));
 }
 
+TEST_F(DocumentSourceFacetTest, ShouldPropagateDisposeThroughToSource) {
+    auto ctx = getExpCtx();
+
+    auto mockSource = DocumentSourceMock::create();
+
+    auto firstDummy = DocumentSourcePassthrough::create();
+    auto firstPipe = uassertStatusOK(Pipeline::createFacetPipeline({firstDummy}, ctx));
+    auto secondDummy = DocumentSourcePassthrough::create();
+    auto secondPipe = uassertStatusOK(Pipeline::createFacetPipeline({secondDummy}, ctx));
+
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("firstPipe", std::move(firstPipe));
+    facets.emplace_back("secondPipe", std::move(secondPipe));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
+
+    facetStage->setSource(mockSource.get());
+
+    facetStage->dispose();
+    ASSERT_TRUE(mockSource->isDisposed);
+}
+
 // TODO: DocumentSourceFacet will have to propagate pauses if we ever allow nested $facets.
 DEATH_TEST_F(DocumentSourceFacetTest,
              ShouldFailIfGivenPausedInput,
              "Invariant failure !input.isPaused()") {
     auto ctx = getExpCtx();
+    auto mock = DocumentSourceMock::create(DocumentSource::GetNextResult::makePauseExecution());
 
     auto firstDummy = DocumentSourcePassthrough::create();
-    auto pipeline = uassertStatusOK(Pipeline::create({firstDummy}, ctx));
+    auto pipeline = uassertStatusOK(Pipeline::createFacetPipeline({firstDummy}, ctx));
 
-    auto facetStage = DocumentSourceFacet::create({{"subPipe", pipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("subPipe", std::move(pipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
-    auto mock = DocumentSourceMock::create(DocumentSource::GetNextResult::makePauseExecution());
     facetStage->setSource(mock.get());
 
     facetStage->getNext();  // This should cause a crash.
@@ -335,13 +412,15 @@ TEST_F(DocumentSourceFacetTest, ShouldBeAbleToReParseSerializedStage) {
     //   skippedTwo: [{$skip: 2}]
     // }}
     auto firstSkip = DocumentSourceSkip::create(ctx, 1);
-    auto firstPipeline = uassertStatusOK(Pipeline::create({firstSkip}, ctx));
+    auto firstPipeline = uassertStatusOK(Pipeline::createFacetPipeline({firstSkip}, ctx));
 
     auto secondSkip = DocumentSourceSkip::create(ctx, 2);
-    auto secondPipeline = uassertStatusOK(Pipeline::create({secondSkip}, ctx));
+    auto secondPipeline = uassertStatusOK(Pipeline::createFacetPipeline({secondSkip}, ctx));
 
-    auto facetStage = DocumentSourceFacet::create(
-        {{"skippedOne", firstPipeline}, {"skippedTwo", secondPipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("skippedOne", std::move(firstPipeline));
+    facets.emplace_back("skippedTwo", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
     // Serialize the facet stage.
     vector<Value> serialization;
@@ -376,36 +455,54 @@ TEST_F(DocumentSourceFacetTest, ShouldOptimizeInnerPipelines) {
     auto ctx = getExpCtx();
 
     auto dummy = DocumentSourcePassthrough::create();
-    auto pipeline = unittest::assertGet(Pipeline::create({dummy}, ctx));
+    auto pipeline = unittest::assertGet(Pipeline::createFacetPipeline({dummy}, ctx));
 
-    auto facetStage = DocumentSourceFacet::create({{"subPipe", pipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("subPipe", std::move(pipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
     ASSERT_FALSE(dummy->isOptimized);
     facetStage->optimize();
     ASSERT_TRUE(dummy->isOptimized);
 }
 
-TEST_F(DocumentSourceFacetTest, ShouldPropogateDetachingAndReattachingOfOpCtx) {
+/**
+ * An implementation of the MongoProcessInterface that is okay with changing the OperationContext,
+ * but has no other parts of the interface implemented.
+ */
+class StubMongoProcessOkWithOpCtxChanges : public StubMongoProcessInterface {
+public:
+    void setOperationContext(OperationContext* opCtx) final {
+        return;
+    }
+};
+
+TEST_F(DocumentSourceFacetTest, ShouldPropagateDetachingAndReattachingOfOpCtx) {
     auto ctx = getExpCtx();
+    // We're going to be changing the OperationContext, so we need to use a MongoProcessInterface
+    // that won't throw when we do so.
+    ctx->mongoProcessInterface = stdx::make_unique<StubMongoProcessOkWithOpCtxChanges>();
 
     auto firstDummy = DocumentSourcePassthrough::create();
-    auto firstPipeline = unittest::assertGet(Pipeline::create({firstDummy}, ctx));
+    auto firstPipeline = unittest::assertGet(Pipeline::createFacetPipeline({firstDummy}, ctx));
 
     auto secondDummy = DocumentSourcePassthrough::create();
-    auto secondPipeline = unittest::assertGet(Pipeline::create({secondDummy}, ctx));
+    auto secondPipeline = unittest::assertGet(Pipeline::createFacetPipeline({secondDummy}, ctx));
 
-    auto facetStage =
-        DocumentSourceFacet::create({{"one", firstPipeline}, {"two", secondPipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("one", std::move(firstPipeline));
+    facets.emplace_back("two", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
     // Test detaching.
     ASSERT_FALSE(firstDummy->isDetachedFromOpCtx);
     ASSERT_FALSE(secondDummy->isDetachedFromOpCtx);
-    facetStage->doDetachFromOperationContext();
+    facetStage->detachFromOperationContext();
     ASSERT_TRUE(firstDummy->isDetachedFromOpCtx);
     ASSERT_TRUE(secondDummy->isDetachedFromOpCtx);
 
     // Test reattaching.
-    facetStage->doReattachToOperationContext(ctx->opCtx);
+    facetStage->reattachToOperationContext(ctx->opCtx);
     ASSERT_FALSE(firstDummy->isDetachedFromOpCtx);
     ASSERT_FALSE(secondDummy->isDetachedFromOpCtx);
 }
@@ -444,7 +541,7 @@ TEST_F(DocumentSourceFacetTest, ShouldUnionDependenciesOfInnerPipelines) {
     auto ctx = getExpCtx();
 
     auto needsA = DocumentSourceNeedsA::create();
-    auto firstPipeline = unittest::assertGet(Pipeline::create({needsA}, ctx));
+    auto firstPipeline = unittest::assertGet(Pipeline::createFacetPipeline({needsA}, ctx));
 
     auto firstPipelineDeps =
         firstPipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
@@ -453,7 +550,7 @@ TEST_F(DocumentSourceFacetTest, ShouldUnionDependenciesOfInnerPipelines) {
     ASSERT_EQ(firstPipelineDeps.fields.count("a"), 1UL);
 
     auto needsB = DocumentSourceNeedsB::create();
-    auto secondPipeline = unittest::assertGet(Pipeline::create({needsB}, ctx));
+    auto secondPipeline = unittest::assertGet(Pipeline::createFacetPipeline({needsB}, ctx));
 
     auto secondPipelineDeps =
         secondPipeline->getDependencies(DepsTracker::MetadataAvailable::kNoMetadata);
@@ -461,8 +558,10 @@ TEST_F(DocumentSourceFacetTest, ShouldUnionDependenciesOfInnerPipelines) {
     ASSERT_EQ(secondPipelineDeps.fields.size(), 1UL);
     ASSERT_EQ(secondPipelineDeps.fields.count("b"), 1UL);
 
-    auto facetStage =
-        DocumentSourceFacet::create({{"needsA", firstPipeline}, {"needsB", secondPipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("needsA", std::move(firstPipeline));
+    facets.emplace_back("needsB", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
     DepsTracker deps(DepsTracker::MetadataAvailable::kNoMetadata);
     ASSERT_EQ(facetStage->getDependencies(&deps), DocumentSource::GetDepsReturn::EXHAUSTIVE_ALL);
@@ -491,13 +590,16 @@ TEST_F(DocumentSourceFacetTest, ShouldRequireWholeDocumentIfAnyPipelineRequiresW
     auto ctx = getExpCtx();
 
     auto needsA = DocumentSourceNeedsA::create();
-    auto firstPipeline = unittest::assertGet(Pipeline::create({needsA}, ctx));
+    auto firstPipeline = unittest::assertGet(Pipeline::createFacetPipeline({needsA}, ctx));
 
     auto needsWholeDocument = DocumentSourceNeedsWholeDocument::create();
-    auto secondPipeline = unittest::assertGet(Pipeline::create({needsWholeDocument}, ctx));
+    auto secondPipeline =
+        unittest::assertGet(Pipeline::createFacetPipeline({needsWholeDocument}, ctx));
 
-    auto facetStage = DocumentSourceFacet::create(
-        {{"needsA", firstPipeline}, {"needsWholeDocument", secondPipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("needsA", std::move(firstPipeline));
+    facets.emplace_back("needsWholeDocument", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
     DepsTracker deps(DepsTracker::MetadataAvailable::kNoMetadata);
     ASSERT_EQ(facetStage->getDependencies(&deps), DocumentSource::GetDepsReturn::EXHAUSTIVE_ALL);
@@ -523,18 +625,20 @@ TEST_F(DocumentSourceFacetTest, ShouldRequireTextScoreIfAnyPipelineRequiresTextS
     auto ctx = getExpCtx();
 
     auto needsA = DocumentSourceNeedsA::create();
-    auto firstPipeline = unittest::assertGet(Pipeline::create({needsA}, ctx));
+    auto firstPipeline = unittest::assertGet(Pipeline::createFacetPipeline({needsA}, ctx));
 
     auto needsWholeDocument = DocumentSourceNeedsWholeDocument::create();
-    auto secondPipeline = unittest::assertGet(Pipeline::create({needsWholeDocument}, ctx));
+    auto secondPipeline =
+        unittest::assertGet(Pipeline::createFacetPipeline({needsWholeDocument}, ctx));
 
     auto needsTextScore = DocumentSourceNeedsOnlyTextScore::create();
-    auto thirdPipeline = unittest::assertGet(Pipeline::create({needsTextScore}, ctx));
+    auto thirdPipeline = unittest::assertGet(Pipeline::createFacetPipeline({needsTextScore}, ctx));
 
-    auto facetStage = DocumentSourceFacet::create({{"needsA", firstPipeline},
-                                                   {"needsWholeDocument", secondPipeline},
-                                                   {"needsTextScore", thirdPipeline}},
-                                                  ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("needsA", std::move(firstPipeline));
+    facets.emplace_back("needsWholeDocument", std::move(secondPipeline));
+    facets.emplace_back("needsTextScore", std::move(thirdPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
     DepsTracker deps(DepsTracker::MetadataAvailable::kTextScore);
     ASSERT_EQ(facetStage->getDependencies(&deps), DocumentSource::GetDepsReturn::EXHAUSTIVE_ALL);
@@ -546,16 +650,18 @@ TEST_F(DocumentSourceFacetTest, ShouldThrowIfAnyPipelineRequiresTextScoreButItIs
     auto ctx = getExpCtx();
 
     auto needsA = DocumentSourceNeedsA::create();
-    auto firstPipeline = unittest::assertGet(Pipeline::create({needsA}, ctx));
+    auto firstPipeline = unittest::assertGet(Pipeline::createFacetPipeline({needsA}, ctx));
 
     auto needsTextScore = DocumentSourceNeedsOnlyTextScore::create();
-    auto secondPipeline = unittest::assertGet(Pipeline::create({needsTextScore}, ctx));
+    auto secondPipeline = unittest::assertGet(Pipeline::createFacetPipeline({needsTextScore}, ctx));
 
-    auto facetStage = DocumentSourceFacet::create(
-        {{"needsA", firstPipeline}, {"needsTextScore", secondPipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("needsA", std::move(firstPipeline));
+    facets.emplace_back("needsTextScore", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
     DepsTracker deps(DepsTracker::MetadataAvailable::kNoMetadata);
-    ASSERT_THROWS(facetStage->getDependencies(&deps), UserException);
+    ASSERT_THROWS(facetStage->getDependencies(&deps), AssertionException);
 }
 
 /**
@@ -563,8 +669,13 @@ TEST_F(DocumentSourceFacetTest, ShouldThrowIfAnyPipelineRequiresTextScoreButItIs
  */
 class DocumentSourceNeedsPrimaryShard final : public DocumentSourcePassthrough {
 public:
-    bool needsPrimaryShard() const final {
-        return true;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kStreaming,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kPrimaryShard,
+                DiskUseRequirement::kNoDiskUse,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed};
     }
 
     static boost::intrusive_ptr<DocumentSourceNeedsPrimaryShard> create() {
@@ -576,30 +687,39 @@ TEST_F(DocumentSourceFacetTest, ShouldRequirePrimaryShardIfAnyStageRequiresPrima
     auto ctx = getExpCtx();
 
     auto passthrough = DocumentSourcePassthrough::create();
-    auto firstPipeline = unittest::assertGet(Pipeline::create({passthrough}, ctx));
+    auto firstPipeline = unittest::assertGet(Pipeline::createFacetPipeline({passthrough}, ctx));
 
     auto needsPrimaryShard = DocumentSourceNeedsPrimaryShard::create();
-    auto secondPipeline = unittest::assertGet(Pipeline::create({needsPrimaryShard}, ctx));
+    auto secondPipeline =
+        unittest::assertGet(Pipeline::createFacetPipeline({needsPrimaryShard}, ctx));
 
-    auto facetStage = DocumentSourceFacet::create(
-        {{"passthrough", firstPipeline}, {"needsPrimaryShard", secondPipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("passthrough", std::move(firstPipeline));
+    facets.emplace_back("needsPrimaryShard", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
-    ASSERT_TRUE(facetStage->needsPrimaryShard());
+    ASSERT(facetStage->constraints(Pipeline::SplitState::kUnsplit).hostRequirement ==
+           DocumentSource::StageConstraints::HostTypeRequirement::kPrimaryShard);
 }
 
 TEST_F(DocumentSourceFacetTest, ShouldNotRequirePrimaryShardIfNoStagesRequiresPrimaryShard) {
     auto ctx = getExpCtx();
 
     auto firstPassthrough = DocumentSourcePassthrough::create();
-    auto firstPipeline = unittest::assertGet(Pipeline::create({firstPassthrough}, ctx));
+    auto firstPipeline =
+        unittest::assertGet(Pipeline::createFacetPipeline({firstPassthrough}, ctx));
 
     auto secondPassthrough = DocumentSourcePassthrough::create();
-    auto secondPipeline = unittest::assertGet(Pipeline::create({secondPassthrough}, ctx));
+    auto secondPipeline =
+        unittest::assertGet(Pipeline::createFacetPipeline({secondPassthrough}, ctx));
 
-    auto facetStage =
-        DocumentSourceFacet::create({{"first", firstPipeline}, {"second", secondPipeline}}, ctx);
+    std::vector<DocumentSourceFacet::FacetPipeline> facets;
+    facets.emplace_back("first", std::move(firstPipeline));
+    facets.emplace_back("second", std::move(secondPipeline));
+    auto facetStage = DocumentSourceFacet::create(std::move(facets), ctx);
 
-    ASSERT_FALSE(facetStage->needsPrimaryShard());
+    ASSERT(facetStage->constraints(Pipeline::SplitState::kUnsplit).hostRequirement ==
+           DocumentSource::StageConstraints::HostTypeRequirement::kNone);
 }
 
 }  // namespace

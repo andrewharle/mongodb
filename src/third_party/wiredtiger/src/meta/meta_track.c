@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -8,6 +8,7 @@
 
 #include "wt_internal.h"
 
+#undef	WT_ENABLE_SCHEMA_TXN
 /*
  * WT_META_TRACK -- A tracked metadata operation: a non-transactional log,
  * maintained to make it easy to unroll simple metadata and filesystem
@@ -114,8 +115,16 @@ __wt_meta_track_discard(WT_SESSION_IMPL *session)
 int
 __wt_meta_track_on(WT_SESSION_IMPL *session)
 {
-	if (session->meta_track_nest++ == 0)
+	if (session->meta_track_nest++ == 0) {
+		if (!F_ISSET(&session->txn, WT_TXN_RUNNING)) {
+#ifdef WT_ENABLE_SCHEMA_TXN
+			WT_RET(__wt_txn_begin(session, NULL));
+			__wt_errx(session, "TRACK: Using internal schema txn");
+#endif
+			F_SET(session, WT_SESSION_SCHEMA_TXN);
+		}
 		WT_RET(__meta_track_next(session, NULL));
+	}
 
 	return (0);
 }
@@ -138,7 +147,7 @@ __meta_track_apply(WT_SESSION_IMPL *session, WT_META_TRACK *trk)
 		btree = trk->dhandle->handle;
 		bm = btree->bm;
 		WT_WITH_DHANDLE(session, trk->dhandle,
-		    ret = bm->checkpoint_resolve(bm, session));
+		    ret = bm->checkpoint_resolve(bm, session, false));
 		break;
 	case WT_ST_DROP_COMMIT:
 		if ((ret =
@@ -148,7 +157,7 @@ __meta_track_apply(WT_SESSION_IMPL *session, WT_META_TRACK *trk)
 		break;
 	case WT_ST_LOCK:
 		WT_WITH_DHANDLE(session, trk->dhandle,
-		    ret = __wt_session_release_btree(session));
+		    ret = __wt_session_release_dhandle(session));
 		break;
 	case WT_ST_FILEOP:
 	case WT_ST_REMOVE:
@@ -167,12 +176,18 @@ __meta_track_apply(WT_SESSION_IMPL *session, WT_META_TRACK *trk)
 static int
 __meta_track_unroll(WT_SESSION_IMPL *session, WT_META_TRACK *trk)
 {
+	WT_BM *bm;
+	WT_BTREE *btree;
 	WT_DECL_RET;
 
 	switch (trk->op) {
 	case WT_ST_EMPTY:	/* Unused slot */
 		break;
 	case WT_ST_CHECKPOINT:	/* Checkpoint, see above */
+		btree = trk->dhandle->handle;
+		bm = btree->bm;
+		WT_WITH_DHANDLE(session, trk->dhandle,
+		    ret = bm->checkpoint_resolve(bm, session, true));
 		break;
 	case WT_ST_DROP_COMMIT:
 		break;
@@ -180,7 +195,7 @@ __meta_track_unroll(WT_SESSION_IMPL *session, WT_META_TRACK *trk)
 		if (trk->created)
 			F_SET(trk->dhandle, WT_DHANDLE_DISCARD);
 		WT_WITH_DHANDLE(session, trk->dhandle,
-		    ret = __wt_session_release_btree(session));
+		    ret = __wt_session_release_dhandle(session));
 		break;
 	case WT_ST_FILEOP:	/* File operation */
 		/*
@@ -233,6 +248,9 @@ __wt_meta_track_off(WT_SESSION_IMPL *session, bool need_sync, bool unroll)
 	WT_DECL_RET;
 	WT_META_TRACK *trk, *trk_orig;
 	WT_SESSION_IMPL *ckpt_session;
+	int saved_ret;
+
+	saved_ret = 0;
 
 	WT_ASSERT(session,
 	    WT_META_TRACKING(session) && session->meta_track_nest > 0);
@@ -248,18 +266,23 @@ __wt_meta_track_off(WT_SESSION_IMPL *session, bool need_sync, bool unroll)
 	session->meta_track_next = session->meta_track_sub = NULL;
 
 	/*
-	 * If there were no operations logged, return now and avoid unnecessary
-	 * metadata checkpoints.  For example, this happens if attempting to
-	 * create a data source that already exists (or drop one that doesn't).
+	 * If there were no operations logged, skip unnecessary metadata
+	 * checkpoints.  For example, this happens if attempting to create a
+	 * data source that already exists (or drop one that doesn't).
 	 */
 	if (trk == trk_orig)
-		return (0);
+		goto err;
 
-	if (unroll) {
-		while (--trk >= trk_orig)
-			WT_TRET(__meta_track_unroll(session, trk));
-		/* Unroll operations don't need to flush the metadata. */
-		return (ret);
+	/* Unrolling doesn't require syncing the metadata. */
+	if (unroll)
+		goto err;
+
+	if (F_ISSET(session, WT_SESSION_SCHEMA_TXN)) {
+		F_CLR(session, WT_SESSION_SCHEMA_TXN);
+#ifdef WT_ENABLE_SCHEMA_TXN
+		WT_ERR(__wt_txn_commit(session, NULL));
+		__wt_errx(session, "TRACK: Commit internal schema txn");
+#endif
 	}
 
 	/*
@@ -268,16 +291,15 @@ __wt_meta_track_off(WT_SESSION_IMPL *session, bool need_sync, bool unroll)
 	 */
 	if (!need_sync || session->meta_cursor == NULL ||
 	    F_ISSET(S2C(session), WT_CONN_IN_MEMORY))
-		goto done;
+		goto err;
 
 	/* If we're logging, make sure the metadata update was flushed. */
-	if (FLD_ISSET(S2C(session)->log_flags, WT_CONN_LOG_ENABLED)) {
+	if (FLD_ISSET(S2C(session)->log_flags, WT_CONN_LOG_ENABLED))
 		WT_WITH_DHANDLE(session,
 		    WT_SESSION_META_DHANDLE(session),
 		    ret = __wt_txn_checkpoint_log(
-			session, false, WT_TXN_LOG_CKPT_SYNC, NULL));
-		WT_RET(ret);
-	} else {
+		    session, false, WT_TXN_LOG_CKPT_SYNC, NULL));
+	else {
 		WT_ASSERT(session, F_ISSET(session, WT_SESSION_LOCKED_SCHEMA));
 		ckpt_session = S2C(session)->meta_ckpt_session;
 		/*
@@ -285,24 +307,49 @@ __wt_meta_track_off(WT_SESSION_IMPL *session, bool need_sync, bool unroll)
 		 * should be included in the checkpoint.
 		 */
 		ckpt_session->txn.id = session->txn.id;
-		F_SET(ckpt_session, WT_SESSION_LOCKED_METADATA);
-		WT_WITH_METADATA_LOCK(session,
-		    WT_WITH_DHANDLE(ckpt_session,
-			WT_SESSION_META_DHANDLE(session),
+		WT_ASSERT(session,
+		    !F_ISSET(session, WT_SESSION_LOCKED_METADATA));
+		WT_WITH_DHANDLE(ckpt_session, WT_SESSION_META_DHANDLE(session),
+		    WT_WITH_METADATA_LOCK(ckpt_session,
 			ret = __wt_checkpoint(ckpt_session, NULL)));
-		F_CLR(ckpt_session, WT_SESSION_LOCKED_METADATA);
 		ckpt_session->txn.id = WT_TXN_NONE;
-		WT_RET(ret);
-		WT_WITH_DHANDLE(session,
-		    WT_SESSION_META_DHANDLE(session),
-		    ret = __wt_checkpoint_sync(session, NULL));
-		WT_RET(ret);
+		if (ret == 0)
+			WT_WITH_DHANDLE(session,
+			    WT_SESSION_META_DHANDLE(session),
+			    ret = __wt_checkpoint_sync(session, NULL));
 	}
 
-done:	/* Apply any tracked operations post-commit. */
-	for (; trk_orig < trk; trk_orig++)
-		WT_TRET(__meta_track_apply(session, trk_orig));
-	return (ret);
+err:	/*
+	 * Undo any tracked operations on failure.
+	 * Apply any tracked operations post-commit.
+	 */
+	if (unroll || ret != 0) {
+		saved_ret = ret;
+		ret = 0;
+		while (--trk >= trk_orig)
+			WT_TRET(__meta_track_unroll(session, trk));
+	} else
+		for (; trk_orig < trk; trk_orig++)
+			WT_TRET(__meta_track_apply(session, trk_orig));
+
+	if (F_ISSET(session, WT_SESSION_SCHEMA_TXN)) {
+		F_CLR(session, WT_SESSION_SCHEMA_TXN);
+		/*
+		 * We should have committed above unless we're unrolling, there
+		 * was an error or the operation was a noop.
+		 */
+		WT_ASSERT(session, unroll || saved_ret != 0 ||
+		    session->txn.mod_count == 0);
+#ifdef WT_ENABLE_SCHEMA_TXN
+		__wt_errx(session, "TRACK: Abort internal schema txn");
+		WT_TRET(__wt_txn_rollback(session, NULL));
+#endif
+	}
+
+	if (ret != 0)
+		WT_PANIC_RET(session, ret,
+		    "failed to apply or unroll all tracked operations");
+	return (saved_ret == 0 ? 0 : saved_ret);
 }
 
 /*

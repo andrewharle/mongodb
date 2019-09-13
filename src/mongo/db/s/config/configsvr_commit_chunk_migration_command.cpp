@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
@@ -37,23 +39,19 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/s/chunk_move_write_concern_options.h"
+#include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_locks.h"
 #include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/request_types/commit_chunk_migration_request_type.h"
-#include "mongo/util/fail_point.h"
-#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 namespace {
-
-MONGO_FP_DECLARE(migrationCommitError);  // delete this in 3.5
 
 /**
  * This command takes the chunk being migrated ("migratedChunk") and generates a new version for it
@@ -78,7 +76,6 @@ MONGO_FP_DECLARE(migrationCommitError);  // delete this in 3.5
  *   migratedChunk: {min: <min_value>, max: <max_value>, etc. },
  *   controlChunk: {min: <min_value>, max: <max_value>, etc. },  (optional)
  *   fromShardCollectionVersion: { shardVersionField: <version> }, (for backward compatibility only)
- *   shardHasDistributedLock: true/false (for backward compatibility only)
  * }
  *
  * Returns:
@@ -88,16 +85,16 @@ MONGO_FP_DECLARE(migrationCommitError);  // delete this in 3.5
  * }
  *
  */
-class ConfigSvrCommitChunkMigrationCommand : public Command {
+class ConfigSvrCommitChunkMigrationCommand : public BasicCommand {
 public:
-    ConfigSvrCommitChunkMigrationCommand() : Command("_configsvrCommitChunkMigration") {}
+    ConfigSvrCommitChunkMigrationCommand() : BasicCommand("_configsvrCommitChunkMigration") {}
 
-    void help(std::stringstream& help) const override {
-        help << "should not be calling this directly";
+    std::string help() const override {
+        return "should not be calling this directly";
     }
 
-    bool slaveOk() const override {
-        return false;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kNever;
     }
 
     bool adminOnly() const override {
@@ -110,7 +107,7 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         if (!AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
                 ResourcePattern::forClusterResource(), ActionType::internal)) {
             return Status(ErrorCodes::Unauthorized, "Unauthorized");
@@ -119,82 +116,32 @@ public:
     }
 
     std::string parseNs(const std::string& dbname, const BSONObj& cmdObj) const override {
-        return parseNsFullyQualified(dbname, cmdObj);
+        return CommandHelpers::parseNsFullyQualified(cmdObj);
     }
 
-    /**
-     * Assures that the balancer still holds the collection distributed lock for this collection. If
-     * it no longer does, fail because we don't know if the collection state has changed -- e.g.
-     * whether it was/is dropping, whether another imcompatible migration is running, etc..
-     */
-    static Status checkBalancerHasDistLock(OperationContext* txn,
-                                           const NamespaceString& nss,
-                                           const ChunkType& chunk) {
-        auto balancerDistLockProcessID =
-            Grid::get(txn)->catalogClient(txn)->getDistLockManager()->getProcessID();
-
-        // Must use local read concern because we're going to perform subsequent writes.
-        auto lockQueryResponseWith =
-            Grid::get(txn)->shardRegistry()->getConfigShard()->exhaustiveFindOnConfig(
-                txn,
-                ReadPreferenceSetting{ReadPreference::PrimaryOnly},
-                repl::ReadConcernLevel::kLocalReadConcern,
-                NamespaceString(LocksType::ConfigNS),
-                BSON(LocksType::process(balancerDistLockProcessID) << LocksType::name(nss.ns())),
-                BSONObj(),
-                boost::none);
-        if (!lockQueryResponseWith.isOK()) {
-            return lockQueryResponseWith.getStatus();
-        }
-
-        invariant(lockQueryResponseWith.getValue().docs.size() <= 1);
-
-        if (MONGO_FAIL_POINT(migrationCommitError)) {
-            lockQueryResponseWith.getValue().docs.clear();
-        }
-
-        if (lockQueryResponseWith.getValue().docs.size() != 1) {
-            return Status(
-                ErrorCodes::BalancerLostDistributedLock,
-                str::stream() << "The distributed lock for collection '" << nss.ns()
-                              << "' was lost by the balancer since this migration began. Cannot "
-                              << "proceed with the migration commit for chunk ("
-                              << chunk.getRange().toString()
-                              << ") because it could corrupt other operations.");
-        }
-        return Status::OK();
-    }
-
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const std::string& dbName,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) override {
+
+        // Set the operation context read concern level to local for reads into the config database.
+        repl::ReadConcernArgs::get(opCtx) =
+            repl::ReadConcernArgs(repl::ReadConcernLevel::kLocalReadConcern);
 
         const NamespaceString nss = NamespaceString(parseNs(dbName, cmdObj));
 
         auto commitRequest =
             uassertStatusOK(CommitChunkMigrationRequest::createFromCommand(nss, cmdObj));
 
-        if (!commitRequest.shardHasDistributedLock()) {
-            auto check = checkBalancerHasDistLock(txn, nss, commitRequest.getMigratedChunk());
-            if (!check.isOK()) {
-                return appendCommandStatus(result, check);
-            }
-        }
-
-        StatusWith<BSONObj> response = Grid::get(txn)->catalogManager()->commitChunkMigration(
-            txn,
+        StatusWith<BSONObj> response = ShardingCatalogManager::get(opCtx)->commitChunkMigration(
+            opCtx,
             nss,
             commitRequest.getMigratedChunk(),
-            commitRequest.getControlChunk(),
             commitRequest.getCollectionEpoch(),
             commitRequest.getFromShard(),
-            commitRequest.getToShard());
-        if (!response.isOK()) {
-            return appendCommandStatus(result, response.getStatus());
-        }
+            commitRequest.getToShard(),
+            commitRequest.getValidAfter());
+        uassertStatusOK(response.getStatus());
         result.appendElements(response.getValue());
         return true;
     }

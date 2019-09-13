@@ -1,32 +1,34 @@
 // jsobjtests.cpp - Tests for jsobj.{h,cpp} code
 //
 
+
 /**
- *    Copyright (C) 2008 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
@@ -39,6 +41,7 @@
 #include "mongo/bson/bsonobj_comparator.h"
 #include "mongo/bson/simple_bsonelement_comparator.h"
 #include "mongo/bson/util/builder.h"
+#include "mongo/db/bson/bson_helper.h"
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
@@ -49,6 +52,7 @@
 #include "mongo/util/embedded_builder.h"
 #include "mongo/util/log.h"
 #include "mongo/util/stringutils.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
@@ -162,7 +166,7 @@ FieldCompareResult compareDottedFieldNames(const string& l, const string& r, con
     verify(0);
     return SAME;  // will never get here
 }
-}
+}  // namespace mongo
 
 namespace JsobjTests {
 
@@ -1047,7 +1051,7 @@ public:
          * should fail with an assertion
          */
         nestedBSON = recursiveBSON(BSONObj::maxToStringRecursionDepth + 1);
-        ASSERT_THROWS(nestedBSON.toString(s, false, true), UserException);
+        ASSERT_THROWS(nestedBSON.toString(s, false, true), AssertionException);
     }
 };
 
@@ -1543,18 +1547,18 @@ class LabelishOr : public LabelBase {
                                                 << "p")));
     }
     BSONObj actual() {
-        return OR(BSON("a" << GT << 1 << LTE << "x"),
-                  BSON("b" << NE << 1 << NE << "f" << NE << 22.3),
-                  BSON("x"
-                       << "p"));
+        return BSON(OR(BSON("a" << GT << 1 << LTE << "x"),
+                       BSON("b" << NE << 1 << NE << "f" << NE << 22.3),
+                       BSON("x"
+                            << "p")));
     }
 };
 
 class Unallowed {
 public:
     void run() {
-        ASSERT_THROWS(BSON(GT << 4), MsgAssertionException);
-        ASSERT_THROWS(BSON("a" << 1 << GT << 4), MsgAssertionException);
+        ASSERT_THROWS(BSON(GT << 4), AssertionException);
+        ASSERT_THROWS(BSON("a" << 1 << GT << 4), AssertionException);
     }
 };
 
@@ -2037,9 +2041,9 @@ public:
     }
 
     void good(BSONObj o) {
-        if (o.okForStorageAsRoot())
+        if (o.storageValidEmbedded().isOK())
             return;
-        throw UserException(12528, (string) "should be ok for storage:" + o.toString());
+        uasserted(12528, (string) "should be ok for storage:" + o.toString());
     }
 
     void bad(string s) {
@@ -2047,9 +2051,9 @@ public:
     }
 
     void bad(BSONObj o) {
-        if (!o.okForStorageAsRoot())
+        if (!o.storageValidEmbedded().isOK())
             return;
-        throw UserException(12529, (string) "should NOT be ok for storage:" + o.toString());
+        uasserted(12529, (string) "should NOT be ok for storage:" + o.toString());
     }
 
     void run() {
@@ -2057,10 +2061,6 @@ public:
         good("{}");
         good("{x:1}");
         good("{x:{a:2}}");
-
-        // no dots allowed
-        bad("{'x.y':1}");
-        bad("{'x\\.y':1}");
 
         // Check for $
         bad("{x:{'$a':2}}");
@@ -2071,7 +2071,6 @@ public:
 
         // Queries are not ok
         bad("{num: {$gt: 1}}");
-        bad("{_id: {$regex:'test'}}");
         bad("{$gt: 2}");
         bad("{a : { oo: [ {$bad:1}, {good:1}] }}");
         good("{a : { oo: [ {'\\\\$good':1}, {good:1}] }}");
@@ -2126,28 +2125,6 @@ public:
                              << 1
                              << "$hater"
                              << 1)));
-        bad(BSON("a" << BSON("$ref"
-                             << "coll"
-                             << "$id"
-                             << 1
-                             << "dot.dot"
-                             << 1)));
-
-        // _id isn't a RegEx, or Array
-        good("{_id: 0}");
-        good("{_id: {a:1, b:1}}");
-        good("{_id: {rx: /a/}}");
-        good("{_id: {rx: {$regex: 'a'}}}");
-        bad("{_id: /a/ }");
-        bad("{_id: /a/, other:1}");
-        bad("{hi:1, _id: /a/ }");
-        bad("{_id: /a/i }");
-        bad("{first:/f/i, _id: /a/i }");
-        // Not really a regex type
-        bad("{_id: {$regex: 'a'} }");
-        bad("{_id: {$regex: 'a', $options:'i'} }");
-        bad("{_id:  [1,2]}");
-        bad("{_id:  [1]}");
     }
 };
 
@@ -2322,7 +2299,7 @@ public:
 
             ASSERT(!"Expected Throw");
         } catch (const DBException& e) {
-            if (e.getCode() != 13548)  // we expect the code for oversized buffer
+            if (e.code() != 13548)  // we expect the code for oversized buffer
                 throw;
         }
     }

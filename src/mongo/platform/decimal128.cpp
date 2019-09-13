@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 
@@ -623,7 +626,7 @@ Decimal128 Decimal128::divide(const Decimal128& other,
 
 Decimal128 Decimal128::exponential(RoundingMode roundMode) const {
     std::uint32_t throwAwayFlag = 0;
-    return exponential(&throwAwayFlag);
+    return exponential(&throwAwayFlag, roundMode);
 }
 
 Decimal128 Decimal128::exponential(std::uint32_t* signalingFlags, RoundingMode roundMode) const {
@@ -634,7 +637,7 @@ Decimal128 Decimal128::exponential(std::uint32_t* signalingFlags, RoundingMode r
 
 Decimal128 Decimal128::logarithm(RoundingMode roundMode) const {
     std::uint32_t throwAwayFlag = 0;
-    return logarithm(&throwAwayFlag);
+    return logarithm(&throwAwayFlag, roundMode);
 }
 
 Decimal128 Decimal128::logarithm(std::uint32_t* signalingFlags, RoundingMode roundMode) const {
@@ -716,7 +719,7 @@ Decimal128 Decimal128::quantize(const Decimal128& reference,
 
 Decimal128 Decimal128::squareRoot(RoundingMode roundMode) const {
     std::uint32_t throwAwayFlag = 0;
-    return exponential(&throwAwayFlag);
+    return squareRoot(&throwAwayFlag, roundMode);
 }
 
 Decimal128 Decimal128::squareRoot(std::uint32_t* signalingFlags, RoundingMode roundMode) const {
@@ -776,8 +779,13 @@ namespace {
 // Get the representation of 1 with 17 zeros (half of decimal128's 34 digit precision)
 const std::uint64_t t17 = 100ull * 1000 * 1000 * 1000 * 1000 * 1000;
 // Get the low 64 bits of 34 consecutive decimal 9's
-// t17 * 17 gives 1 with 34 0's, so subtract 1 to get all 9's
-const std::uint64_t t34lo64 = t17 * t17 - 1;
+// t17 * 17 gives 1 with 34 0's, so subtract 1 to get all 9's == 4003012203950112767
+// Using the computed constant avoids a MSVC warning.
+// Computed by running the calculations in Python, and verified with static_assert.
+const std::uint64_t t34lo64 = 4003012203950112767ULL;
+#if defined(__GNUC__)
+static_assert(t34lo64 == t17 * t17 - 1, "precomputed constant is wrong");
+#endif
 // Mod t17 by 2^32 to get the low 32 bits of t17's binary representation
 const std::uint64_t t17lo32 = t17 % (1ull << 32);
 // Divide t17 by 2^32 to get the high 32 bits of t17's binary representation

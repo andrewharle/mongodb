@@ -2,6 +2,12 @@
 //
 // This test is to ensure that localhost authentication works correctly against a sharded
 // cluster whether they are hosted with "localhost" or a hostname.
+
+// Checking UUID consistency, which occurs on ShardingTest.stop, involves using a mongos to read
+// data on the config server, but this test uses a special shutdown function which stops the
+// mongoses before calling ShardingTest.stop.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     'use strict';
 
@@ -35,7 +41,7 @@
         } else {
             assert.commandFailed(res, "Add shard");
         }
-        return m.port;
+        return m;
     };
 
     var findEmptyShard = function(st, ns) {
@@ -86,7 +92,7 @@
         var res = mongo.getDB("admin").runCommand({
             moveChunk: "test.foo",
             find: {_id: 1},
-            to: "shard0000"  // Arbitrary shard.
+            to: st.shard0.shardName  // Arbitrary shard.
         });
         assert.commandFailedWithCode(res, authorizeErrorCode, "moveChunk");
         assert.commandFailedWithCode(mongo.getDB("test").copyDatabase("admin", "admin2"),
@@ -170,7 +176,7 @@
 
         print("============ enabling sharding on test.foo.");
         mongo.getDB("admin").runCommand({enableSharding: "test"});
-        shardingTest.ensurePrimaryShard('test', 'shard0001');
+        shardingTest.ensurePrimaryShard('test', st.shard1.shardName);
         mongo.getDB("admin").runCommand({shardCollection: "test.foo", key: {_id: 1}});
 
         var test = mongo.getDB("test");
@@ -180,6 +186,7 @@
     };
 
     var start = function() {
+        // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
         return new ShardingTest({
             auth: "",
             shards: numShards,
@@ -187,7 +194,8 @@
                 keyFile: keyfile,
                 chunkSize: 1,
                 useHostname:
-                    false  // Must use localhost to take advantage of the localhost auth bypass
+                    false,  // Must use localhost to take advantage of the localhost auth bypass
+                shardAsReplicaSet: false
             }
         });
     };
@@ -201,22 +209,22 @@
         // information.  Therefore, we'll do this manually for now.
 
         for (var i = 0; i < st._mongos.length; i++) {
-            var port = st["s" + i].port;
-            MongoRunner.stopMongos(port,
+            var conn = st["s" + i];
+            MongoRunner.stopMongos(conn,
                                    /*signal*/ false,
                                    {auth: {user: username, pwd: password}});
         }
 
         for (var i = 0; i < st._connections.length; i++) {
-            var port = st["shard" + i].port;
-            MongoRunner.stopMongod(port,
+            var conn = st["shard" + i];
+            MongoRunner.stopMongod(conn,
                                    /*signal*/ false,
                                    {auth: {user: username, pwd: password}});
         }
 
         for (var i = 0; i < st._configServers.length; i++) {
-            var c = st["config" + i].port;
-            MongoRunner.stopMongod(port,
+            var conn = st["config" + i];
+            MongoRunner.stopMongod(conn,
                                    /*signal*/ false,
                                    {auth: {user: username, pwd: password}});
         }

@@ -14,7 +14,7 @@ def removeIfPresent(lst, item):
     except ValueError:
         pass
 
-for to_remove in ['-Werror', '-Wall', '-W']:
+for to_remove in ['-Werror', '-Wall', '-W', '/W3']:
     removeIfPresent(env['CCFLAGS'], to_remove)
 
 # See what -D's show up in make.  The AB_CD one might change, but we're little
@@ -55,7 +55,13 @@ if env.TargetOSIs('windows'):
 
             # 'operation' : unsafe mix of type 'type' and type 'type' in operation
             '/wd4805',
-            ])
+
+            # 'reinterpret_cast': conversion from 'type' to 'type' of greater size
+            '/wd4312',
+
+            # 'operator': unsafe use of type 'type' in operation
+            '/wd4804'
+    ])
 else:
     if env.TargetOSIs('solaris'):
         env.Prepend(CCFLAGS=[
@@ -79,8 +85,6 @@ else:
 # We pre-generate configs for platforms and just check them in.  Running
 # mozilla's config requires a relatively huge portion of their tree.
 env.Prepend(CPPPATH=[
-    '#src',
-    '$BUILD_DIR',
     'extract/js/src',
     'extract/mfbt',
     'extract/intl/icu/source/common',
@@ -93,7 +97,6 @@ env.Prepend(CPPPATH=[
 sources = [
     "extract/js/src/builtin/RegExp.cpp",
     "extract/js/src/frontend/Parser.cpp",
-    "extract/js/src/jit/ProcessExecutableMemory.cpp",
     "extract/js/src/jsarray.cpp",
     "extract/js/src/jsatom.cpp",
     "extract/js/src/jsmath.cpp",
@@ -125,6 +128,6 @@ env.Library(
     source=sources,
     LIBDEPS_TAGS=[
         # Depends on allocation symbols defined elsewhere
-        'incomplete'
+        'illegal_cyclic_or_unresolved_dependencies_whitelisted',
     ],
 )

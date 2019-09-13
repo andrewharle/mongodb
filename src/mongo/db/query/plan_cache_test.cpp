@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,7 +40,8 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/plan_ranker.h"
 #include "mongo/db/query/query_knobs.h"
@@ -49,6 +52,7 @@
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 using namespace mongo;
 
@@ -67,12 +71,17 @@ static const NamespaceString nss("test.collection");
  */
 unique_ptr<CanonicalQuery> canonicalize(const BSONObj& queryObj) {
     QueryTestServiceContext serviceContext;
-    auto txn = serviceContext.makeOperationContext();
+    auto opCtx = serviceContext.makeOperationContext();
 
     auto qr = stdx::make_unique<QueryRequest>(nss);
     qr->setFilter(queryObj);
-    auto statusWithCQ = CanonicalQuery::canonicalize(
-        txn.get(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     ASSERT_OK(statusWithCQ.getStatus());
     return std::move(statusWithCQ.getValue());
 }
@@ -82,22 +91,35 @@ unique_ptr<CanonicalQuery> canonicalize(const char* queryStr) {
     return canonicalize(queryObj);
 }
 
+unique_ptr<CanonicalQuery> canonicalize(BSONObj query,
+                                        BSONObj sort,
+                                        BSONObj proj,
+                                        BSONObj collation) {
+    QueryTestServiceContext serviceContext;
+    auto opCtx = serviceContext.makeOperationContext();
+
+    auto qr = stdx::make_unique<QueryRequest>(nss);
+    qr->setFilter(query);
+    qr->setSort(sort);
+    qr->setProj(proj);
+    qr->setCollation(collation);
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
+    ASSERT_OK(statusWithCQ.getStatus());
+    return std::move(statusWithCQ.getValue());
+}
+
 unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
                                         const char* sortStr,
                                         const char* projStr,
                                         const char* collationStr) {
-    QueryTestServiceContext serviceContext;
-    auto txn = serviceContext.makeOperationContext();
-
-    auto qr = stdx::make_unique<QueryRequest>(nss);
-    qr->setFilter(fromjson(queryStr));
-    qr->setSort(fromjson(sortStr));
-    qr->setProj(fromjson(projStr));
-    qr->setCollation(fromjson(collationStr));
-    auto statusWithCQ = CanonicalQuery::canonicalize(
-        txn.get(), std::move(qr), ExtensionsCallbackDisallowExtensions());
-    ASSERT_OK(statusWithCQ.getStatus());
-    return std::move(statusWithCQ.getValue());
+    return canonicalize(
+        fromjson(queryStr), fromjson(sortStr), fromjson(projStr), fromjson(collationStr));
 }
 
 unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
@@ -109,7 +131,7 @@ unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
                                         const char* minStr,
                                         const char* maxStr) {
     QueryTestServiceContext serviceContext;
-    auto txn = serviceContext.makeOperationContext();
+    auto opCtx = serviceContext.makeOperationContext();
 
     auto qr = stdx::make_unique<QueryRequest>(nss);
     qr->setFilter(fromjson(queryStr));
@@ -124,8 +146,13 @@ unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
     qr->setHint(fromjson(hintStr));
     qr->setMin(fromjson(minStr));
     qr->setMax(fromjson(maxStr));
-    auto statusWithCQ = CanonicalQuery::canonicalize(
-        txn.get(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     ASSERT_OK(statusWithCQ.getStatus());
     return std::move(statusWithCQ.getValue());
 }
@@ -138,10 +165,9 @@ unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
                                         const char* hintStr,
                                         const char* minStr,
                                         const char* maxStr,
-                                        bool snapshot,
                                         bool explain) {
     QueryTestServiceContext serviceContext;
-    auto txn = serviceContext.makeOperationContext();
+    auto opCtx = serviceContext.makeOperationContext();
 
     auto qr = stdx::make_unique<QueryRequest>(nss);
     qr->setFilter(fromjson(queryStr));
@@ -156,10 +182,14 @@ unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
     qr->setHint(fromjson(hintStr));
     qr->setMin(fromjson(minStr));
     qr->setMax(fromjson(maxStr));
-    qr->setSnapshot(snapshot);
     qr->setExplain(explain);
-    auto statusWithCQ = CanonicalQuery::canonicalize(
-        txn.get(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
+    auto statusWithCQ =
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     ASSERT_OK(statusWithCQ.getStatus());
     return std::move(statusWithCQ.getValue());
 }
@@ -168,9 +198,12 @@ unique_ptr<CanonicalQuery> canonicalize(const char* queryStr,
  * Utility function to create MatchExpression
  */
 unique_ptr<MatchExpression> parseMatchExpression(const BSONObj& obj) {
-    const CollatorInterface* collator = nullptr;
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
     StatusWithMatchExpression status =
-        MatchExpressionParser::parse(obj, ExtensionsCallbackDisallowExtensions(), collator);
+        MatchExpressionParser::parse(obj,
+                                     std::move(expCtx),
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     if (!status.isOK()) {
         str::stream ss;
         ss << "failed to parse query: " << obj.toString()
@@ -218,9 +251,9 @@ PlanRankingDecision* createDecision(size_t numPlans) {
     unique_ptr<PlanRankingDecision> why(new PlanRankingDecision());
     for (size_t i = 0; i < numPlans; ++i) {
         CommonStats common("COLLSCAN");
-        unique_ptr<PlanStageStats> stats(new PlanStageStats(common, STAGE_COLLSCAN));
+        auto stats = stdx::make_unique<PlanStageStats>(common, STAGE_COLLSCAN);
         stats->specific.reset(new CollectionScanStats());
-        why->stats.mutableVector().push_back(stats.release());
+        why->stats.push_back(std::move(stats));
         why->scores.push_back(0U);
         why->candidateOrder.push_back(i);
     }
@@ -387,9 +420,8 @@ TEST(PlanCacheTest, ShouldNotCacheQueryExplain) {
                                                0,
                                                "{}",
                                                "{}",
-                                               "{}",   // min, max
-                                               false,  // snapshot
-                                               true    // explain
+                                               "{}",  // min, max
+                                               true   // explain
                                                ));
     const QueryRequest& qr = cq->getQueryRequest();
     ASSERT_TRUE(qr.isExplain());
@@ -402,7 +434,8 @@ TEST(PlanCacheTest, AddEmptySolutions) {
     unique_ptr<CanonicalQuery> cq(canonicalize("{a: 1}"));
     std::vector<QuerySolution*> solns;
     unique_ptr<PlanRankingDecision> decision(createDecision(1U));
-    ASSERT_NOT_OK(planCache.add(*cq, solns, decision.get()));
+    QueryTestServiceContext serviceContext;
+    ASSERT_NOT_OK(planCache.add(*cq, solns, decision.get(), Date_t{}));
 }
 
 TEST(PlanCacheTest, AddValidSolution) {
@@ -416,7 +449,8 @@ TEST(PlanCacheTest, AddValidSolution) {
 
     // Check if key is in cache before and after add().
     ASSERT_FALSE(planCache.contains(*cq));
-    ASSERT_OK(planCache.add(*cq, solns, createDecision(1U)));
+    QueryTestServiceContext serviceContext;
+    ASSERT_OK(planCache.add(*cq, solns, createDecision(1U), Date_t{}));
 
     ASSERT_TRUE(planCache.contains(*cq));
     ASSERT_EQUALS(planCache.size(), 1U);
@@ -450,12 +484,6 @@ protected:
     void setUp() {
         params.options = QueryPlannerParams::INCLUDE_COLLSCAN;
         addIndex(BSON("_id" << 1), "_id_");
-    }
-
-    void tearDown() {
-        for (vector<QuerySolution*>::iterator it = solns.begin(); it != solns.end(); ++it) {
-            delete *it;
-        }
     }
 
     void addIndex(BSONObj keyPattern, const std::string& indexName, bool multikey = false) {
@@ -513,7 +541,7 @@ protected:
                             const BSONObj& hint,
                             const BSONObj& minObj,
                             const BSONObj& maxObj) {
-        runQueryFull(query, BSONObj(), BSONObj(), 0, 0, hint, minObj, maxObj, false);
+        runQueryFull(query, BSONObj(), BSONObj(), 0, 0, hint, minObj, maxObj);
     }
 
     void runQuerySortProjSkipLimitHint(const BSONObj& query,
@@ -522,11 +550,7 @@ protected:
                                        long long skip,
                                        long long limit,
                                        const BSONObj& hint) {
-        runQueryFull(query, sort, proj, skip, limit, hint, BSONObj(), BSONObj(), false);
-    }
-
-    void runQuerySnapshot(const BSONObj& query) {
-        runQueryFull(query, BSONObj(), BSONObj(), 0, 0, BSONObj(), BSONObj(), BSONObj(), true);
+        runQueryFull(query, sort, proj, skip, limit, hint, BSONObj(), BSONObj());
     }
 
     void runQueryFull(const BSONObj& query,
@@ -536,16 +560,11 @@ protected:
                       long long limit,
                       const BSONObj& hint,
                       const BSONObj& minObj,
-                      const BSONObj& maxObj,
-                      bool snapshot) {
+                      const BSONObj& maxObj) {
         QueryTestServiceContext serviceContext;
-        auto txn = serviceContext.makeOperationContext();
+        auto opCtx = serviceContext.makeOperationContext();
 
         // Clean up any previous state from a call to runQueryFull or runQueryAsCommand.
-        for (vector<QuerySolution*>::iterator it = solns.begin(); it != solns.end(); ++it) {
-            delete *it;
-        }
-
         solns.clear();
 
         auto qr = stdx::make_unique<QueryRequest>(nss);
@@ -561,34 +580,41 @@ protected:
         qr->setHint(hint);
         qr->setMin(minObj);
         qr->setMax(maxObj);
-        qr->setSnapshot(snapshot);
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn.get(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        const boost::intrusive_ptr<ExpressionContext> expCtx;
+        auto statusWithCQ =
+            CanonicalQuery::canonicalize(opCtx.get(),
+                                         std::move(qr),
+                                         expCtx,
+                                         ExtensionsCallbackNoop(),
+                                         MatchExpressionParser::kAllowAllSpecialFeatures);
         ASSERT_OK(statusWithCQ.getStatus());
-        Status s = QueryPlanner::plan(*statusWithCQ.getValue(), params, &solns);
-        ASSERT_OK(s);
+        auto statusWithSolutions = QueryPlanner::plan(*statusWithCQ.getValue(), params);
+        ASSERT_OK(statusWithSolutions.getStatus());
+        solns = std::move(statusWithSolutions.getValue());
     }
 
     void runQueryAsCommand(const BSONObj& cmdObj) {
         QueryTestServiceContext serviceContext;
-        auto txn = serviceContext.makeOperationContext();
+        auto opCtx = serviceContext.makeOperationContext();
 
         // Clean up any previous state from a call to runQueryFull or runQueryAsCommand.
-        for (vector<QuerySolution*>::iterator it = solns.begin(); it != solns.end(); ++it) {
-            delete *it;
-        }
-
         solns.clear();
 
         const bool isExplain = false;
         std::unique_ptr<QueryRequest> qr(
             assertGet(QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain)));
 
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn.get(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        const boost::intrusive_ptr<ExpressionContext> expCtx;
+        auto statusWithCQ =
+            CanonicalQuery::canonicalize(opCtx.get(),
+                                         std::move(qr),
+                                         expCtx,
+                                         ExtensionsCallbackNoop(),
+                                         MatchExpressionParser::kAllowAllSpecialFeatures);
         ASSERT_OK(statusWithCQ.getStatus());
-        Status s = QueryPlanner::plan(*statusWithCQ.getValue(), params, &solns);
-        ASSERT_OK(s);
+        auto statusWithSolutions = QueryPlanner::plan(*statusWithCQ.getValue(), params);
+        ASSERT_OK(statusWithSolutions.getStatus());
+        solns = std::move(statusWithSolutions.getValue());
     }
 
     //
@@ -596,8 +622,8 @@ protected:
     //
 
     void dumpSolutions(str::stream& ost) const {
-        for (vector<QuerySolution*>::const_iterator it = solns.begin(); it != solns.end(); ++it) {
-            ost << (*it)->toString() << '\n';
+        for (auto&& soln : solns) {
+            ost << soln->toString() << '\n';
         }
     }
 
@@ -607,8 +633,8 @@ protected:
     size_t numSolutionMatches(const string& solnJson) const {
         BSONObj testSoln = fromjson(solnJson);
         size_t matches = 0;
-        for (vector<QuerySolution*>::const_iterator it = solns.begin(); it != solns.end(); ++it) {
-            QuerySolutionNode* root = (*it)->root.get();
+        for (auto&& soln : solns) {
+            QuerySolutionNode* root = soln->root.get();
             if (QueryPlannerTestLib::solutionMatches(testSoln, root)) {
                 ++matches;
             }
@@ -636,37 +662,30 @@ protected:
     }
 
     /**
-     * Plan 'query' from the cache. A mock cache entry is created using
-     * the cacheData stored inside the QuerySolution 'soln'.
-     *
-     * Does not take ownership of 'soln'.
-     */
-    QuerySolution* planQueryFromCache(const BSONObj& query, const QuerySolution& soln) const {
-        return planQueryFromCache(query, BSONObj(), BSONObj(), BSONObj(), soln);
-    }
-
-    /**
      * Plan 'query' from the cache with sort order 'sort', projection 'proj', and collation
      * 'collation'. A mock cache entry is created using the cacheData stored inside the
      * QuerySolution 'soln'.
-     *
-     * Does not take ownership of 'soln'.
      */
-    QuerySolution* planQueryFromCache(const BSONObj& query,
-                                      const BSONObj& sort,
-                                      const BSONObj& proj,
-                                      const BSONObj& collation,
-                                      const QuerySolution& soln) const {
+    std::unique_ptr<QuerySolution> planQueryFromCache(const BSONObj& query,
+                                                      const BSONObj& sort,
+                                                      const BSONObj& proj,
+                                                      const BSONObj& collation,
+                                                      const QuerySolution& soln) const {
         QueryTestServiceContext serviceContext;
-        auto txn = serviceContext.makeOperationContext();
+        auto opCtx = serviceContext.makeOperationContext();
 
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(query);
         qr->setSort(sort);
         qr->setProj(proj);
         qr->setCollation(collation);
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn.get(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        const boost::intrusive_ptr<ExpressionContext> expCtx;
+        auto statusWithCQ =
+            CanonicalQuery::canonicalize(opCtx.get(),
+                                         std::move(qr),
+                                         expCtx,
+                                         ExtensionsCallbackNoop(),
+                                         MatchExpressionParser::kAllowAllSpecialFeatures);
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> scopedCq = std::move(statusWithCQ.getValue());
 
@@ -679,11 +698,9 @@ protected:
         PlanCacheEntry entry(solutions, createDecision(1U));
         CachedSolution cachedSoln(ck, entry);
 
-        QuerySolution* out;
-        Status s = QueryPlanner::planFromCache(*scopedCq, params, cachedSoln, &out);
-        ASSERT_OK(s);
-
-        return out;
+        auto statusWithQs = QueryPlanner::planFromCache(*scopedCq, params, cachedSoln);
+        ASSERT_OK(statusWithQs.getStatus());
+        return std::move(statusWithQs.getValue());
     }
 
     /**
@@ -694,10 +711,10 @@ protected:
      */
     QuerySolution* firstMatchingSolution(const string& solnJson) const {
         BSONObj testSoln = fromjson(solnJson);
-        for (vector<QuerySolution*>::const_iterator it = solns.begin(); it != solns.end(); ++it) {
-            QuerySolutionNode* root = (*it)->root.get();
+        for (auto&& soln : solns) {
+            QuerySolutionNode* root = soln->root.get();
             if (QueryPlannerTestLib::solutionMatches(testSoln, root)) {
-                return *it;
+                return soln.get();
             }
         }
 
@@ -749,10 +766,9 @@ protected:
                                          const BSONObj& proj,
                                          const BSONObj& collation,
                                          const string& solnJson) {
-        QuerySolution* bestSoln = firstMatchingSolution(solnJson);
-        QuerySolution* planSoln = planQueryFromCache(query, sort, proj, collation, *bestSoln);
-        assertSolutionMatches(planSoln, solnJson);
-        delete planSoln;
+        auto bestSoln = firstMatchingSolution(solnJson);
+        auto planSoln = planQueryFromCache(query, sort, proj, collation, *bestSoln);
+        assertSolutionMatches(planSoln.get(), solnJson);
     }
 
     /**
@@ -771,7 +787,7 @@ protected:
 
     BSONObj queryObj;
     QueryPlannerParams params;
-    vector<QuerySolution*> solns;
+    std::vector<std::unique_ptr<QuerySolution>> solns;
 };
 
 const PlanCacheKey CachePlanSelectionTest::ck = "mock_cache_key";
@@ -1103,11 +1119,11 @@ TEST_F(CachePlanSelectionTest,
        CachedPlanForSelfIntersectionOfMultikeyIndexNonPointRangesCannotIntersectBounds) {
     // Enable a hash-based index intersection plan to be generated because we are scanning a
     // non-point range on the "a" field.
-    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection;
+    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection.load();
     ON_BLOCK_EXIT([oldEnableHashIntersection] {
-        internalQueryPlannerEnableHashIntersection = oldEnableHashIntersection;
+        internalQueryPlannerEnableHashIntersection.store(oldEnableHashIntersection);
     });
-    internalQueryPlannerEnableHashIntersection = true;
+    internalQueryPlannerEnableHashIntersection.store(true);
     params.options = QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
 
     const bool multikey = true;
@@ -1144,11 +1160,11 @@ TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionOfMultikeyIndexesWhenUsi
 TEST_F(CachePlanSelectionTest, CachedPlanForIntersectionWithNonMultikeyIndexCanIntersectBounds) {
     // Enable a hash-based index intersection plan to be generated because we are scanning a
     // non-point range on the "a.c" field.
-    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection;
+    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection.load();
     ON_BLOCK_EXIT([oldEnableHashIntersection] {
-        internalQueryPlannerEnableHashIntersection = oldEnableHashIntersection;
+        internalQueryPlannerEnableHashIntersection.store(oldEnableHashIntersection);
     });
-    internalQueryPlannerEnableHashIntersection = true;
+    internalQueryPlannerEnableHashIntersection.store(true);
     params.options = QueryPlannerParams::NO_TABLE_SCAN | QueryPlannerParams::INDEX_INTERSECTION;
 
     const bool multikey = true;
@@ -1277,18 +1293,53 @@ TEST_F(CachePlanSelectionTest, MatchingCollation) {
                                     "{fetch: {node: {ixscan: {pattern: {x: 1}}}}}");
 }
 
+TEST_F(CachePlanSelectionTest, ContainedOr) {
+    addIndex(BSON("b" << 1 << "a" << 1), "b_1_a_1");
+    addIndex(BSON("c" << 1 << "a" << 1), "c_1_a_1");
+    BSONObj query = fromjson("{$and: [{a: 5}, {$or: [{b: 6}, {c: 7}]}]}");
+    runQuery(query);
+    assertPlanCacheRecoversSolution(
+        query,
+        "{fetch: {filter: null, node: {or: {nodes: ["
+        "{ixscan: {pattern: {b: 1, a: 1}, bounds: {b: [[6, 6, true, true]], a: [[5, 5, true, "
+        "true]]}}},"
+        "{ixscan: {pattern: {c: 1, a: 1}, bounds: {c: [[7, 7, true, true]], a: [[5, 5, true, "
+        "true]]}}}"
+        "]}}}}");
+}
+
+TEST_F(CachePlanSelectionTest, ContainedOrAndIntersection) {
+    bool oldEnableHashIntersection = internalQueryPlannerEnableHashIntersection.load();
+    ON_BLOCK_EXIT([oldEnableHashIntersection] {
+        internalQueryPlannerEnableHashIntersection.store(oldEnableHashIntersection);
+    });
+    internalQueryPlannerEnableHashIntersection.store(true);
+    params.options = QueryPlannerParams::INCLUDE_COLLSCAN | QueryPlannerParams::INDEX_INTERSECTION;
+    addIndex(BSON("a" << 1 << "b" << 1), "a_1_b_1");
+    addIndex(BSON("c" << 1), "c_1");
+    BSONObj query = fromjson("{$and: [{a: 5}, {$or: [{b: 6}, {c: 7}]}]}");
+    runQuery(query);
+    assertPlanCacheRecoversSolution(
+        query,
+        "{fetch: {filter: null, node: {andHash: {nodes: ["
+        "{or: {nodes: ["
+        "{ixscan: {pattern: {a: 1, b: 1}, bounds: {a: [[5, 5, true, true]], b: [[6, 6, true, "
+        "true]]}}},"
+        "{ixscan: {pattern: {c: 1}, bounds: {c: [[7, 7, true, true]]}}}]}},"
+        "{ixscan: {pattern: {a: 1, b: 1}, bounds: {a: [[5, 5, true, true]], b: [['MinKey', "
+        "'MaxKey', true, true]]}}}"
+        "]}}}}");
+}
+
 /**
  * Test functions for computeKey.  Cache keys are intentionally obfuscated and are
  * meaningful only within the current lifetime of the server process. Users should treat plan
  * cache keys as opaque.
  */
-void testComputeKey(const char* queryStr,
-                    const char* sortStr,
-                    const char* projStr,
-                    const char* expectedStr) {
+void testComputeKey(BSONObj query, BSONObj sort, BSONObj proj, const char* expectedStr) {
     PlanCache planCache;
-    const char* collationStr = "{}";
-    unique_ptr<CanonicalQuery> cq(canonicalize(queryStr, sortStr, projStr, collationStr));
+    BSONObj collation;
+    unique_ptr<CanonicalQuery> cq(canonicalize(query, sort, proj, collation));
     PlanCacheKey key = planCache.computeKey(*cq);
     PlanCacheKey expectedKey(expectedStr);
     if (key == expectedKey) {
@@ -1298,6 +1349,13 @@ void testComputeKey(const char* queryStr,
     ss << "Unexpected plan cache key. Expected: " << expectedKey << ". Actual: " << key
        << ". Query: " << cq->toString();
     FAIL(ss);
+}
+
+void testComputeKey(const char* queryStr,
+                    const char* sortStr,
+                    const char* projStr,
+                    const char* expectedStr) {
+    testComputeKey(fromjson(queryStr), fromjson(sortStr), fromjson(projStr), expectedStr);
 }
 
 TEST(PlanCacheTest, ComputeKey) {
@@ -1390,6 +1448,81 @@ TEST(PlanCacheTest, ComputeKeyGeoNear) {
         "{}",
         "{}",
         "gnanrsp");
+}
+
+TEST(PlanCacheTest, ComputeKeyRegexDependsOnFlags) {
+    testComputeKey("{a: {$regex: \"sometext\"}}", "{}", "{}", "rea");
+    testComputeKey("{a: {$regex: \"sometext\", $options: \"\"}}", "{}", "{}", "rea");
+
+    testComputeKey("{a: {$regex: \"sometext\", $options: \"s\"}}", "{}", "{}", "rea/s/");
+    testComputeKey("{a: {$regex: \"sometext\", $options: \"ms\"}}", "{}", "{}", "rea/ms/");
+
+    // Test that the ordering of $options doesn't matter.
+    testComputeKey("{a: {$regex: \"sometext\", $options: \"im\"}}", "{}", "{}", "rea/im/");
+    testComputeKey("{a: {$regex: \"sometext\", $options: \"mi\"}}", "{}", "{}", "rea/im/");
+
+    // Test that only the options affect the key. Two regex match expressions with the same options
+    // but different $regex values should have the same shape.
+    testComputeKey("{a: {$regex: \"abc\", $options: \"mi\"}}", "{}", "{}", "rea/im/");
+    testComputeKey("{a: {$regex: \"efg\", $options: \"mi\"}}", "{}", "{}", "rea/im/");
+
+    testComputeKey("{a: {$regex: \"\", $options: \"ms\"}}", "{}", "{}", "rea/ms/");
+    testComputeKey("{a: {$regex: \"___\", $options: \"ms\"}}", "{}", "{}", "rea/ms/");
+
+    // Test that only valid regex flags contribute to the plan cache key encoding.
+    testComputeKey(BSON("a" << BSON("$regex"
+                                    << "abc"
+                                    << "$options"
+                                    << "abcdefghijklmnopqrstuvwxyz")),
+                   {},
+                   {},
+                   "rea/imsx/");
+    testComputeKey("{a: /abc/gim}", "{}", "{}", "rea/im/");
+}
+
+TEST(PlanCacheTest, ComputeKeyMatchInDependsOnPresenceOfRegexAndFlags) {
+    // Test that an $in containing a single regex is unwrapped to $regex.
+    testComputeKey("{a: {$in: [/foo/]}}", "{}", "{}", "rea");
+    testComputeKey("{a: {$in: [/foo/i]}}", "{}", "{}", "rea/i/");
+
+    // Test that an $in with no regexes does not include any regex information.
+    testComputeKey("{a: {$in: [1, 'foo']}}", "{}", "{}", "ina");
+
+    // Test that an $in with a regex encodes the presence of the regex.
+    testComputeKey("{a: {$in: [1, /foo/]}}", "{}", "{}", "ina_re");
+
+    // Test that an $in with a regex encodes the presence of the regex and its flags.
+    testComputeKey("{a: {$in: [1, /foo/is]}}", "{}", "{}", "ina_re/is/");
+
+    // Test that the computed key is invariant to the order of the flags within each regex.
+    testComputeKey("{a: {$in: [1, /foo/si]}}", "{}", "{}", "ina_re/is/");
+
+    // Test that an $in with multiple regexes encodes all unique flags.
+    testComputeKey("{a: {$in: [1, /foo/i, /bar/m, /baz/s]}}", "{}", "{}", "ina_re/ims/");
+
+    // Test that an $in with multiple regexes deduplicates identical flags.
+    testComputeKey(
+        "{a: {$in: [1, /foo/i, /bar/m, /baz/s, /qux/i, /quux/s]}}", "{}", "{}", "ina_re/ims/");
+
+    // Test that the computed key is invariant to the ordering of the flags across regexes.
+    testComputeKey("{a: {$in: [1, /foo/ism, /bar/msi, /baz/im, /qux/si, /quux/im]}}",
+                   "{}",
+                   "{}",
+                   "ina_re/ims/");
+    testComputeKey("{a: {$in: [1, /foo/msi, /bar/ism, /baz/is, /qux/mi, /quux/im]}}",
+                   "{}",
+                   "{}",
+                   "ina_re/ims/");
+
+    // Test that $not-$in-$regex similarly records the presence and flags of any regexes.
+    testComputeKey("{a: {$not: {$in: [1, 'foo']}}}", "{}", "{}", "nt<1>[ina]");
+    testComputeKey("{a: {$not: {$in: [1, /foo/]}}}", "{}", "{}", "nt<1>[ina_re]");
+    testComputeKey(
+        "{a: {$not: {$in: [1, /foo/i, /bar/i, /baz/msi]}}}", "{}", "{}", "nt<1>[ina_re/ims/]");
+
+    // Test that a $not-$in containing a single regex is unwrapped to $not-$regex.
+    testComputeKey("{a: {$not: {$in: [/foo/]}}}", "{}", "{}", "nt<1>[rea]");
+    testComputeKey("{a: {$not: {$in: [/foo/i]}}}", "{}", "{}", "nt<1>[rea/i/]");
 }
 
 // When a sparse index is present, computeKey() should generate different keys depending on
@@ -1496,6 +1629,134 @@ TEST(PlanCacheTest, ComputeKeyCollationIndex) {
     // the index.
     ASSERT_EQ(planCache.computeKey(*inNoStrings),
               planCache.computeKey(*inContainsStringHasCollation));
+}
+
+/**
+ * Check that the given plan cache key has the discriminators in the given order.
+ */
+bool hasDiscriminators(const std::string& key, const std::vector<std::string>& discriminators) {
+    size_t pos = 0;
+    for (auto&& discriminator : discriminators) {
+        size_t foundPos = key.find(discriminator, pos);
+        if (foundPos == std::string::npos) {
+            return false;
+        }
+        pos = foundPos + discriminator.size();
+    }
+
+    // Return whether the key has any more discriminators.
+    return key.find("<", pos) == std::string::npos;
+}
+
+TEST(PlanCacheTest, ComputeKeyNotEqualsArray) {
+    PlanCache planCache;
+    unique_ptr<CanonicalQuery> cqNeArray(canonicalize("{a: {$ne: [1]}}"));
+    unique_ptr<CanonicalQuery> cqNeScalar(canonicalize("{a: {$ne: 123}}"));
+
+    const PlanCacheKey noIndexNeArrayKey = planCache.computeKey(*cqNeArray);
+    const PlanCacheKey noIndexNeScalarKey = planCache.computeKey(*cqNeScalar);
+    ASSERT_TRUE(hasDiscriminators(noIndexNeArrayKey, {"<0>"}));
+    ASSERT_TRUE(hasDiscriminators(noIndexNeScalarKey, {"<1>"}));
+    ASSERT_NE(noIndexNeScalarKey, noIndexNeArrayKey);
+
+    // Create a normal btree index. It will have a discriminator.
+    IndexEntry entry(BSON("a" << 1),
+                     false,    // multikey
+                     false,    // sparse
+                     false,    // unique
+                     "",       // name
+                     nullptr,  // filterExpr
+                     BSONObj());
+    planCache.notifyOfIndexEntries({entry});
+
+    const PlanCacheKey withIndexNeArrayKey = planCache.computeKey(*cqNeArray);
+    const PlanCacheKey withIndexNeScalarKey = planCache.computeKey(*cqNeScalar);
+
+    ASSERT_NE(noIndexNeArrayKey, withIndexNeArrayKey);
+
+    // There will be one discriminator for the $not and another for the leaf node ({$eq: 123}).
+    // Both will be <1>.
+    ASSERT_TRUE(hasDiscriminators(withIndexNeScalarKey, {"<1>", "<1>"}));
+
+    // There will be one discriminator for the $not and another for the leaf node ({$eq: [1]}).
+    // Since the index can support equality to an array, the second discriminator will have a value
+    // of '1'.
+    ASSERT_TRUE(hasDiscriminators(withIndexNeArrayKey, {"<0>", "<1>"}));
+}
+
+TEST(PlanCacheTest, ComputeKeyNinArray) {
+    PlanCache planCache;
+    unique_ptr<CanonicalQuery> cqNinArray(canonicalize("{a: {$nin: [123, [1]]}}"));
+    unique_ptr<CanonicalQuery> cqNinScalar(canonicalize("{a: {$nin: [123, 456]}}"));
+
+    const PlanCacheKey noIndexNinArrayKey = planCache.computeKey(*cqNinArray);
+    const PlanCacheKey noIndexNinScalarKey = planCache.computeKey(*cqNinScalar);
+    ASSERT_TRUE(hasDiscriminators(noIndexNinArrayKey, {"<0>"}));
+    ASSERT_TRUE(hasDiscriminators(noIndexNinScalarKey, {"<1>"}));
+    ASSERT_NE(noIndexNinScalarKey, noIndexNinArrayKey);
+
+    // Create a normal btree index. It will have a discriminator.
+    IndexEntry entry(BSON("a" << 1),
+                     false,    // multikey
+                     false,    // sparse
+                     false,    // unique
+                     "",       // name
+                     nullptr,  // filterExpr
+                     BSONObj());
+    planCache.notifyOfIndexEntries({entry});
+
+    const PlanCacheKey withIndexNinArrayKey = planCache.computeKey(*cqNinArray);
+    const PlanCacheKey withIndexNinScalarKey = planCache.computeKey(*cqNinScalar);
+
+    // The index discriminators should have changed.
+    ASSERT_NE(noIndexNinArrayKey, withIndexNinArrayKey);
+
+    // Both cache keys have two discriminators: one for the $not and one for the $in. The query
+    // which has an array inside the $in won't be able to use the index, and should have a <0>
+    // associated with the $not.
+    ASSERT_TRUE(hasDiscriminators(withIndexNinScalarKey, {"<1>", "<1>"}));
+    ASSERT_TRUE(hasDiscriminators(withIndexNinArrayKey, {"<0>", "<1>"}));
+}
+
+TEST(PlanCacheTest, ComputeNeArrayInOrStagePreserversOrder) {
+    PlanCache planCache;
+    unique_ptr<CanonicalQuery> cqNeA(canonicalize("{$or: [{a: {$ne: 5}}, {a: {$ne: [12]}}]}"));
+    unique_ptr<CanonicalQuery> cqNeB(canonicalize("{$or: [{a: {$ne: [12]}}, {a: {$ne: 5}}]}"));
+
+    const PlanCacheKey keyA = planCache.computeKey(*cqNeA);
+    const PlanCacheKey keyB = planCache.computeKey(*cqNeB);
+    ASSERT_NE(keyA, keyB);
+
+    // Create a normal btree index. It will have a discriminator.
+    IndexEntry entry(BSON("a" << 1),
+                     false,    // multikey
+                     false,    // sparse
+                     false,    // unique
+                     "",       // name
+                     nullptr,  // filterExpr
+                     BSONObj());
+    planCache.notifyOfIndexEntries({entry});
+
+    const PlanCacheKey keyAWithIndex = planCache.computeKey(*cqNeA);
+    const PlanCacheKey keyBWithIndex = planCache.computeKey(*cqNeB);
+
+    ASSERT_NE(keyAWithIndex, keyBWithIndex);
+    ASSERT_TRUE(hasDiscriminators(keyAWithIndex,
+                                  {
+                                      "<1>",  // $ne
+                                      "<1>",  // 5
+
+                                      "<0>",  // $ne
+                                      "<1>"   // [12]
+                                  }));
+    ASSERT_TRUE(hasDiscriminators(keyBWithIndex,
+                                  {
+                                      "<0>",  // $ne
+                                      "<1>",  // [12]
+
+                                      "<1>",  // $ne
+                                      "<1>"   // 5
+                                  }));
 }
 
 }  // namespace

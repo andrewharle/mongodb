@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -43,10 +45,18 @@ template <typename T>
 void BSONComparatorInterfaceBase<T>::hashCombineBSONObj(
     size_t& seed,
     const BSONObj& objToHash,
-    bool considerFieldName,
+    ComparisonRulesSet rules,
     const StringData::ComparatorInterface* stringComparator) {
-    for (auto elem : objToHash) {
-        hashCombineBSONElement(seed, elem, considerFieldName, stringComparator);
+
+    if (rules & ComparisonRules::kIgnoreFieldOrder) {
+        BSONObjIteratorSorted iter(objToHash);
+        while (iter.more()) {
+            hashCombineBSONElement(seed, iter.next(), rules, stringComparator);
+        }
+    } else {
+        for (auto elem : objToHash) {
+            hashCombineBSONElement(seed, elem, rules, stringComparator);
+        }
     }
 }
 
@@ -54,18 +64,16 @@ template <typename T>
 void BSONComparatorInterfaceBase<T>::hashCombineBSONElement(
     size_t& hash,
     BSONElement elemToHash,
-    bool considerFieldName,
+    ComparisonRulesSet rules,
     const StringData::ComparatorInterface* stringComparator) {
     boost::hash_combine(hash, elemToHash.canonicalType());
 
     const StringData fieldName = elemToHash.fieldNameStringData();
-    if (considerFieldName && !fieldName.empty()) {
+    if ((rules & ComparisonRules::kConsiderFieldName) && !fieldName.empty()) {
         SimpleStringDataComparator::kInstance.hash_combine(hash, fieldName);
     }
 
     switch (elemToHash.type()) {
-        // Order of types is the same as in compareElementValues().
-
         case mongo::EOO:
         case mongo::Undefined:
         case mongo::jstNULL:
@@ -145,7 +153,7 @@ void BSONComparatorInterfaceBase<T>::hashCombineBSONElement(
         case mongo::Array:
             hashCombineBSONObj(hash,
                                elemToHash.embeddedObject(),
-                               true,  // considerFieldName
+                               rules | ComparisonRules::kConsiderFieldName,
                                stringComparator);
             break;
 
@@ -166,7 +174,7 @@ void BSONComparatorInterfaceBase<T>::hashCombineBSONElement(
                 hash, StringData(elemToHash.codeWScopeCode(), elemToHash.codeWScopeCodeLen()));
             hashCombineBSONObj(hash,
                                elemToHash.codeWScopeObject(),
-                               true,  // considerFieldName
+                               rules | ComparisonRules::kConsiderFieldName,
                                &SimpleStringDataComparator::kInstance);
             break;
         }

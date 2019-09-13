@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2008 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,18 +33,17 @@
 #include <boost/filesystem/path.hpp>
 #include <memory>
 
-#include "mongo/db/db.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/storage/data_protector.h"
 
 namespace mongo {
 
 class Collection;
-class Cursor;
+class Database;
 class DataProtector;
 class OperationContext;
-struct KeyRange;
-struct WriteConcernOptions;
+class QueryRequest;
 
 /**
  * db helpers are helper functions and classes that let us easily manipulate the local
@@ -64,24 +65,29 @@ struct Helpers {
 
        @return true if object found
     */
-    static bool findOne(OperationContext* txn,
+    static bool findOne(OperationContext* opCtx,
                         Collection* collection,
                         const BSONObj& query,
                         BSONObj& result,
                         bool requireIndex = false);
 
-    static RecordId findOne(OperationContext* txn,
+    static RecordId findOne(OperationContext* opCtx,
                             Collection* collection,
                             const BSONObj& query,
+                            bool requireIndex);
+
+    static RecordId findOne(OperationContext* opCtx,
+                            Collection* collection,
+                            std::unique_ptr<QueryRequest> qr,
                             bool requireIndex);
 
     /**
      * @param foundIndex if passed in will be set to 1 if ns and index found
      * @return true if object found
      */
-    static bool findById(OperationContext* txn,
+    static bool findById(OperationContext* opCtx,
                          Database* db,
-                         const char* ns,
+                         StringData ns,
                          BSONObj query,
                          BSONObj& result,
                          bool* nsFound = 0,
@@ -90,7 +96,7 @@ struct Helpers {
     /* TODO: should this move into Collection?
      * uasserts if no _id index.
      * @return null loc if not found */
-    static RecordId findById(OperationContext* txn, Collection* collection, const BSONObj& query);
+    static RecordId findById(OperationContext* opCtx, Collection* collection, const BSONObj& query);
 
     /**
      * Get the first object generated from a forward natural-order scan on "ns".  Callers do not
@@ -101,25 +107,25 @@ struct Helpers {
      *
      * Returns false if there is no such object.
      */
-    static bool getSingleton(OperationContext* txn, const char* ns, BSONObj& result);
+    static bool getSingleton(OperationContext* opCtx, const char* ns, BSONObj& result);
 
     /**
      * Same as getSingleton, but with a reverse natural-order scan on "ns".
      */
-    static bool getLast(OperationContext* txn, const char* ns, BSONObj& result);
+    static bool getLast(OperationContext* opCtx, const char* ns, BSONObj& result);
 
     /**
      * Performs an upsert of "obj" into the collection "ns", with an empty update predicate.
      * Callers must have "ns" locked.
      */
-    static void putSingleton(OperationContext* txn, const char* ns, BSONObj obj);
+    static void putSingleton(OperationContext* opCtx, const char* ns, BSONObj obj);
 
     /**
      * you have to lock
      * you do not have to have Context set
      * o has to have an _id field or will assert
      */
-    static void upsert(OperationContext* txn,
+    static void upsert(OperationContext* opCtx,
                        const std::string& ns,
                        const BSONObj& o,
                        bool fromMigrate = false);
@@ -139,37 +145,11 @@ struct Helpers {
     static BSONObj inferKeyPattern(const BSONObj& o);
 
     /**
-     * Takes a namespace range, specified by a min and max and qualified by an index pattern,
-     * and removes all the documents in that range found by iterating
-     * over the given index. Caller is responsible for ensuring that min/max are
-     * compatible with the given keyPattern (e.g min={a:100} is compatible with
-     * keyPattern={a:1,b:1} since it can be extended to {a:100,b:minKey}, but
-     * min={b:100} is not compatible).
-     *
-     * Returns time spent waiting for majority replication in replWaitDuration.
-     *
-     * Caller must hold a write lock on 'ns'
-     *
-     * Returns -1 when no usable index exists
-     *
-     * Does oplog the individual document deletions.
-     * // TODO: Refactor this mechanism, it is growing too large
-     */
-    static long long removeRange(OperationContext* txn,
-                                 const KeyRange& range,
-                                 BoundInclusion boundInclusion,
-                                 const WriteConcernOptions& secondaryThrottle,
-                                 Milliseconds& replWaitDuration,
-                                 RemoveSaver* callback = NULL,
-                                 bool fromMigrate = false,
-                                 bool onlyRemoveOrphanedDocs = false);
-
-    /**
      * Remove all documents from a collection.
      * You do not need to set the database before calling.
      * Does not oplog the operation.
      */
-    static void emptyCollection(OperationContext* txn, const char* ns);
+    static void emptyCollection(OperationContext* opCtx, const NamespaceString& nss);
 
     /**
      * for saving deleted bson objects to a flat file
@@ -187,6 +167,22 @@ struct Helpers {
          * to the file.
          */
         Status goingToDelete(const BSONObj& o);
+
+        /**
+         * A path object describing the directory containing the file with deleted documents.
+         */
+        const auto& root() const& {
+            return _root;
+        }
+        void root() && = delete;
+
+        /**
+         * A path object describing the actual file containing BSON documents.
+         */
+        const auto& file() const& {
+            return _file;
+        }
+        void file() && = delete;
 
     private:
         boost::filesystem::path _root;

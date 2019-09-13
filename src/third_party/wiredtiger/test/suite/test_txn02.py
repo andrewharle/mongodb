@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -93,6 +93,12 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
     checklog_calls = 100 if wttest.islongtest() else 2
     checklog_mod = (len(scenarios) / checklog_calls + 1)
 
+    _debug = False
+    def debug(self, msg):
+        if not self._debug:
+            return
+        print(msg)
+
     def conn_config(self):
         # Cycle through the different transaction_sync values in a
         # deterministic manner.
@@ -137,7 +143,10 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
         self.check(self.session2, "isolation=read-uncommitted", current)
 
         # Opening a clone of the database home directory should run
-        # recovery and see the committed results.
+        # recovery and see the committed results.  Flush the log because
+        # the backup may not get all the log records if we are running
+        # without a sync option.  Use sync=off to force a write to the OS.
+        self.session.log_flush('sync=off')
         self.backup(self.backup_dir)
         backup_conn_params = 'log=(enabled,file_max=%s)' % self.logmax
         backup_conn = self.wiredtiger_open(self.backup_dir, backup_conn_params)
@@ -160,7 +169,7 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
             self.scenario_number % len(self.archive_list)]
         backup_conn_params = \
             'log=(enabled,file_max=%s,archive=%s)' % (self.logmax, self.archive)
-        orig_logs = fnmatch.filter(os.listdir(self.backup_dir), "*Log*")
+        orig_logs = fnmatch.filter(os.listdir(self.backup_dir), "*gerLog*")
         endcount = 2
         count = 0
         while count < endcount:
@@ -180,7 +189,7 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
         # have been archived if configured. Subsequent openings would not
         # archive because no checkpoint is written due to no modifications.
         #
-        cur_logs = fnmatch.filter(os.listdir(self.backup_dir), "*Log*")
+        cur_logs = fnmatch.filter(os.listdir(self.backup_dir), "*gerLog*")
         for o in orig_logs:
             if self.archive == 'true':
                 self.assertEqual(False, o in cur_logs)
@@ -192,13 +201,13 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
         # it does not.
         #
         self.runWt(['-h', self.backup_dir, 'printlog'], outfilename='printlog.out')
-        pr_logs = fnmatch.filter(os.listdir(self.backup_dir), "*Log*")
+        pr_logs = fnmatch.filter(os.listdir(self.backup_dir), "*gerLog*")
         self.assertEqual(cur_logs, pr_logs)
 
     def test_ops(self):
         self.backup_dir = os.path.join(self.home, "WT_BACKUP")
         self.session2 = self.conn.open_session()
-        # print "Creating %s with config '%s'" % (self.uri, self.create_params)
+        self.debug("Creating %s with config '%s'" % (self.uri, self.create_params))
         self.session.create(self.uri, self.create_params)
         # Set up the table with entries for 1, 2, 10 and 11.
         # We use the overwrite config so insert can update as needed.
@@ -211,11 +220,10 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
             self.scenario_number % len(self.conn_list)]
         ops = (self.op1, self.op2, self.op3, self.op4)
         txns = (self.txn1, self.txn2, self.txn3, self.txn4)
-        # for ok, txn in zip(ops, txns):
-        # print ', '.join('%s(%d)[%s]' % (ok[0], ok[1], txn)
         for i, ot in enumerate(zip(ops, txns)):
             ok, txn = ot
             op, k = ok
+            self.debug('{}({})[{}]'.format(ok[0], ok[1], txn))
 
             # Close and reopen the connection and cursor.
             if reopen == 'reopen':
@@ -228,7 +236,7 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
             # Test multiple operations per transaction by always
             # doing the same operation on key k + 1.
             k1 = k + 1
-            # print '%d: %s(%d)[%s]' % (i, ok[0], ok[1], txn)
+            self.debug('Operation. Num: %d: %s(%d)[%s]' % (i, ok[0], ok[1], txn))
             if op == 'insert' or op == 'update':
                 c[k] = c[k1] = i + 2
                 current[k] = current[k1] = i + 2
@@ -242,7 +250,7 @@ class test_txn02(wttest.WiredTigerTestCase, suite_subprocess):
                 if k1 in current:
                     del current[k1]
 
-            # print current
+            self.debug(str(current))
             # Check the state after each operation.
             self.check_all(current, committed)
 

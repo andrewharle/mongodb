@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -44,20 +46,11 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
-class OldThreadPool;
-
 namespace repl {
-namespace {
-
-using CBHStatus = StatusWith<executor::TaskExecutor::CallbackHandle>;
-using CommandCallbackArgs = executor::TaskExecutor::RemoteCommandCallbackArgs;
-using UniqueLock = stdx::unique_lock<stdx::mutex>;
-
-}  // namespace.
 
 /**
  * Clones all databases.
@@ -77,7 +70,7 @@ public:
     using OnFinishFn = stdx::function<void(const Status&)>;
     DatabasesCloner(StorageInterface* si,
                     executor::TaskExecutor* exec,
-                    OldThreadPool* dbWorkThreadPool,
+                    ThreadPool* dbWorkThreadPool,
                     HostAndPort source,
                     IncludeDbFilterFn includeDbPred,
                     OnFinishFn finishFn);
@@ -136,17 +129,17 @@ private:
     void _setStatus_inlock(Status s);
 
     /** Will fail the cloner, call the completion function, and become inactive. */
-    void _fail_inlock(UniqueLock* lk, Status s);
+    void _fail_inlock(stdx::unique_lock<stdx::mutex>* lk, Status s);
 
     /** Will call the completion function, and become inactive. */
-    void _succeed_inlock(UniqueLock* lk);
+    void _succeed_inlock(stdx::unique_lock<stdx::mutex>* lk);
 
     /** Called each time a database clone is finished */
     void _onEachDBCloneFinish(const Status& status, const std::string& name);
 
     //  Callbacks
 
-    void _onListDatabaseFinish(const CommandCallbackArgs& cbd);
+    void _onListDatabaseFinish(const executor::TaskExecutor::RemoteCommandCallbackArgs& cbd);
 
     /**
      * Takes a vector of BSONElements and scans for an element that contains a 'name' field with the
@@ -176,8 +169,8 @@ private:
     mutable stdx::mutex _mutex;                         // (S)
     Status _status{ErrorCodes::NotYetInitialized, ""};  // (M) If it is not OK, we stop everything.
     executor::TaskExecutor* _exec;                      // (R) executor to schedule things with
-    OldThreadPool* _dbWorkThreadPool;  // (R) db worker thread pool for collection cloning.
-    const HostAndPort _source;         // (R) The source to use.
+    ThreadPool* _dbWorkThreadPool;  // (R) db worker thread pool for collection cloning.
+    const HostAndPort _source;      // (R) The source to use.
     CollectionCloner::ScheduleDbWorkFn _scheduleDbWorkFn;  // (M)
 
     const IncludeDbFilterFn _includeDbFn;  // (R) function which decides which dbs are cloned.

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,6 +42,7 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/util/concurrency/with_lock.h"
 
 namespace mongo {
 
@@ -47,13 +50,17 @@ class BSONObjBuilder;
 struct HostAndPort;
 class NamespaceString;
 class OperationContext;
+class ServiceContext;
 class ShardFactory;
 class Shard;
 class ShardType;
 
 class ShardRegistryData {
 public:
-    ShardRegistryData(OperationContext* txn, ShardFactory* shardFactory);
+    /**
+     * Reads shards docs from the catalog client and fills in maps.
+     */
+    ShardRegistryData(OperationContext* opCtx, ShardFactory* shardFactory);
     ShardRegistryData() = default;
     ~ShardRegistryData() = default;
 
@@ -99,22 +106,18 @@ public:
 
 private:
     /**
-     * Reads shards docs from the catalog client and fills in maps.
-     */
-    void _init(OperationContext* txn, ShardFactory* factory);
-
-    /**
      * Creates a shard based on the specified information and puts it into the lookup maps.
      * if useOriginalCS = true it will use the ConnectionSring used for shard creation to update
      * lookup maps. Otherwise the current connection string from the Shard's RemoteCommandTargeter
      * will be used.
      */
-    void _addShard_inlock(const std::shared_ptr<Shard>&, bool useOriginalCS);
-    std::shared_ptr<Shard> _findByShardId_inlock(const ShardId&) const;
-    void _rebuildShard_inlock(const ConnectionString& newConnString, ShardFactory* factory);
+    void _addShard(WithLock, std::shared_ptr<Shard> const&, bool useOriginalCS);
+    auto _findByShardId(WithLock, ShardId const&) const -> std::shared_ptr<Shard>;
+    void _rebuildShard(WithLock, ConnectionString const& newConnString, ShardFactory* factory);
 
     // Protects the lookup maps below.
     mutable stdx::mutex _mutex;
+
     using ShardMap = stdx::unordered_map<ShardId, std::shared_ptr<Shard>, ShardId::Hasher>;
 
     // Map of both shardName -> Shard and hostName -> Shard
@@ -140,6 +143,11 @@ class ShardRegistry {
 
 public:
     /**
+     * A ShardId for the config servers.
+     */
+    static const ShardId kConfigServerShardId;
+
+    /**
      * Instantiates a new shard registry.
      *
      * @param shardFactory Makes shards
@@ -152,8 +160,15 @@ public:
     /**
      *  Starts ReplicaSetMonitor by adding a config shard.
      */
-    void startup();
+    void startup(OperationContext* opCtx);
 
+    /**
+     * This is invalid to use on the config server and will hit an invariant if it is done.
+     * If the config server has need of a connection string for itself, it should get it from the
+     * replication state.
+     *
+     * Returns the connection string for the config server.
+     */
     ConnectionString getConfigServerConnectionString() const;
 
     /**
@@ -164,7 +179,7 @@ public:
      * reloading is required, the caller should call this method one more time if the first call
      * returned false.
      */
-    bool reload(OperationContext* txn);
+    bool reload(OperationContext* opCtx);
 
     /**
      * Takes a connection string describing either a shard or config server replica set, looks
@@ -181,7 +196,7 @@ public:
      * parameter can actually be the shard name or the HostAndPort for any
      * server in the shard.
      */
-    StatusWith<std::shared_ptr<Shard>> getShard(OperationContext* txn, const ShardId& shardId);
+    StatusWith<std::shared_ptr<Shard>> getShard(OperationContext* opCtx, const ShardId& shardId);
 
     /**
      * Returns a shared pointer to the shard object with the given shard id. The shardId parameter
@@ -219,7 +234,16 @@ public:
      */
     std::shared_ptr<Shard> lookupRSName(const std::string& name) const;
 
-    void getAllShardIds(std::vector<ShardId>* all) const;
+    void getAllShardIdsNoReload(std::vector<ShardId>* all) const;
+
+    /**
+     * Like getAllShardIdsNoReload(), but does a reload internally in the case that
+     * getAllShardIdsNoReload() comes back empty
+     */
+    void getAllShardIds(OperationContext* opCtx, std::vector<ShardId>* all);
+
+    int getNumShards() const;
+
     void toBSON(BSONObjBuilder* result) const;
     bool isUp() const;
 

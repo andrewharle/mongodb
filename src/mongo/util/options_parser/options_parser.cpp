@@ -1,28 +1,31 @@
-/* Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
@@ -48,6 +51,7 @@
 #include "mongo/util/options_parser/option_description.h"
 #include "mongo/util/options_parser/option_section.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/text.h"
 
 namespace mongo {
 namespace optionenvironment {
@@ -421,7 +425,7 @@ Status addBoostVariablesToEnvironment(const po::variables_map& vm,
                 optionValue = Value(mapValue);
             }
 
-            environment->set(iterator->_dottedName, optionValue);
+            environment->set(iterator->_dottedName, optionValue).transitional_ignore();
         }
     }
     return Status::OK();
@@ -610,7 +614,7 @@ Status addConstraints(const OptionSection& options, Environment* dest) {
     std::vector<std::shared_ptr<Constraint>>::const_iterator citerator;
     for (citerator = constraints_vector.begin(); citerator != constraints_vector.end();
          citerator++) {
-        dest->addConstraint(citerator->get());
+        dest->addConstraint(citerator->get()).transitional_ignore();
     }
 
     return Status::OK();
@@ -722,7 +726,7 @@ Status OptionsParser::parseCommandLine(const OptionSection& options,
         }
     } catch (po::multiple_occurrences& e) {
         StringBuilder sb;
-        sb << "Error parsing command line:  Multiple occurrences of option \"--"
+        sb << "Error parsing command line:  Multiple occurrences of option \""
            << e.get_option_name() << "\"";
         return Status(ErrorCodes::BadValue, sb.str());
     } catch (po::error& e) {
@@ -901,9 +905,29 @@ Status OptionsParser::readConfigFile(const std::string& filename, std::string* c
         configVector.resize(nread);
     }
 
+    // Config files cannot have null bytes
+    if (end(configVector) != std::find(begin(configVector), end(configVector), '\0')) {
+
+#if defined(_WIN32)
+        // On Windows, it is common for files to be saved by Notepad as UTF-16 with a BOM so convert
+        // it for the user. If the file lacks a BOM, but is UTF-16 encoded we will fail rather then
+        // try to guess the file encoding.
+        const std::array<unsigned char, 2> UTF16LEBOM = {0xff, 0xfe};
+        if (configVector.size() >= UTF16LEBOM.size() &&
+            memcmp(configVector.data(), UTF16LEBOM.data(), UTF16LEBOM.size()) == 0) {
+            auto wstr = std::wstring(configVector.begin() + 2, configVector.end());
+            *contents = toUtf8String(wstr);
+            return Status::OK();
+        }
+#endif
+
+        return Status(
+            ErrorCodes::FailedToParse,
+            "Config file has null bytes, ensure the file is saved as UTF-8 and not UTF-16.");
+    }
+
     // Copy the vector contents into our result string
     *contents = std::string(configVector.begin(), configVector.end());
-
     return Status::OK();
 }
 
@@ -1120,22 +1144,9 @@ Status OptionsParser::run(const OptionSection& options,
             return ret;
         }
 
-        YAML::Node YAMLConfig;
-        ret = parseYAMLConfigFile(config_file, &YAMLConfig);
+        ret = parseConfigFile(options, config_file, &configEnvironment);
         if (!ret.isOK()) {
             return ret;
-        }
-
-        if (isYAMLConfig(YAMLConfig)) {
-            ret = addYAMLNodesToEnvironment(YAMLConfig, options, "", &configEnvironment);
-            if (!ret.isOK()) {
-                return ret;
-            }
-        } else {
-            ret = parseINIConfigFile(options, config_file, &configEnvironment);
-            if (!ret.isOK()) {
-                return ret;
-            }
         }
     }
 
@@ -1188,6 +1199,57 @@ Status OptionsParser::run(const OptionSection& options,
     }
 
     return Status::OK();
+}
+
+Status OptionsParser::runConfigFile(
+    const OptionSection& options,
+    const std::string& config,
+    const std::map<std::string, std::string>& env,  // Unused, interface consistent with run()
+    Environment* configEnvironment) {
+    // Add the default values to our resulting environment
+    Status ret = addDefaultValues(options, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Add values from the provided config file
+    ret = parseConfigFile(options, config, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Add the constraints from our options to the result environment
+    ret = addConstraints(options, configEnvironment);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    return ret;
+}
+
+Status OptionsParser::parseConfigFile(const OptionSection& options,
+                                      const std::string& config_file,
+                                      Environment* configEnvironment) {
+    YAML::Node YAMLConfig;
+    Status ret = parseYAMLConfigFile(config_file, &YAMLConfig);
+    if (!ret.isOK()) {
+        return ret;
+    }
+
+    // Check if YAML parsing was successful, if not try to read as INI
+    if (isYAMLConfig(YAMLConfig)) {
+        ret = addYAMLNodesToEnvironment(YAMLConfig, options, "", configEnvironment);
+        if (!ret.isOK()) {
+            return ret;
+        }
+    } else {
+        ret = parseINIConfigFile(options, config_file, configEnvironment);
+        if (!ret.isOK()) {
+            return ret;
+        }
+    }
+
+    return ret;
 }
 
 }  // namespace optionenvironment

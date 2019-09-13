@@ -34,6 +34,55 @@
     assert.commandFailedWithCode(t.createIndex({a: 1}, {v: 1, name: 'a_1_base_v1', unknown: 1}),
                                  ErrorCodes.InvalidIndexSpecificationOption);
 
+    // A createIndexes command for a v:2 index with an unknown field in the index spec should fail.
+    assert.commandFailedWithCode(db.adminCommand({
+        applyOps: [{
+            op: 'c',
+            ns: cmdNs,
+            o: {
+                createIndexes: t.getName(),
+                v: 2,
+                key: {a: 1},
+                name: 'a_1_create_v2',
+                unknown: 1,
+            },
+        }],
+    }),
+                                 ErrorCodes.InvalidIndexSpecificationOption);
+
+    // A createIndexes command for a background index with unknown field in the index spec should
+    // fail.
+    assert.commandFailedWithCode(db.adminCommand({
+        applyOps: [{
+            op: 'c',
+            ns: cmdNs,
+            o: {
+                createIndexes: t.getName(),
+                v: 2,
+                key: {a: 1},
+                background: true,
+                name: 'a_1_background',
+                unknown: 1,
+            },
+        }],
+    }),
+                                 ErrorCodes.InvalidIndexSpecificationOption);
+
+    // A createIndexes command for a v:1 index with an unknown field in the index spec should work.
+    const res1 = assert.commandWorked(db.adminCommand({
+        applyOps: [{
+            op: 'c',
+            ns: cmdNs,
+            o: {
+                createIndexes: t.getName(),
+                v: 1,
+                key: {a: 1},
+                name: 'a_1_create_v1',
+                unknown: 1,
+            },
+        }],
+    }));
+
     // Inserting a v:2 index directly into system.indexes with an unknown field in the index
     // spec should return an error.
     assert.commandFailedWithCode(db.adminCommand({
@@ -52,56 +101,6 @@
             op: 'i',
             ns: systemIndexesNs,
             o: {v: 1, key: {a: 1}, name: 'a_1_system_v1', ns: collNs, unknown: 1},
-        }],
-    }));
-
-    //
-    // Background indexes should be subject to the same level of validation as foreground indexes.
-    //
-
-    // Inserting a background index directly into system.indexes with a bad index key pattern should
-    // return an error.
-    assert.commandFailedWithCode(db.adminCommand({
-        applyOps: [{
-            op: 'i',
-            ns: systemIndexesNs,
-            o: {key: {b: 'sideways'}, name: 'b_1_bg_system_v2', ns: collNs, background: true},
-        }],
-    }),
-                                 ErrorCodes.CannotCreateIndex);
-
-    // Inserting a v:2 background index directly into system.indexes with an unknown field in the
-    // index spec should return an error.
-    assert.commandFailedWithCode(db.adminCommand({
-        applyOps: [{
-            op: 'i',
-            ns: systemIndexesNs,
-            o: {
-                v: 2,
-                key: {b: 1},
-                name: 'b_1_bg_system_v2',
-                ns: collNs,
-                background: true,
-                unknown: true,
-            },
-        }],
-    }),
-                                 ErrorCodes.InvalidIndexSpecificationOption);
-
-    // Inserting a background v:1 index directly into system.indexes with an unknown field in the
-    // index spec should work.
-    assert.commandWorked(db.adminCommand({
-        applyOps: [{
-            op: 'i',
-            ns: systemIndexesNs,
-            o: {
-                v: 1,
-                key: {b: 1},
-                name: 'b_1_bg_system_v1',
-                ns: collNs,
-                background: true,
-                unknown: true,
-            },
         }],
     }));
 })();

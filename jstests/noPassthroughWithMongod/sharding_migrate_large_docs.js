@@ -1,8 +1,10 @@
 //
 // Tests migration behavior of large documents
+// @tags: [requires_sharding]
 //
 
-var st = new ShardingTest({shards: 2, mongos: 1});
+// TODO: SERVER-33601 remove shardAsReplicaSet: false
+var st = new ShardingTest({shards: 2, mongos: 1, other: {shardAsReplicaSet: false}});
 
 var mongos = st.s0;
 var coll = mongos.getCollection("foo.bar");

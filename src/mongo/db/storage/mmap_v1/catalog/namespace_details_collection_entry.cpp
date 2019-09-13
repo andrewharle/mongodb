@@ -1,32 +1,34 @@
 // namespace_details_collection_entry.h
 
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
@@ -34,6 +36,7 @@
 
 #include "mongo/db/catalog/database.h"
 #include "mongo/db/catalog/database_holder.h"
+#include "mongo/db/catalog/uuid_catalog.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/ops/update.h"
 #include "mongo/db/record_id.h"
@@ -65,8 +68,8 @@ NamespaceDetailsCollectionCatalogEntry::NamespaceDetailsCollectionCatalogEntry(
 }
 
 CollectionOptions NamespaceDetailsCollectionCatalogEntry::getCollectionOptions(
-    OperationContext* txn) const {
-    CollectionOptions options = _db->getCollectionOptions(txn, _namespacesRecordId);
+    OperationContext* opCtx) const {
+    CollectionOptions options = _db->getCollectionOptions(opCtx, _namespacesRecordId);
 
     if (options.flagsSet) {
         if (options.flags != _details->userFlags) {
@@ -84,11 +87,11 @@ CollectionOptions NamespaceDetailsCollectionCatalogEntry::getCollectionOptions(
     return options;
 }
 
-int NamespaceDetailsCollectionCatalogEntry::getTotalIndexCount(OperationContext* txn) const {
+int NamespaceDetailsCollectionCatalogEntry::getTotalIndexCount(OperationContext* opCtx) const {
     return _details->nIndexes + _details->indexBuildsInProgress;
 }
 
-int NamespaceDetailsCollectionCatalogEntry::getCompletedIndexCount(OperationContext* txn) const {
+int NamespaceDetailsCollectionCatalogEntry::getCompletedIndexCount(OperationContext* opCtx) const {
     return _details->nIndexes;
 }
 
@@ -96,35 +99,35 @@ int NamespaceDetailsCollectionCatalogEntry::getMaxAllowedIndexes() const {
     return NamespaceDetails::NIndexesMax;
 }
 
-void NamespaceDetailsCollectionCatalogEntry::getAllIndexes(OperationContext* txn,
+void NamespaceDetailsCollectionCatalogEntry::getAllIndexes(OperationContext* opCtx,
                                                            std::vector<std::string>* names) const {
     NamespaceDetails::IndexIterator i = _details->ii(true);
     while (i.more()) {
         const IndexDetails& id = i.next();
-        const BSONObj obj = _indexRecordStore->dataFor(txn, id.info.toRecordId()).toBson();
+        const BSONObj obj = _indexRecordStore->dataFor(opCtx, id.info.toRecordId()).toBson();
         names->push_back(obj.getStringField("name"));
     }
 }
 
 void NamespaceDetailsCollectionCatalogEntry::getReadyIndexes(
-    OperationContext* txn, std::vector<std::string>* names) const {
+    OperationContext* opCtx, std::vector<std::string>* names) const {
     NamespaceDetails::IndexIterator i = _details->ii(true);
     while (i.more()) {
         const IndexDetails& id = i.next();
-        const BSONObj obj = _indexRecordStore->dataFor(txn, id.info.toRecordId()).toBson();
+        const BSONObj obj = _indexRecordStore->dataFor(opCtx, id.info.toRecordId()).toBson();
         const char* idxName = obj.getStringField("name");
-        if (isIndexReady(txn, StringData(idxName))) {
+        if (isIndexReady(opCtx, StringData(idxName))) {
             names->push_back(idxName);
         }
     }
 }
 
-bool NamespaceDetailsCollectionCatalogEntry::isIndexMultikey(OperationContext* txn,
+bool NamespaceDetailsCollectionCatalogEntry::isIndexMultikey(OperationContext* opCtx,
                                                              StringData idxName,
                                                              MultikeyPaths* multikeyPaths) const {
     // TODO SERVER-22727: Populate 'multikeyPaths' with path components that cause 'idxName' to be
     // multikey.
-    int idxNo = _findIndexNumber(txn, idxName);
+    int idxNo = _findIndexNumber(opCtx, idxName);
     invariant(idxNo >= 0);
     return isIndexMultikey(idxNo);
 }
@@ -134,16 +137,16 @@ bool NamespaceDetailsCollectionCatalogEntry::isIndexMultikey(int idxNo) const {
 }
 
 bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(
-    OperationContext* txn, StringData indexName, const MultikeyPaths& multikeyPaths) {
+    OperationContext* opCtx, StringData indexName, const MultikeyPaths& multikeyPaths) {
     // TODO SERVER-22727: Store new path components from 'multikeyPaths' that cause 'indexName' to
     // be multikey.
-    int idxNo = _findIndexNumber(txn, indexName);
+    int idxNo = _findIndexNumber(opCtx, indexName);
     invariant(idxNo >= 0);
     const bool multikey = true;
-    return setIndexIsMultikey(txn, idxNo, multikey);
+    return setIndexIsMultikey(opCtx, idxNo, multikey);
 }
 
-bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(OperationContext* txn,
+bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(OperationContext* opCtx,
                                                                 int idxNo,
                                                                 bool multikey) {
     unsigned long long mask = 1ULL << idxNo;
@@ -154,7 +157,7 @@ bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(OperationContext
             return false;
         }
 
-        *txn->recoveryUnit()->writing(&_details->multiKeyIndexBits) |= mask;
+        *opCtx->recoveryUnit()->writing(&_details->multiKeyIndexBits) |= mask;
     } else {
         // Shortcut if the bit is already set correctly
         if (!(_details->multiKeyIndexBits & mask)) {
@@ -163,49 +166,60 @@ bool NamespaceDetailsCollectionCatalogEntry::setIndexIsMultikey(OperationContext
 
         // Invert mask: all 1's except a 0 at the ith bit
         mask = ~mask;
-        *txn->recoveryUnit()->writing(&_details->multiKeyIndexBits) &= mask;
+        *opCtx->recoveryUnit()->writing(&_details->multiKeyIndexBits) &= mask;
     }
 
     return true;
 }
 
-RecordId NamespaceDetailsCollectionCatalogEntry::getIndexHead(OperationContext* txn,
+RecordId NamespaceDetailsCollectionCatalogEntry::getIndexHead(OperationContext* opCtx,
                                                               StringData idxName) const {
-    int idxNo = _findIndexNumber(txn, idxName);
+    int idxNo = _findIndexNumber(opCtx, idxName);
     invariant(idxNo >= 0);
     return _details->idx(idxNo).head.toRecordId();
 }
 
-BSONObj NamespaceDetailsCollectionCatalogEntry::getIndexSpec(OperationContext* txn,
+BSONObj NamespaceDetailsCollectionCatalogEntry::getIndexSpec(OperationContext* opCtx,
                                                              StringData idxName) const {
-    int idxNo = _findIndexNumber(txn, idxName);
+    int idxNo = _findIndexNumber(opCtx, idxName);
     invariant(idxNo >= 0);
     const IndexDetails& id = _details->idx(idxNo);
-    return _indexRecordStore->dataFor(txn, id.info.toRecordId()).toBson();
+    return _indexRecordStore->dataFor(opCtx, id.info.toRecordId()).toBson();
 }
 
-void NamespaceDetailsCollectionCatalogEntry::setIndexHead(OperationContext* txn,
+void NamespaceDetailsCollectionCatalogEntry::setIndexHead(OperationContext* opCtx,
                                                           StringData idxName,
                                                           const RecordId& newHead) {
-    int idxNo = _findIndexNumber(txn, idxName);
+    int idxNo = _findIndexNumber(opCtx, idxName);
     invariant(idxNo >= 0);
-    *txn->recoveryUnit()->writing(&_details->idx(idxNo).head) = DiskLoc::fromRecordId(newHead);
+    *opCtx->recoveryUnit()->writing(&_details->idx(idxNo).head) = DiskLoc::fromRecordId(newHead);
 }
 
-bool NamespaceDetailsCollectionCatalogEntry::isIndexReady(OperationContext* txn,
+bool NamespaceDetailsCollectionCatalogEntry::isIndexReady(OperationContext* opCtx,
                                                           StringData idxName) const {
-    int idxNo = _findIndexNumber(txn, idxName);
+    int idxNo = _findIndexNumber(opCtx, idxName);
     invariant(idxNo >= 0);
-    return idxNo < getCompletedIndexCount(txn);
+    return idxNo < getCompletedIndexCount(opCtx);
 }
 
-int NamespaceDetailsCollectionCatalogEntry::_findIndexNumber(OperationContext* txn,
+bool NamespaceDetailsCollectionCatalogEntry::isIndexPresent(OperationContext* opCtx,
+                                                            StringData idxName) const {
+    int idxNo = _findIndexNumber(opCtx, idxName);
+    return idxNo >= 0;
+}
+
+KVPrefix NamespaceDetailsCollectionCatalogEntry::getIndexPrefix(OperationContext* opCtx,
+                                                                StringData indexName) const {
+    return KVPrefix::kNotPrefixed;
+}
+
+int NamespaceDetailsCollectionCatalogEntry::_findIndexNumber(OperationContext* opCtx,
                                                              StringData idxName) const {
     NamespaceDetails::IndexIterator i = _details->ii(true);
     while (i.more()) {
         const IndexDetails& id = i.next();
         int idxNo = i.pos() - 1;
-        const BSONObj obj = _indexRecordStore->dataFor(txn, id.info.toRecordId()).toBson();
+        const BSONObj obj = _indexRecordStore->dataFor(opCtx, id.info.toRecordId()).toBson();
         if (idxName == obj.getStringField("name"))
             return idxNo;
     }
@@ -234,29 +248,29 @@ public:
     }
 } iu_unittest;
 
-Status NamespaceDetailsCollectionCatalogEntry::removeIndex(OperationContext* txn,
+Status NamespaceDetailsCollectionCatalogEntry::removeIndex(OperationContext* opCtx,
                                                            StringData indexName) {
-    int idxNo = _findIndexNumber(txn, indexName);
+    int idxNo = _findIndexNumber(opCtx, indexName);
     if (idxNo < 0)
         return Status(ErrorCodes::NamespaceNotFound, "index not found to remove");
 
     RecordId infoLocation = _details->idx(idxNo).info.toRecordId();
 
     {  // sanity check
-        BSONObj info = _indexRecordStore->dataFor(txn, infoLocation).toBson();
+        BSONObj info = _indexRecordStore->dataFor(opCtx, infoLocation).toBson();
         invariant(info["name"].String() == indexName);
     }
 
     {  // drop the namespace
         string indexNamespace = IndexDescriptor::makeIndexNamespace(ns().ns(), indexName);
-        Status status = _db->dropCollection(txn, indexNamespace);
+        Status status = _db->dropCollection(opCtx, indexNamespace);
         if (!status.isOK()) {
             return status;
         }
     }
 
     {  // all info in the .ns file
-        NamespaceDetails* d = _details->writingWithExtra(txn);
+        NamespaceDetails* d = _details->writingWithExtra(opCtx);
 
         // fix the _multiKeyIndexBits, by moving all bits above me down one
         d->multiKeyIndexBits = removeAndSlideBit(d->multiKeyIndexBits, idxNo);
@@ -266,100 +280,101 @@ Status NamespaceDetailsCollectionCatalogEntry::removeIndex(OperationContext* txn
         else
             d->nIndexes--;
 
-        for (int i = idxNo; i < getTotalIndexCount(txn); i++)
+        for (int i = idxNo; i < getTotalIndexCount(opCtx); i++)
             d->idx(i) = d->idx(i + 1);
 
-        d->idx(getTotalIndexCount(txn)) = IndexDetails();
+        d->idx(getTotalIndexCount(opCtx)) = IndexDetails();
     }
 
     // Someone may be querying the system.indexes namespace directly, so we need to invalidate
     // its cursors.
     MMAPV1DatabaseCatalogEntry::invalidateSystemCollectionRecord(
-        txn, NamespaceString(_db->name(), "system.indexes"), infoLocation);
+        opCtx, NamespaceString(_db->name(), "system.indexes"), infoLocation);
 
     // remove from system.indexes
-    _indexRecordStore->deleteRecord(txn, infoLocation);
+    _indexRecordStore->deleteRecord(opCtx, infoLocation);
 
     return Status::OK();
 }
 
-Status NamespaceDetailsCollectionCatalogEntry::prepareForIndexBuild(OperationContext* txn,
-                                                                    const IndexDescriptor* desc) {
+Status NamespaceDetailsCollectionCatalogEntry::prepareForIndexBuild(
+    OperationContext* opCtx, const IndexDescriptor* desc, bool isBackgroundSecondaryBuild) {
     BSONObj spec = desc->infoObj();
     // 1) entry in system.indexs
+    // TODO SERVER-30638: using timestamp 0 for these inserts.
     StatusWith<RecordId> systemIndexesEntry =
-        _indexRecordStore->insertRecord(txn, spec.objdata(), spec.objsize(), false);
+        _indexRecordStore->insertRecord(opCtx, spec.objdata(), spec.objsize(), Timestamp(), false);
     if (!systemIndexesEntry.isOK())
         return systemIndexesEntry.getStatus();
 
     // 2) NamespaceDetails mods
     IndexDetails* id;
     try {
-        id = &_details->idx(getTotalIndexCount(txn), true);
+        id = &_details->idx(getTotalIndexCount(opCtx), true);
     } catch (DBException&) {
-        _details->allocExtra(txn, ns().ns(), _db->_namespaceIndex, getTotalIndexCount(txn));
-        id = &_details->idx(getTotalIndexCount(txn), false);
+        _details->allocExtra(opCtx, ns().ns(), _db->_namespaceIndex, getTotalIndexCount(opCtx));
+        id = &_details->idx(getTotalIndexCount(opCtx), false);
     }
 
     const DiskLoc infoLoc = DiskLoc::fromRecordId(systemIndexesEntry.getValue());
-    *txn->recoveryUnit()->writing(&id->info) = infoLoc;
-    *txn->recoveryUnit()->writing(&id->head) = DiskLoc();
+    *opCtx->recoveryUnit()->writing(&id->info) = infoLoc;
+    *opCtx->recoveryUnit()->writing(&id->head) = DiskLoc();
 
-    txn->recoveryUnit()->writingInt(_details->indexBuildsInProgress) += 1;
+    opCtx->recoveryUnit()->writingInt(_details->indexBuildsInProgress) += 1;
 
     // 3) indexes entry in .ns file and system.namespaces
-    _db->createNamespaceForIndex(txn, desc->indexNamespace());
+    _db->createNamespaceForIndex(opCtx, desc->indexNamespace());
 
     // TODO SERVER-22727: Create an entry for path-level multikey info when creating the new index.
 
     // Mark the collation feature as in use if the index has a non-simple collation.
     if (spec["collation"]) {
-        _db->markCollationFeatureAsInUse(txn);
+        _db->markCollationFeatureAsInUse(opCtx);
     }
 
     return Status::OK();
 }
 
-void NamespaceDetailsCollectionCatalogEntry::indexBuildSuccess(OperationContext* txn,
+void NamespaceDetailsCollectionCatalogEntry::indexBuildSuccess(OperationContext* opCtx,
                                                                StringData indexName) {
-    int idxNo = _findIndexNumber(txn, indexName);
+    int idxNo = _findIndexNumber(opCtx, indexName);
     fassert(17202, idxNo >= 0);
 
     // Make sure the newly created index is relocated to nIndexes, if it isn't already there
-    if (idxNo != getCompletedIndexCount(txn)) {
-        int toIdxNo = getCompletedIndexCount(txn);
+    if (idxNo != getCompletedIndexCount(opCtx)) {
+        int toIdxNo = getCompletedIndexCount(opCtx);
 
-        //_details->swapIndex( txn, idxNo, toIdxNo );
+        //_details->swapIndex( opCtx, idxNo, toIdxNo );
 
         // flip main meta data
         IndexDetails temp = _details->idx(idxNo);
-        *txn->recoveryUnit()->writing(&_details->idx(idxNo)) = _details->idx(toIdxNo);
-        *txn->recoveryUnit()->writing(&_details->idx(toIdxNo)) = temp;
+        *opCtx->recoveryUnit()->writing(&_details->idx(idxNo)) = _details->idx(toIdxNo);
+        *opCtx->recoveryUnit()->writing(&_details->idx(toIdxNo)) = temp;
 
         // flip multi key bits
         bool tempMultikey = isIndexMultikey(idxNo);
-        setIndexIsMultikey(txn, idxNo, isIndexMultikey(toIdxNo));
-        setIndexIsMultikey(txn, toIdxNo, tempMultikey);
+        setIndexIsMultikey(opCtx, idxNo, isIndexMultikey(toIdxNo));
+        setIndexIsMultikey(opCtx, toIdxNo, tempMultikey);
 
         idxNo = toIdxNo;
-        invariant((idxNo = _findIndexNumber(txn, indexName)));
+        invariant((idxNo == _findIndexNumber(opCtx, indexName)));
     }
 
-    txn->recoveryUnit()->writingInt(_details->indexBuildsInProgress) -= 1;
-    txn->recoveryUnit()->writingInt(_details->nIndexes) += 1;
+    opCtx->recoveryUnit()->writingInt(_details->indexBuildsInProgress) -= 1;
+    opCtx->recoveryUnit()->writingInt(_details->nIndexes) += 1;
 
-    invariant(isIndexReady(txn, indexName));
+    invariant(isIndexReady(opCtx, indexName));
 }
 
-void NamespaceDetailsCollectionCatalogEntry::updateTTLSetting(OperationContext* txn,
+void NamespaceDetailsCollectionCatalogEntry::updateTTLSetting(OperationContext* opCtx,
                                                               StringData idxName,
                                                               long long newExpireSeconds) {
-    int idx = _findIndexNumber(txn, idxName);
+    int idx = _findIndexNumber(opCtx, idxName);
     invariant(idx >= 0);
 
     IndexDetails& indexDetails = _details->idx(idx);
 
-    BSONObj obj = _indexRecordStore->dataFor(txn, indexDetails.info.toRecordId()).toBson();
+    BSONObj obj = _indexRecordStore->dataFor(opCtx, indexDetails.info.toRecordId()).toBson();
     const BSONElement oldExpireSecs = obj.getField("expireAfterSeconds");
 
     // Important that we set the new value in-place.  We are writing directly to the
@@ -371,14 +386,14 @@ void NamespaceDetailsCollectionCatalogEntry::updateTTLSetting(OperationContext* 
             massert(16631, "index does not have an 'expireAfterSeconds' field", false);
             break;
         case NumberInt:
-            *txn->recoveryUnit()->writing(reinterpret_cast<int*>(nonConstPtr)) = newExpireSeconds;
+            *opCtx->recoveryUnit()->writing(reinterpret_cast<int*>(nonConstPtr)) = newExpireSeconds;
             break;
         case NumberDouble:
-            *txn->recoveryUnit()->writing(reinterpret_cast<double*>(nonConstPtr)) =
+            *opCtx->recoveryUnit()->writing(reinterpret_cast<double*>(nonConstPtr)) =
                 newExpireSeconds;
             break;
         case NumberLong:
-            *txn->recoveryUnit()->writing(reinterpret_cast<long long*>(nonConstPtr)) =
+            *opCtx->recoveryUnit()->writing(reinterpret_cast<long long*>(nonConstPtr)) =
                 newExpireSeconds;
             break;
         default:
@@ -386,71 +401,117 @@ void NamespaceDetailsCollectionCatalogEntry::updateTTLSetting(OperationContext* 
     }
 }
 
-void NamespaceDetailsCollectionCatalogEntry::_updateSystemNamespaces(OperationContext* txn,
+void NamespaceDetailsCollectionCatalogEntry::_updateSystemNamespaces(OperationContext* opCtx,
                                                                      const BSONObj& update) {
     if (!_namespacesRecordStore)
         return;
 
-    RecordData entry = _namespacesRecordStore->dataFor(txn, _namespacesRecordId);
-    const BSONObj newEntry = applyUpdateOperators(entry.releaseToBson(), update);
+    RecordData entry = _namespacesRecordStore->dataFor(opCtx, _namespacesRecordId);
+    const BSONObj newEntry = applyUpdateOperators(opCtx, entry.releaseToBson(), update);
 
     Status result = _namespacesRecordStore->updateRecord(
-        txn, _namespacesRecordId, newEntry.objdata(), newEntry.objsize(), false, NULL);
+        opCtx, _namespacesRecordId, newEntry.objdata(), newEntry.objsize(), false, NULL);
 
     if (ErrorCodes::NeedsDocumentMove == result) {
+        // TODO SERVER-30638: using timestamp 0 for these inserts.
         StatusWith<RecordId> newLocation = _namespacesRecordStore->insertRecord(
-            txn, newEntry.objdata(), newEntry.objsize(), false);
+            opCtx, newEntry.objdata(), newEntry.objsize(), Timestamp(), false);
         fassert(40074, newLocation.getStatus().isOK());
 
         // Invalidate old namespace record
         MMAPV1DatabaseCatalogEntry::invalidateSystemCollectionRecord(
-            txn, NamespaceString(_db->name(), "system.namespaces"), _namespacesRecordId);
+            opCtx, NamespaceString(_db->name(), "system.namespaces"), _namespacesRecordId);
 
-        _namespacesRecordStore->deleteRecord(txn, _namespacesRecordId);
+        _namespacesRecordStore->deleteRecord(opCtx, _namespacesRecordId);
 
-        setNamespacesRecordId(txn, newLocation.getValue());
+        setNamespacesRecordId(opCtx, newLocation.getValue());
     } else {
         fassert(17486, result.isOK());
     }
 }
 
-void NamespaceDetailsCollectionCatalogEntry::updateFlags(OperationContext* txn, int newValue) {
+void NamespaceDetailsCollectionCatalogEntry::updateFlags(OperationContext* opCtx, int newValue) {
     NamespaceDetailsRSV1MetaData md(ns().ns(), _details);
-    md.replaceUserFlags(txn, newValue);
-    _updateSystemNamespaces(txn, BSON("$set" << BSON("options.flags" << newValue)));
+    md.replaceUserFlags(opCtx, newValue);
+    _updateSystemNamespaces(opCtx, BSON("$set" << BSON("options.flags" << newValue)));
 }
 
-void NamespaceDetailsCollectionCatalogEntry::clearTempFlag(OperationContext* txn) {
-    _updateSystemNamespaces(txn, BSON("$set" << BSON("options.temp" << false)));
+void NamespaceDetailsCollectionCatalogEntry::addUUID(OperationContext* opCtx,
+                                                     CollectionUUID uuid,
+                                                     Collection* coll) {
+    // Add a UUID to CollectionOptions if a UUID does not yet exist.
+    if (ns().coll() == "system.namespaces") {
+        return;
+    }
+    RecordData namespaceData;
+    invariant(_namespacesRecordStore->findRecord(opCtx, _namespacesRecordId, &namespaceData));
+
+    auto namespacesBson = namespaceData.releaseToBson();
+
+    if (namespacesBson["options"].isABSONObj() && !namespacesBson["options"].Obj()["uuid"].eoo()) {
+        fassert(40565, UUID::parse(namespacesBson["options"].Obj()["uuid"]).getValue() == uuid);
+    } else {
+        _updateSystemNamespaces(opCtx, BSON("$set" << BSON("options.uuid" << uuid)));
+        UUIDCatalog& catalog = UUIDCatalog::get(opCtx->getServiceContext());
+        catalog.onCreateCollection(opCtx, coll, uuid);
+    }
 }
 
-void NamespaceDetailsCollectionCatalogEntry::updateValidator(OperationContext* txn,
+bool NamespaceDetailsCollectionCatalogEntry::isEqualToMetadataUUID(OperationContext* opCtx,
+                                                                   OptionalCollectionUUID uuid) {
+    if (ns().coll() == "system.namespaces") {
+        return true;
+    }
+    RecordData namespaceData;
+    invariant(_namespacesRecordStore->findRecord(opCtx, _namespacesRecordId, &namespaceData));
+
+    auto namespacesBson = namespaceData.releaseToBson();
+    if (ns().coll() == "system.indexes") {
+        return !uuid && (!namespacesBson["options"].isABSONObj() ||
+                         namespacesBson["options"].Obj()["uuid"].eoo());
+    }
+    auto optionsObj = namespacesBson["options"].Obj();
+    return !optionsObj["uuid"].eoo() && UUID::parse(optionsObj["uuid"]).getValue() == uuid;
+}
+
+void NamespaceDetailsCollectionCatalogEntry::updateValidator(OperationContext* opCtx,
                                                              const BSONObj& validator,
                                                              StringData validationLevel,
                                                              StringData validationAction) {
     _updateSystemNamespaces(
-        txn,
+        opCtx,
         BSON("$set" << BSON("options.validator" << validator << "options.validationLevel"
                                                 << validationLevel
                                                 << "options.validationAction"
                                                 << validationAction)));
 }
 
-void NamespaceDetailsCollectionCatalogEntry::setNamespacesRecordId(OperationContext* txn,
+void NamespaceDetailsCollectionCatalogEntry::setIsTemp(OperationContext* opCtx, bool isTemp) {
+    _updateSystemNamespaces(opCtx, BSON("$set" << BSON("options.temp" << isTemp)));
+}
+
+
+void NamespaceDetailsCollectionCatalogEntry::setNamespacesRecordId(OperationContext* opCtx,
                                                                    RecordId newId) {
     if (newId.isNull()) {
         invariant(ns().coll() == "system.namespaces" || ns().coll() == "system.indexes");
     } else {
-        // 'txn' is allowed to be null, but we don't need an OperationContext in MMAP, so that's OK.
-        auto namespaceEntry = _namespacesRecordStore->dataFor(txn, newId).releaseToBson();
+        // 'opCtx' is allowed to be null, but we don't need an OperationContext in MMAP, so that's
+        // OK.
+        auto namespaceEntry = _namespacesRecordStore->dataFor(opCtx, newId).releaseToBson();
         invariant(namespaceEntry["name"].String() == ns().ns());
 
         // Register RecordId change for rollback if we're not initializing.
-        if (txn && !_namespacesRecordId.isNull()) {
+        if (opCtx && !_namespacesRecordId.isNull()) {
             auto oldNamespacesRecordId = _namespacesRecordId;
-            txn->recoveryUnit()->onRollback([=] { _namespacesRecordId = oldNamespacesRecordId; });
+            opCtx->recoveryUnit()->onRollback([=] { _namespacesRecordId = oldNamespacesRecordId; });
         }
         _namespacesRecordId = newId;
     }
+}
+
+void NamespaceDetailsCollectionCatalogEntry::updateCappedSize(OperationContext* opCtx,
+                                                              long long size) {
+    MONGO_UNREACHABLE;
 }
 }

@@ -3,56 +3,95 @@
 Import("env")
 Import("mmapv1")
 
+env = env.Clone()
+
 env.Library(
-    target = 'storage_mmapv1',
-    source = [ "aligned_builder.cpp",
-               "catalog/hashtab.cpp",
-               "catalog/index_details.cpp",
-               "catalog/namespace.cpp",
-               "catalog/namespace_details.cpp",
-               "catalog/namespace_details_collection_entry.cpp",
-               "catalog/namespace_details_rsv1_metadata.cpp",
-               "catalog/namespace_index.cpp",
-               "commit_notifier.cpp",
-               "data_file.cpp",
-               "data_file_sync.cpp",
-               "durable_mapped_file.cpp",
-               "dur.cpp",
-               "durop.cpp",
-               "dur_preplogbuffer.cpp",
-               "dur_commitjob.cpp",
-               "dur_recover.cpp",
-               "dur_journal.cpp",
-               "dur_journal_writer.cpp",
-               "dur_recovery_unit.cpp",
-               "journal_latency_test_cmd.cpp",
-               "mmap_v1_database_catalog_entry.cpp",
-               "mmap_v1_engine.cpp",
-               "mmap_v1_extent_manager.cpp",
-               "mmap_v1_init.cpp" if mmapv1 else "mmap_v1_noinit.cpp",
-               "repair_database.cpp",
-             ],
-    LIBDEPS = [
+    target='paths',
+    source=[
+        'paths.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ],
+)
+
+env.Library(
+    target='mmap_v1_options',
+    source=[
+        'mmap_v1_options.cpp',
+    ],
+)
+
+env.Library(
+    target='storage_mmapv1',
+    source=[ 
+        "aligned_builder.cpp",
+        "catalog/hashtab.cpp",
+        "catalog/index_details.cpp",
+        "catalog/namespace_details.cpp",
+        "catalog/namespace_details_collection_entry.cpp",
+        "catalog/namespace_details_rsv1_metadata.cpp",
+        "catalog/namespace_index.cpp",
+        "commit_notifier.cpp",
+        "data_file.cpp",
+        "data_file_sync.cpp",
+        "durable_mapped_file.cpp",
+        "dur.cpp",
+        "durop.cpp",
+        "dur_preplogbuffer.cpp",
+        "dur_commitjob.cpp",
+        "dur_recover.cpp",
+        "dur_journal.cpp",
+        "dur_journal_writer.cpp",
+        "dur_recovery_unit.cpp",
+        "journal_latency_test_cmd.cpp",
+        "mmap_v1_database_catalog_entry.cpp",
+        "mmap_v1_engine.cpp",
+        "mmap_v1_extent_manager.cpp",
+        "mmap_v1_init.cpp" if mmapv1 else "mmap_v1_noinit.cpp",
+        "repair_database.cpp",
+    ],
+    LIBDEPS=[
         'record_store_v1',
         'record_access_tracker',
+        'repair_database_interface',
         'btree',
         'file_allocator',
         'logfile',
         'compress',
+        'paths',
+        'mmap_v1_options',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
+        '$BUILD_DIR/mongo/db/catalog/database',
+        '$BUILD_DIR/mongo/db/catalog/database_holder',
+        '$BUILD_DIR/mongo/db/catalog/index_catalog',
+        '$BUILD_DIR/mongo/db/catalog/index_create',
         '$BUILD_DIR/mongo/db/commands',
         '$BUILD_DIR/mongo/db/concurrency/lock_manager',
         '$BUILD_DIR/mongo/db/index_names',
         '$BUILD_DIR/mongo/db/index/index_descriptor',
         '$BUILD_DIR/mongo/db/storage/journal_listener',
-        '$BUILD_DIR/mongo/db/storage/paths',
+        '$BUILD_DIR/mongo/db/storage/kv/kv_prefix',
         '$BUILD_DIR/mongo/db/storage/storage_engine_lock_file',
+        '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
+        '$BUILD_DIR/mongo/db/index/index_access_methods',
+        '$BUILD_DIR/mongo/db/write_ops',
     ],
-    LIBDEPS_TAGS=[
-        # Many undefined symbols
-        'incomplete',
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status',
+        '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
+        '$BUILD_DIR/mongo/db/storage/storage_engine_common',
     ],
-    )
+)
+
+env.Library(
+    target = 'repair_database_interface',
+    source = [ 
+        "repair_database_interface.cpp",
+    ],
+    LIBDEPS = [
+    ],
+)
 
 compressEnv = env.Clone()
 compressEnv.InjectThirdPartyIncludePaths(libraries=['snappy'])
@@ -63,7 +102,7 @@ compressEnv.Library(
         'compress.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/storage/paths',
+        'paths',
         '$BUILD_DIR/third_party/shim_snappy',
     ],
 )
@@ -85,7 +124,7 @@ env.Library(
         'file_allocator.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/storage/paths',
+        'paths',
         '$BUILD_DIR/mongo/util/fail_point',
         '$BUILD_DIR/mongo/util/processinfo',
     ],
@@ -97,8 +136,8 @@ env.Library(
         'logfile.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/storage/paths',
         'mmap',
+        'paths',
     ],
 )
 
@@ -109,9 +148,11 @@ env.Library(
         'mmap_${TARGET_OS_FAMILY}.cpp',
     ],
     LIBDEPS=[
-        'file_allocator',
+        '$BUILD_DIR/mongo/db/concurrency/lock_manager',
+        '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/util/progress_meter',
-        '$BUILD_DIR/mongo/db/storage/storage_options'
+        'file_allocator',
     ],
 )
 
@@ -128,6 +169,7 @@ env.Library(
         ],
     LIBDEPS= [
         '$BUILD_DIR/mongo/db/commands/server_status_core',
+        '$BUILD_DIR/mongo/db/curop',
         '$BUILD_DIR/mongo/db/service_context',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/util/concurrency/spin_lock',
@@ -178,7 +220,13 @@ if mmapv1:
         source=['mmap_v1_init_test.cpp',
                 ],
         LIBDEPS=[
+            '$BUILD_DIR/mongo/db/auth/authmocks',
             '$BUILD_DIR/mongo/db/serveronly',
+            '$BUILD_DIR/mongo/db/service_context',
+            '$BUILD_DIR/mongo/db/service_context_d',
+            '$BUILD_DIR/mongo/db/service_context_test_fixture',
+            '$BUILD_DIR/mongo/db/storage/storage_engine_metadata',
+            '$BUILD_DIR/mongo/db/storage/storage_options',
             ],
         )
 
@@ -198,7 +246,6 @@ if mmapv1:
         source=['record_store_v1_simple_test.cpp',
                 ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/util/decorable',
             'record_store_v1_test_help'
             ]
         )
@@ -208,7 +255,6 @@ if mmapv1:
         source=['record_store_v1_capped_test.cpp',
                 ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/util/decorable',
             'record_store_v1_test_help'
             ]
         )
@@ -241,7 +287,6 @@ if mmapv1:
         source=['btree/btree_logic_test.cpp'
                 ],
         LIBDEPS=[
-            '$BUILD_DIR/mongo/util/decorable',
             'btree_test_help'
             ]
         )

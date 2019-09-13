@@ -1,25 +1,27 @@
 // insert.cpp
 
+
 /**
- *    Copyright (C) 2008 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -29,11 +31,13 @@
  */
 #include "mongo/platform/basic.h"
 
+#include "mongo/db/ops/insert.h"
+
 #include <vector>
 
 #include "mongo/bson/bson_depth.h"
-#include "mongo/db/global_timestamp.h"
-#include "mongo/db/ops/insert.h"
+#include "mongo/db/logical_clock.h"
+#include "mongo/db/logical_time.h"
 #include "mongo/db/views/durable_view_catalog.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -75,7 +79,7 @@ Status validateDepth(const BSONObj& obj) {
 }
 }  // namespace
 
-StatusWith<BSONObj> fixDocumentForInsert(const BSONObj& doc) {
+StatusWith<BSONObj> fixDocumentForInsert(ServiceContext* service, const BSONObj& doc) {
     if (doc.objsize() > BSONObjMaxUserSize)
         return StatusWith<BSONObj>(ErrorCodes::BadValue,
                                    str::stream() << "object to insert too large"
@@ -165,7 +169,8 @@ StatusWith<BSONObj> fixDocumentForInsert(const BSONObj& doc) {
         if (hadId && e.fieldNameStringData() == "_id") {
             // no-op
         } else if (e.type() == bsonTimestamp && e.timestampValue() == 0) {
-            b.append(e.fieldName(), getNextGlobalTimestamp());
+            auto nextTime = LogicalClock::get(service)->reserveTicks(1);
+            b.append(e.fieldName(), nextTime.asTimestamp());
         } else {
             b.append(e);
         }
@@ -183,8 +188,11 @@ Status userAllowedWriteNS(const NamespaceString& ns) {
 
 Status userAllowedWriteNS(StringData db, StringData coll) {
     if (coll == "system.profile") {
-        return Status(ErrorCodes::BadValue,
+        return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "cannot write to '" << db << ".system.profile'");
+    }
+    if (coll == "system.indexes") {
+        return Status::OK();
     }
     return userAllowedCreateNS(db, coll);
 }
@@ -193,19 +201,19 @@ Status userAllowedCreateNS(StringData db, StringData coll) {
     // validity checking
 
     if (db.size() == 0)
-        return Status(ErrorCodes::BadValue, "db cannot be blank");
+        return Status(ErrorCodes::InvalidNamespace, "db cannot be blank");
 
     if (!NamespaceString::validDBName(db, NamespaceString::DollarInDbNameBehavior::Allow))
-        return Status(ErrorCodes::BadValue, "invalid db name");
+        return Status(ErrorCodes::InvalidNamespace, "invalid db name");
 
     if (coll.size() == 0)
-        return Status(ErrorCodes::BadValue, "collection cannot be blank");
+        return Status(ErrorCodes::InvalidNamespace, "collection cannot be blank");
 
     if (!NamespaceString::validCollectionName(coll))
-        return Status(ErrorCodes::BadValue, "invalid collection name");
+        return Status(ErrorCodes::InvalidNamespace, "invalid collection name");
 
     if (db.size() + 1 /* dot */ + coll.size() > NamespaceString::MaxNsCollectionLen)
-        return Status(ErrorCodes::BadValue,
+        return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "fully qualified namespace " << db << '.' << coll
                                     << " is too long "
                                     << "(max is "
@@ -215,12 +223,10 @@ Status userAllowedCreateNS(StringData db, StringData coll) {
     // check spceial areas
 
     if (db == "system")
-        return Status(ErrorCodes::BadValue, "cannot use 'system' database");
+        return Status(ErrorCodes::InvalidNamespace, "cannot use 'system' database");
 
 
     if (coll.startsWith("system.")) {
-        if (coll == "system.indexes")
-            return Status::OK();
         if (coll == "system.js")
             return Status::OK();
         if (coll == "system.profile")
@@ -238,18 +244,36 @@ Status userAllowedCreateNS(StringData db, StringData coll) {
                 return Status::OK();
             if (coll == "system.backup_users")
                 return Status::OK();
+            if (coll == "system.keys")
+                return Status::OK();
+        }
+        if (db == "config") {
+            if (coll == "system.sessions")
+                return Status::OK();
         }
         if (db == "local") {
             if (coll == "system.replset")
                 return Status::OK();
+            if (coll == "system.healthlog")
+                return Status::OK();
         }
-        return Status(ErrorCodes::BadValue,
+        return Status(ErrorCodes::InvalidNamespace,
                       str::stream() << "cannot write to '" << db << "." << coll << "'");
     }
 
     // some special rules
 
     if (coll.find(".system.") != string::npos) {
+        // Writes are permitted to the persisted chunk metadata collections. These collections are
+        // named based on the name of the sharded collection, e.g.
+        // 'config.cache.chunks.dbname.collname'. Since there is a sharded collection
+        // 'config.system.sessions', there will be a corresponding persisted chunk metadata
+        // collection 'config.cache.chunks.config.system.sessions'. We wish to allow writes to this
+        // collection.
+        if (coll.find(".system.sessions") != string::npos) {
+            return Status::OK();
+        }
+
         // this matches old (2.4 and older) behavior, but I'm not sure its a good idea
         return Status(ErrorCodes::BadValue,
                       str::stream() << "cannot write to '" << db << "." << coll << "'");

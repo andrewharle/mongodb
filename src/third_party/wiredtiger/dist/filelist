@@ -53,6 +53,7 @@ src/checksum/power8/crc32.sx		POWERPC_HOST
 src/checksum/power8/crc32_wrapper.c	POWERPC_HOST
 src/checksum/software/checksum.c
 src/checksum/x86/crc32-x86.c		X86_HOST
+src/checksum/x86/crc32-x86-alt.c	X86_HOST
 src/checksum/zseries/crc32-s390x.c	ZSERIES_HOST
 src/checksum/zseries/crc32le-vx.sx	ZSERIES_HOST
 src/config/config.c
@@ -62,16 +63,19 @@ src/config/config_collapse.c
 src/config/config_def.c
 src/config/config_ext.c
 src/config/config_upgrade.c
+src/conn/api_calc_modify.c
 src/conn/api_strerror.c
 src/conn/api_version.c
 src/conn/conn_api.c
 src/conn/conn_cache.c
 src/conn/conn_cache_pool.c
+src/conn/conn_capacity.c
 src/conn/conn_ckpt.c
 src/conn/conn_dhandle.c
 src/conn/conn_handle.c
 src/conn/conn_log.c
 src/conn/conn_open.c
+src/conn/conn_reconfig.c
 src/conn/conn_stat.c
 src/conn/conn_sweep.c
 src/cursor/cur_backup.c
@@ -95,6 +99,7 @@ src/evict/evict_stat.c
 src/log/log.c
 src/log/log_auto.c
 src/log/log_slot.c
+src/log/log_sys.c
 src/lsm/lsm_cursor.c
 src/lsm/lsm_cursor_bulk.c
 src/lsm/lsm_manager.c
@@ -110,6 +115,7 @@ src/meta/meta_ext.c
 src/meta/meta_table.c
 src/meta/meta_track.c
 src/meta/meta_turtle.c
+src/optrack/optrack.c
 src/os_common/filename.c
 src/os_common/os_abort.c
 src/os_common/os_alloc.c
@@ -158,7 +164,12 @@ src/os_win/os_yield.c			WINDOWS_HOST
 src/packing/pack_api.c
 src/packing/pack_impl.c
 src/packing/pack_stream.c
+src/reconcile/rec_child.c
+src/reconcile/rec_col.c
+src/reconcile/rec_dictionary.c
+src/reconcile/rec_row.c
 src/reconcile/rec_track.c
+src/reconcile/rec_visibility.c
 src/reconcile/rec_write.c
 src/schema/schema_alter.c
 src/schema/schema_create.c
@@ -179,12 +190,14 @@ src/session/session_salvage.c
 src/support/cond_auto.c
 src/support/crypto.c
 src/support/err.c
+src/support/generation.c
 src/support/global.c
 src/support/hash_city.c
 src/support/hash_fnv.c
 src/support/hazard.c
 src/support/hex.c
 src/support/huffman.c
+src/support/modify.c
 src/support/mtx_rw.c
 src/support/pow.c
 src/support/rand.c
@@ -198,3 +211,5 @@ src/txn/txn_ext.c
 src/txn/txn_log.c
 src/txn/txn_nsnap.c
 src/txn/txn_recover.c
+src/txn/txn_rollback_to_stable.c
+src/txn/txn_timestamp.c

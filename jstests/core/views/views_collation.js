@@ -1,7 +1,7 @@
+// @tags: [does_not_support_stepdowns, requires_non_retryable_commands, requires_fastcount]
+
 /**
  * Tests the behavior of operations when interacting with a view's default collation.
- *
- * @tags: [requires_collmod_command]
  */
 (function() {
     "use strict";
@@ -21,15 +21,15 @@
     assert(!listCollectionsOutput.cursor.firstBatch[0].options.hasOwnProperty("collation"));
 
     // Operations that do not specify a collation succeed.
-    assert.commandWorked(viewsDB.runCommand({aggregate: "simpleView", pipeline: []}));
+    assert.commandWorked(viewsDB.runCommand({aggregate: "simpleView", pipeline: [], cursor: {}}));
     assert.commandWorked(viewsDB.runCommand({find: "simpleView"}));
     assert.commandWorked(viewsDB.runCommand({count: "simpleView"}));
     assert.commandWorked(viewsDB.runCommand({distinct: "simpleView", key: "x"}));
 
     // Operations that explicitly ask for the "simple" locale succeed against a view with the
     // simple collation.
-    assert.commandWorked(
-        viewsDB.runCommand({aggregate: "simpleView", pipeline: [], collation: {locale: "simple"}}));
+    assert.commandWorked(viewsDB.runCommand(
+        {aggregate: "simpleView", pipeline: [], cursor: {}, collation: {locale: "simple"}}));
     assert.commandWorked(viewsDB.runCommand({find: "simpleView", collation: {locale: "simple"}}));
     assert.commandWorked(viewsDB.runCommand({count: "simpleView", collation: {locale: "simple"}}));
     assert.commandWorked(
@@ -37,7 +37,8 @@
 
     // Attempting to override a view's simple collation fails.
     assert.commandFailedWithCode(
-        viewsDB.runCommand({aggregate: "simpleView", pipeline: [], collation: {locale: "en"}}),
+        viewsDB.runCommand(
+            {aggregate: "simpleView", pipeline: [], cursor: {}, collation: {locale: "en"}}),
         ErrorCodes.OptionNotSupportedOnView);
     assert.commandFailedWithCode(
         viewsDB.runCommand({find: "simpleView", collation: {locale: "fr"}}),
@@ -57,7 +58,7 @@
     assert.eq(listCollectionsOutput.cursor.firstBatch[0].options.collation.locale, "fil");
 
     // Operations that do not specify a collation succeed.
-    assert.commandWorked(viewsDB.runCommand({aggregate: "filView", pipeline: []}));
+    assert.commandWorked(viewsDB.runCommand({aggregate: "filView", pipeline: [], cursor: {}}));
     assert.commandWorked(viewsDB.runCommand({find: "filView"}));
     assert.commandWorked(viewsDB.runCommand({count: "filView"}));
     assert.commandWorked(viewsDB.runCommand({distinct: "filView", key: "x"}));
@@ -72,8 +73,8 @@
         {explain: {distinct: "filView", key: "x"}, verbosity: "allPlansExecution"}));
 
     // Operations with a matching collation succeed.
-    assert.commandWorked(
-        viewsDB.runCommand({aggregate: "filView", pipeline: [], collation: {locale: "fil"}}));
+    assert.commandWorked(viewsDB.runCommand(
+        {aggregate: "filView", pipeline: [], cursor: {}, collation: {locale: "fil"}}));
     assert.commandWorked(viewsDB.runCommand({find: "filView", collation: {locale: "fil"}}));
     assert.commandWorked(viewsDB.runCommand({count: "filView", collation: {locale: "fil"}}));
     assert.commandWorked(
@@ -93,10 +94,12 @@
 
     // Attempting to override the non-simple default collation of a view fails.
     assert.commandFailedWithCode(
-        viewsDB.runCommand({aggregate: "filView", pipeline: [], collation: {locale: "en"}}),
+        viewsDB.runCommand(
+            {aggregate: "filView", pipeline: [], cursor: {}, collation: {locale: "en"}}),
         ErrorCodes.OptionNotSupportedOnView);
     assert.commandFailedWithCode(
-        viewsDB.runCommand({aggregate: "filView", pipeline: [], collation: {locale: "simple"}}),
+        viewsDB.runCommand(
+            {aggregate: "filView", pipeline: [], cursor: {}, collation: {locale: "simple"}}),
         ErrorCodes.OptionNotSupportedOnView);
     assert.commandFailedWithCode(viewsDB.runCommand({find: "filView", collation: {locale: "fr"}}),
                                  ErrorCodes.OptionNotSupportedOnView);
@@ -158,6 +161,16 @@
     const lookupSimpleView = {
         $lookup: {from: "simpleView", localField: "x", foreignField: "x", as: "result"}
     };
+    const nestedLookupSimpleView = {
+        $lookup: {
+            from: "simpleCollection",
+            pipeline: [{
+                $lookup:
+                    {from: "simpleView", localField: "x", foreignField: "x", as: "inner_result"}
+            }],
+            as: "result"
+        }
+    };
     const graphLookupSimpleView = {
         $graphLookup: {
             from: "simpleView",
@@ -170,18 +183,31 @@
 
     // You can lookup into a view with the simple collation if the collection also has the same
     // default collation.
-    assert.commandWorked(
-        viewsDB.runCommand({aggregate: "simpleCollection", pipeline: [lookupSimpleView]}));
-    assert.commandWorked(
-        viewsDB.runCommand({aggregate: "simpleCollection", pipeline: [graphLookupSimpleView]}));
+    assert.commandWorked(viewsDB.runCommand(
+        {aggregate: "simpleCollection", pipeline: [lookupSimpleView], cursor: {}}));
+    assert.commandWorked(viewsDB.runCommand(
+        {aggregate: "simpleCollection", pipeline: [nestedLookupSimpleView], cursor: {}}));
+    assert.commandWorked(viewsDB.runCommand(
+        {aggregate: "simpleCollection", pipeline: [graphLookupSimpleView], cursor: {}}));
 
     // You can lookup into a view with the simple collation if the operation has a matching
     // collation.
-    assert.commandWorked(viewsDB.runCommand(
-        {aggregate: "ukCollection", pipeline: [lookupSimpleView], collation: {locale: "simple"}}));
+    assert.commandWorked(viewsDB.runCommand({
+        aggregate: "ukCollection",
+        pipeline: [lookupSimpleView],
+        cursor: {},
+        collation: {locale: "simple"}
+    }));
+    assert.commandWorked(viewsDB.runCommand({
+        aggregate: "ukCollection",
+        pipeline: [nestedLookupSimpleView],
+        cursor: {},
+        collation: {locale: "simple"}
+    }));
     assert.commandWorked(viewsDB.runCommand({
         aggregate: "ukCollection",
         pipeline: [graphLookupSimpleView],
+        cursor: {},
         collation: {locale: "simple"}
     }));
 
@@ -190,12 +216,21 @@
     assert.commandFailedWithCode(viewsDB.runCommand({
         aggregate: "simpleCollection",
         pipeline: [lookupSimpleView],
+        cursor: {},
+        collation: {locale: "en"}
+    }),
+                                 ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(viewsDB.runCommand({
+        aggregate: "simpleCollection",
+        pipeline: [nestedLookupSimpleView],
+        cursor: {},
         collation: {locale: "en"}
     }),
                                  ErrorCodes.OptionNotSupportedOnView);
     assert.commandFailedWithCode(viewsDB.runCommand({
         aggregate: "simpleCollection",
         pipeline: [graphLookupSimpleView],
+        cursor: {},
         collation: {locale: "zh"}
     }),
                                  ErrorCodes.OptionNotSupportedOnView);
@@ -203,6 +238,18 @@
     const lookupFilView = {
         $lookup: {from: "filView", localField: "x", foreignField: "x", as: "result"}
     };
+    function makeNestedLookupFilView(sourceCollName) {
+        return {
+            $lookup: {
+                from: sourceCollName,
+                pipeline: [{
+                    $lookup:
+                        {from: "filView", localField: "x", foreignField: "x", as: "inner_result"}
+                }],
+                as: "result"
+            }
+        };
+    }
     const graphLookupFilView = {
         $graphLookup: {
             from: "filView",
@@ -216,35 +263,72 @@
     // You can lookup into a view with no operation collation specified if the collection's
     // collation matches the collation of the view.
     assert.commandWorked(
-        viewsDB.runCommand({aggregate: "filCollection", pipeline: [lookupFilView]}));
-    assert.commandWorked(
-        viewsDB.runCommand({aggregate: "filCollection", pipeline: [graphLookupFilView]}));
+        viewsDB.runCommand({aggregate: "filCollection", pipeline: [lookupFilView], cursor: {}}));
+    assert.commandWorked(viewsDB.runCommand({
+        aggregate: "filCollection",
+        pipeline: [makeNestedLookupFilView("filCollection")],
+        cursor: {}
+    }));
+    assert.commandWorked(viewsDB.runCommand(
+        {aggregate: "filCollection", pipeline: [graphLookupFilView], cursor: {}}));
 
     // You can lookup into a view with a non-simple collation if the operation's collation
     // matches.
-    assert.commandWorked(viewsDB.runCommand(
-        {aggregate: "ukCollection", pipeline: [lookupFilView], collation: {locale: "fil"}}));
-    assert.commandWorked(viewsDB.runCommand(
-        {aggregate: "ukCollection", pipeline: [graphLookupFilView], collation: {locale: "fil"}}));
+    assert.commandWorked(viewsDB.runCommand({
+        aggregate: "ukCollection",
+        pipeline: [lookupFilView],
+        cursor: {},
+        collation: {locale: "fil"}
+    }));
+    assert.commandWorked(viewsDB.runCommand({
+        aggregate: "ukCollection",
+        pipeline: [makeNestedLookupFilView("ukCollection")],
+        cursor: {},
+        collation: {locale: "fil"}
+    }));
+    assert.commandWorked(viewsDB.runCommand({
+        aggregate: "ukCollection",
+        pipeline: [graphLookupFilView],
+        cursor: {},
+        collation: {locale: "fil"}
+    }));
 
     // You can't lookup into a view when aggregating a collection whose default collation does
     // not match the view's default collation.
     assert.commandFailedWithCode(
-        viewsDB.runCommand({aggregate: "simpleCollection", pipeline: [lookupFilView]}),
+        viewsDB.runCommand({aggregate: "simpleCollection", cursor: {}, pipeline: [lookupFilView]}),
         ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(viewsDB.runCommand({
+        aggregate: "simpleCollection",
+        cursor: {},
+        pipeline: [makeNestedLookupFilView("simpleCollation")]
+    }),
+                                 ErrorCodes.OptionNotSupportedOnView);
     assert.commandFailedWithCode(
-        viewsDB.runCommand({aggregate: "simpleCollection", pipeline: [graphLookupFilView]}),
+        viewsDB.runCommand(
+            {aggregate: "simpleCollection", cursor: {}, pipeline: [graphLookupFilView]}),
         ErrorCodes.OptionNotSupportedOnView);
 
     // You can't lookup into a view when aggregating a collection and the operation's collation
     // does not match the view's default collation.
-    assert.commandFailedWithCode(
-        viewsDB.runCommand(
-            {aggregate: "filCollection", pipeline: [lookupFilView], collation: {locale: "zh"}}),
-        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(viewsDB.runCommand({
+        aggregate: "filCollection",
+        pipeline: [lookupFilView],
+        cursor: {},
+        collation: {locale: "zh"}
+    }),
+                                 ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(viewsDB.runCommand({
+        aggregate: "filCollection",
+        pipeline: [makeNestedLookupFilView("filCollection")],
+        cursor: {},
+        collation: {locale: "zh"}
+    }),
+                                 ErrorCodes.OptionNotSupportedOnView);
     assert.commandFailedWithCode(viewsDB.runCommand({
         aggregate: "filCollection",
         pipeline: [graphLookupFilView],
+        cursor: {},
         collation: {locale: "zh"}
     }),
                                  ErrorCodes.OptionNotSupportedOnView);
@@ -254,9 +338,9 @@
     assert.commandWorked(viewsDB.runCommand(
         {create: "simpleView2", viewOn: "simpleCollection", collation: {locale: "simple"}}));
     assert.commandWorked(
-        viewsDB.runCommand({aggregate: "simpleView2", pipeline: [lookupSimpleView]}));
-    assert.commandWorked(
-        viewsDB.runCommand({aggregate: "simpleView2", pipeline: [graphLookupSimpleView]}));
+        viewsDB.runCommand({aggregate: "simpleView2", pipeline: [lookupSimpleView], cursor: {}}));
+    assert.commandWorked(viewsDB.runCommand(
+        {aggregate: "simpleView2", pipeline: [graphLookupSimpleView], cursor: {}}));
 
     // You may perform an aggregation involving multiple views and collections if all the views
     // have the same default collation.
@@ -269,21 +353,26 @@
             as: "matched"
         }
     };
-    assert.commandWorked(viewsDB.runCommand(
-        {aggregate: "simpleView2", pipeline: [lookupSimpleView, graphLookupUkCollection]}));
+    assert.commandWorked(viewsDB.runCommand({
+        aggregate: "simpleView2",
+        pipeline: [lookupSimpleView, graphLookupUkCollection],
+        cursor: {}
+    }));
 
     // You cannot perform an aggregation involving multiple views if the views don't all have
     // the same default collation.
     assert.commandFailedWithCode(
-        viewsDB.runCommand({aggregate: "filView", pipeline: [lookupSimpleView]}),
+        viewsDB.runCommand({aggregate: "filView", pipeline: [lookupSimpleView], cursor: {}}),
         ErrorCodes.OptionNotSupportedOnView);
     assert.commandFailedWithCode(
-        viewsDB.runCommand({aggregate: "simpleView", pipeline: [lookupFilView]}),
+        viewsDB.runCommand({aggregate: "simpleView", pipeline: [lookupFilView], cursor: {}}),
         ErrorCodes.OptionNotSupportedOnView);
-    assert.commandFailedWithCode(
-        viewsDB.runCommand(
-            {aggregate: "simpleCollection", pipeline: [lookupFilView, graphLookupSimpleView]}),
-        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(viewsDB.runCommand({
+        aggregate: "simpleCollection",
+        pipeline: [lookupFilView, graphLookupSimpleView],
+        cursor: {}
+    }),
+                                 ErrorCodes.OptionNotSupportedOnView);
 
     // You cannot create a view that depends on another view with a different default collation.
     assert.commandFailedWithCode(
@@ -293,6 +382,13 @@
         create: "zhView",
         viewOn: "simpleCollection",
         pipeline: [lookupFilView],
+        collation: {locale: "zh"}
+    }),
+                                 ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(viewsDB.runCommand({
+        create: "zhView",
+        viewOn: "simpleCollection",
+        pipeline: [makeNestedLookupFilView("zhView")],
         collation: {locale: "zh"}
     }),
                                  ErrorCodes.OptionNotSupportedOnView);
@@ -318,6 +414,68 @@
         viewsDB.runCommand(
             {collMod: "esView", viewOn: "simpleCollection", pipeline: [graphLookupFilView]}),
         ErrorCodes.OptionNotSupportedOnView);
+
+    // Views cannot be dropped and recreated with a different collation if other views depend on
+    // that view.
+    assert.commandWorked(
+        viewsDB.runCommand({create: "filView2", viewOn: "filView", collation: {locale: "fil"}}));
+    assert.commandWorked(viewsDB.runCommand({drop: "filView"}));
+    assert.commandFailedWithCode(
+        viewsDB.runCommand({create: "filView", viewOn: "simpleCollection"}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(
+        viewsDB.runCommand(
+            {create: "filView", viewOn: "simpleCollection", collation: {locale: "en"}}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandWorked(
+        viewsDB.createView("filView", "ukCollection", [], {collation: {locale: "fil"}}));
+
+    // Views cannot be dropped and recreated with a different collation if other views depend on
+    // that view via $lookup or $graphLookup.
+    assert.commandWorked(viewsDB.runCommand(
+        {collMod: "filView2", viewOn: "simpleCollection", pipeline: [lookupFilView]}));
+    assert.commandWorked(viewsDB.runCommand({drop: "filView"}));
+    assert.commandFailedWithCode(
+        viewsDB.runCommand({create: "filView", viewOn: "simpleCollection"}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(
+        viewsDB.runCommand(
+            {create: "filView", viewOn: "simpleCollection", collation: {locale: "en"}}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandWorked(viewsDB.runCommand(
+        {create: "filView", viewOn: "ukCollection", pipeline: [], collation: {locale: "fil"}}));
+
+    assert.commandWorked(viewsDB.runCommand(
+        {collMod: "filView2", viewOn: "simpleCollection", pipeline: [graphLookupFilView]}));
+    assert.commandWorked(viewsDB.runCommand({drop: "filView"}));
+    assert.commandFailedWithCode(
+        viewsDB.runCommand({create: "filView", viewOn: "simpleCollection"}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(
+        viewsDB.runCommand(
+            {create: "filView", viewOn: "simpleCollection", collation: {locale: "en"}}),
+        ErrorCodes.OptionNotSupportedOnView);
+
+    // If two views "A" and "C" have different collations and depend on the namespace "B", then "B"
+    // cannot be created as a view.
+    assert.commandWorked(
+        viewsDB.runCommand({create: "A", viewOn: "B", collation: {locale: "hsb"}}));
+    assert.commandWorked(
+        viewsDB.runCommand({create: "B", viewOn: "other", collation: {locale: "hsb"}}));
+    assert.commandFailedWithCode(
+        viewsDB.runCommand({create: "C", viewOn: "B", collation: {locale: "wae"}}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandWorked(viewsDB.runCommand({drop: "B"}));
+    assert.commandWorked(
+        viewsDB.runCommand({create: "C", viewOn: "B", collation: {locale: "wae"}}));
+    assert.commandFailedWithCode(
+        viewsDB.runCommand({create: "B", viewOn: "other", collation: {locale: "hsb"}}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(
+        viewsDB.runCommand({create: "B", viewOn: "other", collation: {locale: "wae"}}),
+        ErrorCodes.OptionNotSupportedOnView);
+    assert.commandFailedWithCode(viewsDB.runCommand({create: "B", viewOn: "other"}),
+                                 ErrorCodes.OptionNotSupportedOnView);
 
     // Make sure that when an operation does not specify the collation, it correctly uses the
     // default collation associated with the view. For this, we set up a new backing collection with

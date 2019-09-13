@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2011 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -32,6 +34,7 @@
 
 #include "mongo/db/matcher/expression_algo.h"
 #include "mongo/db/pipeline/document_source_match.h"
+#include "mongo/db/pipeline/document_source_sequential_document_cache.h"
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/value.h"
@@ -41,6 +44,7 @@ namespace mongo {
 
 using Parser = DocumentSource::Parser;
 using boost::intrusive_ptr;
+using std::list;
 using std::string;
 using std::vector;
 
@@ -60,7 +64,7 @@ void DocumentSource::registerParser(string name, Parser parser) {
     parserMap[name] = parser;
 }
 
-vector<intrusive_ptr<DocumentSource>> DocumentSource::parse(
+list<intrusive_ptr<DocumentSource>> DocumentSource::parse(
     const intrusive_ptr<ExpressionContext>& expCtx, BSONObj stageObj) {
     uassert(16435,
             "A pipeline stage specification object must contain exactly one field.",
@@ -81,11 +85,6 @@ vector<intrusive_ptr<DocumentSource>> DocumentSource::parse(
 const char* DocumentSource::getSourceName() const {
     static const char unknown[] = "[UNKNOWN]";
     return unknown;
-}
-
-void DocumentSource::setSource(DocumentSource* pTheSource) {
-    verify(!isValidInitialSource());
-    pSource = pTheSource;
 }
 
 intrusive_ptr<DocumentSource> DocumentSource::optimize() {
@@ -152,19 +151,32 @@ splitMatchByModifiedFields(const boost::intrusive_ptr<DocumentSourceMatch>& matc
         case DocumentSource::GetModPathsReturn::Type::kAllExcept: {
             DepsTracker depsTracker;
             match->getDependencies(&depsTracker);
-            modifiedPaths = extractModifiedDependencies(depsTracker.fields, modifiedPathsRet.paths);
+
+            auto preservedPaths = modifiedPathsRet.paths;
+            for (auto&& rename : modifiedPathsRet.renames) {
+                preservedPaths.insert(rename.first);
+            }
+            modifiedPaths = extractModifiedDependencies(depsTracker.fields, preservedPaths);
         }
     }
-    return match->splitSourceBy(modifiedPaths);
+    return match->splitSourceBy(modifiedPaths, modifiedPathsRet.renames);
 }
 
 }  // namespace
 
 Pipeline::SourceContainer::iterator DocumentSource::optimizeAt(
     Pipeline::SourceContainer::iterator itr, Pipeline::SourceContainer* container) {
-    invariant(*itr == this && (std::next(itr) != container->end()));
+    invariant(*itr == this);
+
+    // If we are at the end of the pipeline, only optimize in the special case of a cache stage.
+    if (std::next(itr) == container->end()) {
+        return dynamic_cast<DocumentSourceSequentialDocumentCache*>(this)
+            ? doOptimizeAt(itr, container)
+            : container->end();
+    }
+
     auto nextMatch = dynamic_cast<DocumentSourceMatch*>((*std::next(itr)).get());
-    if (canSwapWithMatch() && nextMatch && !nextMatch->isTextQuery()) {
+    if (constraints().canSwapWithMatch && nextMatch && !nextMatch->isTextQuery()) {
         // We're allowed to swap with a $match and the stage after us is a $match. Furthermore, the
         // $match does not contain a text search predicate, which we do not attempt to optimize
         // because such a $match must already be the first stage in the pipeline. We can attempt to
@@ -192,13 +204,8 @@ Pipeline::SourceContainer::iterator DocumentSource::optimizeAt(
     return doOptimizeAt(itr, container);
 }
 
-void DocumentSource::dispose() {
-    if (pSource) {
-        pSource->dispose();
-    }
-}
-
-void DocumentSource::serializeToArray(vector<Value>& array, bool explain) const {
+void DocumentSource::serializeToArray(vector<Value>& array,
+                                      boost::optional<ExplainOptions::Verbosity> explain) const {
     Value entry = serialize(explain);
     if (!entry.missing()) {
         array.push_back(entry);

@@ -28,6 +28,18 @@ execute 'extract artifacts' do
 end
 
 if platform_family? 'debian'
+
+  # SERVER-40491 Debian 8 sources.list need to point to archive url
+  if node['platform_version'] == '8.1'
+    cookbook_file '/etc/apt/sources.list' do
+      source 'sources.list.debian8'
+      owner 'root'
+      group 'root'
+      mode '0644'
+      action :create
+    end
+  end
+
   execute 'apt-get update' do
     command 'apt-get update'
   end
@@ -42,11 +54,24 @@ if platform_family? 'debian'
     returns [0, 1]
   end
 
+  # install the tools so we can test install_compass
+  execute 'install mongo tools' do
+    command 'dpkg -i `find . -name "*tools*.deb"`'
+    cwd homedir
+    returns [0, 1]
+  end
+
   # yum and zypper fetch dependencies automatically, but dpkg does not.
   # Installing the dependencies explicitly is fragile, so we reply on apt-get
   # to install dependencies after the fact.
   execute 'install dependencies' do
     command 'apt-get update && apt-get -y -f install'
+  end
+
+  # the ubuntu 16.04 image does not have python installed by default
+  # and it is required for the install_compass script
+  execute 'install python' do
+    command 'apt-get install -y python'
   end
 
   execute 'install mongo shell' do
@@ -58,6 +83,12 @@ end
 if platform_family? 'rhel'
   execute 'install mongod' do
     command 'yum install -y `find . -name "*server*.rpm"`'
+    cwd homedir
+  end
+
+  # install the tools so we can test install_compass
+  execute 'install mongo tools' do
+    command 'yum install -y `find . -name "*tools*.rpm"`'
     cwd homedir
   end
 

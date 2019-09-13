@@ -1,32 +1,34 @@
 // dbmessage.h
 
+
 /**
-*    Copyright (C) 2008 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -35,9 +37,7 @@
 #include "mongo/client/constants.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/server_options.h"
-#include "mongo/transport/session.h"
-#include "mongo/util/net/abstract_message_port.h"
-#include "mongo/util/net/message.h"
+#include "mongo/rpc/message.h"
 
 namespace mongo {
 
@@ -222,9 +222,8 @@ public:
     DbMessage(const Message& msg);
 
     // Indicates whether this message is expected to have a ns
-    // or in the case of dbMsg, a string in the same place as ns
     bool messageShouldHaveNs() const {
-        return (_msg.operation() >= dbMsg) & (_msg.operation() <= dbDelete);
+        return (_msg.operation() >= dbUpdate) & (_msg.operation() <= dbDelete);
     }
 
     /** the 32 bit field before the ns
@@ -289,6 +288,70 @@ private:
     unsigned int _nsLen;
 };
 
+/** the query field 'options' can have these bits set: */
+enum QueryOptions {
+    /** Tailable means cursor is not closed when the last data is retrieved.  rather, the cursor
+     * marks the final object's position.  you can resume using the cursor later, from where it was
+       located, if more data were received.  Set on dbQuery and dbGetMore.
+
+       like any "latent cursor", the cursor may become invalid at some point -- for example if that
+       final object it references were deleted.  Thus, you should be prepared to requery if you get
+       back ResultFlag_CursorNotFound.
+    */
+    QueryOption_CursorTailable = 1 << 1,
+
+    /** allow query of replica slave.  normally these return an error except for namespace "local".
+    */
+    QueryOption_SlaveOk = 1 << 2,
+
+    // findingStart mode is used to find the first operation of interest when
+    // we are scanning through a repl log.  For efficiency in the common case,
+    // where the first operation of interest is closer to the tail than the head,
+    // we start from the tail of the log and work backwards until we find the
+    // first operation of interest.  Then we scan forward from that first operation,
+    // actually returning results to the client.  During the findingStart phase,
+    // we release the db mutex occasionally to avoid blocking the db process for
+    // an extended period of time.
+    QueryOption_OplogReplay = 1 << 3,
+
+    /** The server normally times out idle cursors after an inactivity period to prevent excess
+     * memory uses
+        Set this option to prevent that.
+    */
+    QueryOption_NoCursorTimeout = 1 << 4,
+
+    /** Use with QueryOption_CursorTailable.  If we are at the end of the data, block for a while
+     * rather than returning no data. After a timeout period, we do return as normal.
+    */
+    QueryOption_AwaitData = 1 << 5,
+
+    /** Stream the data down full blast in multiple "more" packages, on the assumption that the
+     * client will fully read all data queried.  Faster when you are pulling a lot of data and know
+     * you want to pull it all down.  Note: it is not allowed to not read all the data unless you
+     * close the connection.
+
+        Use the query( stdx::function<void(const BSONObj&)> f, ... ) version of the connection's
+        query()
+        method, and it will take care of all the details for you.
+    */
+    QueryOption_Exhaust = 1 << 6,
+
+    /** When sharded, this means its ok to return partial results
+        Usually we will fail a query if all required shards aren't up
+        If this is set, it'll be a partial result set
+     */
+    QueryOption_PartialResults = 1 << 7,
+
+    // DBClientCursor reserves flag 1 << 30 to force the use of OP_QUERY.
+
+    QueryOption_AllSupported = QueryOption_CursorTailable | QueryOption_SlaveOk |
+        QueryOption_OplogReplay | QueryOption_NoCursorTimeout | QueryOption_AwaitData |
+        QueryOption_Exhaust | QueryOption_PartialResults,
+
+    QueryOption_AllSupportedForSharding = QueryOption_CursorTailable | QueryOption_SlaveOk |
+        QueryOption_OplogReplay | QueryOption_NoCursorTimeout | QueryOption_AwaitData |
+        QueryOption_PartialResults,
+};
 
 /* a request to run a query, received from the database */
 class QueryMessage {
@@ -304,7 +367,7 @@ public:
      * parses the message into the above fields
      * Warning: constructor mutates DbMessage.
      */
-    QueryMessage(DbMessage& d) {
+    explicit QueryMessage(DbMessage& d) {
         ns = d.getns();
         ntoskip = d.pullInt();
         ntoreturn = d.pullInt();
@@ -314,17 +377,77 @@ public:
         }
         queryOptions = DataView(d.msg().header().data()).read<LittleEndian<int32_t>>();
     }
+
+    /**
+     * A non-muting constructor from the whole message.
+     */
+    explicit QueryMessage(const Message& message) {
+        DbMessage dbm(message);
+        *this = QueryMessage(dbm);
+    }
+};
+
+enum InsertOptions {
+    /** With muli-insert keep processing inserts if one fails */
+    InsertOption_ContinueOnError = 1 << 0
 };
 
 /**
+ * Builds a legacy OP_INSERT message.
+ */
+Message makeInsertMessage(StringData ns, const BSONObj* objs, size_t count, int flags = 0);
+inline Message makeInsertMessage(StringData ns, const BSONObj& obj, int flags = 0) {
+    return makeInsertMessage(ns, &obj, 1, flags);
+}
+
+enum UpdateOptions {
+    /** Upsert - that is, insert the item if no matching item is found. */
+    UpdateOption_Upsert = 1 << 0,
+
+    /** Update multiple documents (if multiple documents match query expression).
+       (Default is update a single document and stop.) */
+    UpdateOption_Multi = 1 << 1,
+
+    /** flag from mongo saying this update went everywhere */
+    UpdateOption_Broadcast = 1 << 2
+};
+
+/**
+ * Builds a legacy OP_UPDATE message.
+ */
+Message makeUpdateMessage(StringData ns, BSONObj query, BSONObj update, int flags = 0);
+
+enum RemoveOptions {
+    /** only delete one option */
+    RemoveOption_JustOne = 1 << 0,
+
+    /** flag from mongo saying this update went everywhere */
+    RemoveOption_Broadcast = 1 << 1
+};
+
+/**
+ * Builds a legacy OP_REMOVE message.
+ */
+Message makeRemoveMessage(StringData ns, BSONObj query, int flags = 0);
+
+/**
+ * Builds a legacy OP_KILLCURSORS message.
+ */
+Message makeKillCursorsMessage(long long cursorId);
+
+/**
+ * Builds a legacy OP_GETMORE message.
+ */
+Message makeGetMoreMessage(StringData ns, long long cursorId, int nToReturn, int flags = 0);
+
+/**
  * A response to a DbMessage.
+ *
+ * Order of fields makes DbResponse{funcReturningMessage()} valid.
  */
 struct DbResponse {
-    Message response;
-    int32_t responseToMsgId;
-    std::string exhaustNS; /* points to ns if exhaust mode. 0=normal mode*/
-    DbResponse(Message r, int32_t rtId) : response(std::move(r)), responseToMsgId(rtId) {}
-    DbResponse() = default;
+    Message response;       // If empty, nothing will be returned to the client.
+    std::string exhaustNS;  // Namespace of cursor if exhaust mode, else "".
 };
 
 /**
@@ -349,58 +472,39 @@ public:
     }
 
     /**
-     * Finishes the reply and transfers the message buffer into 'out'.
+     * Finishes the reply and returns the message buffer.
      */
-    void putInMessage(Message* out,
-                      int queryResultFlags,
-                      int nReturned,
-                      int startingFrom = 0,
-                      long long cursorId = 0);
+    Message toQueryReply(int queryResultFlags,
+                         int nReturned,
+                         int startingFrom = 0,
+                         long long cursorId = 0);
 
     /**
-     * Finishes the reply and sends the message out to 'destination'.
+     * Similar to toQueryReply() but used for replying to a command.
      */
-    void send(const transport::SessionHandle& session,
-              int queryResultFlags,
-              const Message& requestMsg,
-              int nReturned,
-              int startingFrom = 0,
-              long long cursorId = 0);
-
-    /**
-     * Similar to send() but used for replying to a command.
-     */
-    void sendCommandReply(const transport::SessionHandle& session, const Message& requestMsg);
+    Message toCommandReply() {
+        return toQueryReply(0, 1);
+    }
 
 private:
     BufBuilder _buffer;
 };
 
-void replyToQuery(int queryResultFlags,
-                  const transport::SessionHandle& session,
-                  const Message& requestMsg,
-                  const void* data,
-                  int size,
-                  int nReturned,
-                  int startingFrom = 0,
-                  long long cursorId = 0);
+/**
+ * Helper to build a DbResponse from a buffer containing an OP_QUERY response.
+ */
+DbResponse replyToQuery(int queryResultFlags,
+                        const void* data,
+                        int size,
+                        int nReturned,
+                        int startingFrom = 0,
+                        long long cursorId = 0);
 
-/* object reply helper. */
-void replyToQuery(int queryResultFlags,
-                  const transport::SessionHandle& session,
-                  const Message& requestMsg,
-                  const BSONObj& responseObj);
-
-/* helper to do a reply using a DbResponse object */
-void replyToQuery(int queryResultFlags, const Message& m, DbResponse& dbresponse, BSONObj obj);
 
 /**
- * Helper method for setting up a response object.
- *
- * @param queryResultFlags The flags to set to the response object.
- * @param response The object to be used for building the response. The internal buffer of
- *     this object will contain the raw data from resultObj after a successful call.
- * @param resultObj The bson object that contains the reply data.
+ * Helper to build a DbRespose for OP_QUERY with a single reply object.
  */
-void replyToQuery(int queryResultFlags, Message& response, const BSONObj& resultObj);
+inline DbResponse replyToQuery(const BSONObj& obj, int queryResultFlags = 0) {
+    return replyToQuery(queryResultFlags, obj.objdata(), obj.objsize(), /*nReturned*/ 1);
+}
 }  // namespace mongo

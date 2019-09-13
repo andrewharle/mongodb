@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2017 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -34,13 +36,13 @@
 #include "mongo/bson/bson_validate.h"
 #include "mongo/bson/json.h"
 #include "mongo/client/connection_string.h"
-#include "mongo/executor/network_interface_asio_integration_fixture.h"
+#include "mongo/executor/network_interface_integration_fixture.h"
 #include "mongo/util/concurrency/thread_pool.h"
 
 namespace mongo {
 namespace executor {
 namespace {
-class NestingDepthFixture : public NetworkInterfaceASIOIntegrationFixture {
+class NestingDepthFixture : public NetworkInterfaceIntegrationFixture {
 public:
     void setUp() final {
         startNet();
@@ -207,6 +209,42 @@ void appendUpdateCommandWithNestedDocuments(BSONObjBuilder* builder,
     builder->doneFast();
 }
 
+/**
+ * Appends a command to 'builder' that replaces a document with nesting depth 'originalNestingDepth'
+ * with a document 'newNestingDepth' levels deep. For example,
+ *
+ *      BSONObjBuilder b;
+ *      appendUpdateCommandWithNestedDocuments(&b, 1, 2);
+ *
+ * appends an update to 'b' that replaces { a: 1 } with { a: { a: 1 } }.
+ */
+void appendUpdateReplaceCommandWithNestedDocuments(BSONObjBuilder* builder,
+                                                   size_t originalNestingDepth,
+                                                   size_t newNestingDepth) {
+    ASSERT_GT(newNestingDepth, originalNestingDepth);
+
+    auto originalFieldName = getRepeatedFieldName(originalNestingDepth);
+    builder->append("update", kCollectionName);
+    {
+        BSONArrayBuilder updates(builder->subarrayStart("updates"));
+        {
+            BSONObjBuilder updateDoc(updates.subobjStart());
+            {
+                BSONObjBuilder query(updateDoc.subobjStart("q"));
+                query.append(originalFieldName, 1);
+                query.doneFast();
+            }
+            {
+                BSONObjBuilder update(updateDoc.subobjStart("u"));
+                appendNestedObject(&update, newNestingDepth);
+                update.doneFast();
+            }
+            updateDoc.doneFast();
+        }
+    }
+    builder->doneFast();
+}
+
 TEST_F(NestingDepthFixture, CanUpdateDocumentIfItStaysWithinDepthLimit) {
     BSONObjBuilder insertCmd;
     appendInsertCommandWithNestedDocument(&insertCmd, 3);
@@ -237,6 +275,40 @@ TEST_F(NestingDepthFixture, CannotUpdateDocumentToExceedDepthLimit) {
 
     BSONObjBuilder updateCmd;
     appendUpdateCommandWithNestedDocuments(
+        &updateCmd, largeButValidDepth, BSONDepth::getMaxDepthForUserStorage() + 1);
+    assertWriteError(kCollectionName, updateCmd.obj(), ErrorCodes::Overflow);
+}
+
+TEST_F(NestingDepthFixture, CanReplaceDocumentIfItStaysWithinDepthLimit) {
+    BSONObjBuilder insertCmd;
+    appendInsertCommandWithNestedDocument(&insertCmd, 3);
+    assertCommandOK(kCollectionName, insertCmd.obj());
+
+    BSONObjBuilder updateCmd;
+    appendUpdateReplaceCommandWithNestedDocuments(&updateCmd, 3, 5);
+    assertCommandOK(kCollectionName, updateCmd.obj());
+}
+
+TEST_F(NestingDepthFixture, CanReplaceDocumentToBeExactlyAtDepthLimit) {
+    const auto largeButValidDepth = BSONDepth::getMaxDepthForUserStorage() - 2;
+    BSONObjBuilder insertCmd;
+    appendInsertCommandWithNestedDocument(&insertCmd, largeButValidDepth);
+    assertCommandOK(kCollectionName, insertCmd.obj());
+
+    BSONObjBuilder updateCmd;
+    appendUpdateReplaceCommandWithNestedDocuments(
+        &updateCmd, largeButValidDepth, BSONDepth::getMaxDepthForUserStorage());
+    assertCommandOK(kCollectionName, updateCmd.obj());
+}
+
+TEST_F(NestingDepthFixture, CannotReplaceDocumentToExceedDepthLimit) {
+    const auto largeButValidDepth = BSONDepth::getMaxDepthForUserStorage() - 3;
+    BSONObjBuilder insertCmd;
+    appendInsertCommandWithNestedDocument(&insertCmd, largeButValidDepth);
+    assertCommandOK(kCollectionName, insertCmd.obj());
+
+    BSONObjBuilder updateCmd;
+    appendUpdateReplaceCommandWithNestedDocuments(
         &updateCmd, largeButValidDepth, BSONDepth::getMaxDepthForUserStorage() + 1);
     assertWriteError(kCollectionName, updateCmd.obj(), ErrorCodes::Overflow);
 }
@@ -295,6 +367,45 @@ void appendUpdateCommandWithNestedArrays(BSONObjBuilder* builder,
     builder->doneFast();
 }
 
+/**
+ * Appends a command to 'builder' that replaces a document with an array nested
+ * 'originalNestingDepth' levels deep with a document with an array nested 'newNestingDepth' levels
+ * deep. For example,
+ *
+ *      BSONObjBuilder b;
+ *      appendUpdateCommandWithNestedDocuments(&b, 3, 4);
+ *
+ * appends an update to 'b' that replaces { a: [[1]] } with { a: [[[1]]] }.
+ */
+void appendUpdateReplaceCommandWithNestedArrays(BSONObjBuilder* builder,
+                                                size_t originalNestingDepth,
+                                                size_t newNestingDepth) {
+    ASSERT_GT(newNestingDepth, originalNestingDepth);
+
+    auto originalFieldName = getRepeatedArrayPath(originalNestingDepth);
+    builder->append("update", kCollectionName);
+    {
+        BSONArrayBuilder updates(builder->subarrayStart("updates"));
+        {
+            BSONObjBuilder updateDoc(updates.subobjStart());
+            {
+                BSONObjBuilder query(updateDoc.subobjStart("q"));
+                query.append(originalFieldName, 1);
+                query.doneFast();
+            }
+            {
+                BSONObjBuilder update(updateDoc.subobjStart("u"));
+                BSONArrayBuilder field(update.subobjStart(originalFieldName));
+                appendNestedArray(&field, newNestingDepth - 1);
+                field.doneFast();
+                update.doneFast();
+            }
+            updateDoc.doneFast();
+        }
+    }
+    builder->doneFast();
+}
+
 TEST_F(NestingDepthFixture, CanUpdateArrayIfItStaysWithinDepthLimit) {
     BSONObjBuilder insertCmd;
     appendInsertCommandWithNestedArray(&insertCmd, 3);
@@ -325,6 +436,40 @@ TEST_F(NestingDepthFixture, CannotUpdateArrayToExceedDepthLimit) {
 
     BSONObjBuilder updateCmd;
     appendUpdateCommandWithNestedArrays(
+        &updateCmd, largeButValidDepth, BSONDepth::getMaxDepthForUserStorage() + 1);
+    assertWriteError(kCollectionName, updateCmd.obj(), ErrorCodes::Overflow);
+}
+
+TEST_F(NestingDepthFixture, CanReplaceArrayIfItStaysWithinDepthLimit) {
+    BSONObjBuilder insertCmd;
+    appendInsertCommandWithNestedArray(&insertCmd, 3);
+    assertCommandOK(kCollectionName, insertCmd.obj());
+
+    BSONObjBuilder updateCmd;
+    appendUpdateReplaceCommandWithNestedArrays(&updateCmd, 3, 5);
+    assertCommandOK(kCollectionName, updateCmd.obj());
+}
+
+TEST_F(NestingDepthFixture, CanReplaceArrayToBeExactlyAtDepthLimit) {
+    const auto largeButValidDepth = BSONDepth::getMaxDepthForUserStorage() - 1;
+    BSONObjBuilder insertCmd;
+    appendInsertCommandWithNestedArray(&insertCmd, largeButValidDepth);
+    assertCommandOK(kCollectionName, insertCmd.obj());
+
+    BSONObjBuilder updateCmd;
+    appendUpdateReplaceCommandWithNestedArrays(
+        &updateCmd, largeButValidDepth, BSONDepth::getMaxDepthForUserStorage());
+    assertCommandOK(kCollectionName, updateCmd.obj());
+}
+
+TEST_F(NestingDepthFixture, CannotReplaceArrayToExceedDepthLimit) {
+    const auto largeButValidDepth = BSONDepth::getMaxDepthForUserStorage() - 4;
+    BSONObjBuilder insertCmd;
+    appendInsertCommandWithNestedArray(&insertCmd, largeButValidDepth);
+    assertCommandOK(kCollectionName, insertCmd.obj());
+
+    BSONObjBuilder updateCmd;
+    appendUpdateReplaceCommandWithNestedArrays(
         &updateCmd, largeButValidDepth, BSONDepth::getMaxDepthForUserStorage() + 1);
     assertWriteError(kCollectionName, updateCmd.obj(), ErrorCodes::Overflow);
 }

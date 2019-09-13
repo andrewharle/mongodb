@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,6 +33,7 @@
 #include "mongo/db/exec/idhack.h"
 
 #include "mongo/client/dbclientinterface.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/exec/projection.h"
 #include "mongo/db/exec/scoped_timer.h"
@@ -49,12 +52,12 @@ using stdx::make_unique;
 // static
 const char* IDHackStage::kStageType = "IDHACK";
 
-IDHackStage::IDHackStage(OperationContext* txn,
+IDHackStage::IDHackStage(OperationContext* opCtx,
                          const Collection* collection,
                          CanonicalQuery* query,
                          WorkingSet* ws,
                          const IndexDescriptor* descriptor)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _workingSet(ws),
       _key(query->getQueryObj()["_id"].wrap()),
@@ -71,12 +74,12 @@ IDHackStage::IDHackStage(OperationContext* txn,
     }
 }
 
-IDHackStage::IDHackStage(OperationContext* txn,
+IDHackStage::IDHackStage(OperationContext* opCtx,
                          Collection* collection,
                          const BSONObj& key,
                          WorkingSet* ws,
                          const IndexDescriptor* descriptor)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _workingSet(ws),
       _key(key),
@@ -160,7 +163,7 @@ PlanStage::StageState IDHackStage::doWork(WorkingSetID* out) {
         }
 
         return advance(id, member, out);
-    } catch (const WriteConflictException& wce) {
+    } catch (const WriteConflictException&) {
         // Restart at the beginning on retry.
         _recordCursor.reset();
         if (id != WorkingSet::INVALID_ID)
@@ -208,7 +211,7 @@ void IDHackStage::doReattachToOperationContext() {
         _recordCursor->reattachToOperationContext(getOpCtx());
 }
 
-void IDHackStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void IDHackStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // Since updates can't mutate the '_id' field, we can ignore mutation invalidations.
     if (INVALIDATION_MUTATION == type) {
         return;
@@ -220,7 +223,7 @@ void IDHackStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invali
         WorkingSetMember* member = _workingSet->get(_idBeingPagedIn);
         if (member->hasRecordId() && (member->recordId == dl)) {
             // Fetch it now and kill the RecordId.
-            WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+            WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
         }
     }
 }

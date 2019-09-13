@@ -52,7 +52,8 @@ load('jstests/libs/write_concern_util.js');
 
     // Do a write to have something to read.
     assert.writeOK(primary.getDB("test").foo.insert(
-        {"number": 7}, {"writeConcern": {"w": "majority", "wtimeout": 60000}}));
+        {"number": 7},
+        {"writeConcern": {"w": "majority", "wtimeout": ReplSetTest.kDefaultTimeoutMS}}));
 
     jsTestLog("Testing linearizable readConcern parsing");
     // This command is sent to the primary, and the primary is fully connected so it should work.
@@ -86,7 +87,7 @@ load('jstests/libs/write_concern_util.js');
 
     var result = primary.getDB("test").runCommand(
         {"find": "foo", "readConcern": {level: "linearizable"}, "maxTimeMS": 3000});
-    assert.commandFailedWithCode(result, ErrorCodes.ExceededTimeLimit);
+    assert.commandFailedWithCode(result, ErrorCodes.MaxTimeMSExpired);
 
     jsTestLog("Testing to make sure linearizable read command does not block forever.");
 
@@ -121,4 +122,5 @@ load('jstests/libs/write_concern_util.js');
         print('replSetStepDown did not throw exception but returned: ' + tojson(result));
     });
     parallelShell();
+    replTest.stopSet();
 }());

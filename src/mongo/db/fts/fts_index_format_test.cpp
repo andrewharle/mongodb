@@ -1,32 +1,34 @@
 // fts_index_format_test.cpp
 
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
@@ -34,6 +36,7 @@
 
 #include <set>
 
+#include "mongo/bson/json.h"
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/fts/fts_index_format.h"
 #include "mongo/db/fts/fts_spec.h"
@@ -249,5 +252,80 @@ TEST(FTSIndexFormat, LongWordTextIndexVersion3) {
 
     assertEqualsIndexKeys(expectedKeys, keys);
 }
+
+TEST(FTSIndexFormat, GetKeysWithLeadingEmptyArrayThrows) {
+    BSONObj keyPattern = fromjson("{'a.b': 1, data: 'text'}");
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(BSON("key" << keyPattern << "textIndexVersion" << 3))));
+    BSONObjSet keys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    BSONObj objToIndex = fromjson("{a: {b: []}, data: 'foo'}");
+    ASSERT_THROWS_CODE(FTSIndexFormat::getKeys(spec, objToIndex, &keys),
+                       AssertionException,
+                       ErrorCodes::CannotBuildIndexKeys);
 }
+
+TEST(FTSIndexFormat, GetKeysWithTrailingEmptyArrayThrows) {
+    BSONObj keyPattern = fromjson("{data: 'text', 'a.b': 1}");
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(BSON("key" << keyPattern << "textIndexVersion" << 3))));
+    BSONObjSet keys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    BSONObj objToIndex = fromjson("{a: {b: []}, data: 'foo'}");
+    ASSERT_THROWS_CODE(FTSIndexFormat::getKeys(spec, objToIndex, &keys),
+                       AssertionException,
+                       ErrorCodes::CannotBuildIndexKeys);
 }
+
+TEST(FTSIndexFormat, GetKeysWithLeadingSingleElementArrayThrows) {
+    BSONObj keyPattern = fromjson("{'a.b': 1, data: 'text'}");
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(BSON("key" << keyPattern << "textIndexVersion" << 3))));
+    BSONObjSet keys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    BSONObj objToIndex = fromjson("{a: [{b: 9}], data: 'foo'}");
+    ASSERT_THROWS_CODE(FTSIndexFormat::getKeys(spec, objToIndex, &keys),
+                       AssertionException,
+                       ErrorCodes::CannotBuildIndexKeys);
+}
+
+TEST(FTSIndexFormat, GetKeysWithTrailingSingleElementArrayThrows) {
+    BSONObj keyPattern = fromjson("{data: 'text', 'a.b': 1}");
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(BSON("key" << keyPattern << "textIndexVersion" << 3))));
+    BSONObjSet keys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    BSONObj objToIndex = fromjson("{a: [{b: 9}], data: 'foo'}");
+    ASSERT_THROWS_CODE(FTSIndexFormat::getKeys(spec, objToIndex, &keys),
+                       AssertionException,
+                       ErrorCodes::CannotBuildIndexKeys);
+}
+
+TEST(FTSIndexFormat, GetKeysWithMultiElementArrayThrows) {
+    BSONObj keyPattern = fromjson("{'a.b': 1, 'a.c': 'text'}");
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(BSON("key" << keyPattern << "textIndexVersion" << 3))));
+    BSONObjSet keys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    BSONObj objToIndex = fromjson("{a: [{b: 9, c: 'foo'}, {b: 10, c: 'bar'}]}");
+    ASSERT_THROWS_CODE(FTSIndexFormat::getKeys(spec, objToIndex, &keys),
+                       AssertionException,
+                       ErrorCodes::CannotBuildIndexKeys);
+}
+
+TEST(FTSIndexFormat, GetKeysWithPositionalPathAllowed) {
+    BSONObj keyPattern = fromjson("{'a.0': 1, 'a.b': 'text'}");
+    FTSSpec spec(assertGet(FTSSpec::fixSpec(BSON("key" << keyPattern << "textIndexVersion" << 3))));
+    BSONObjSet keys = SimpleBSONObjComparator::kInstance.makeBSONObjSet();
+    BSONObj objToIndex = fromjson("{a: [{b: 'foo'}, {b: 'bar'}]}");
+    FTSIndexFormat::getKeys(spec, objToIndex, &keys);
+    ASSERT_EQ(2U, keys.size());
+
+    {
+        BSONObj key = *(keys.begin());
+        ASSERT_EQ(3, key.nFields());
+        BSONObjIterator it{key};
+        ASSERT_BSONELT_EQ(it.next(), fromjson("{'': {b: 'foo'}}").firstElement());
+        ASSERT_BSONELT_EQ(it.next(), fromjson("{'': 'bar'}").firstElement());
+    }
+
+    {
+        BSONObj key = *(++keys.begin());
+        ASSERT_EQ(3, key.nFields());
+        BSONObjIterator it{key};
+        ASSERT_BSONELT_EQ(it.next(), fromjson("{'': {b: 'foo'}}").firstElement());
+        ASSERT_BSONELT_EQ(it.next(), fromjson("{'': 'foo'}").firstElement());
+    }
+}
+}  // namespace fts
+}  // namespace mongo

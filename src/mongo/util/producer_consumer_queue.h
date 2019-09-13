@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2018 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -37,7 +39,6 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
-#include "mongo/stdx/type_traits.h"
 #include "mongo/util/concurrency/with_lock.h"
 #include "mongo/util/scopeguard.h"
 
@@ -61,34 +62,36 @@ struct DefaultCostFunction {
 //
 // Whatever the caller passes in the interruption args, they need to be invocable on one of
 // these helpers. std::is_invocable would do the job in C++17
-std::false_type areInterruptionArgsHelper(...) {
+constexpr std::false_type areInterruptionArgsHelper(...) {
     return {};
 }
 
-std::true_type areInterruptionArgsHelper(OperationContext*) {
+constexpr std::true_type areInterruptionArgsHelper(OperationContext*) {
     return {};
 }
 
-std::true_type areInterruptionArgsHelper(OperationContext*, Date_t) {
+constexpr std::true_type areInterruptionArgsHelper(OperationContext*, Milliseconds) {
     return {};
 }
 
-std::true_type areInterruptionArgsHelper(Milliseconds) {
+constexpr std::true_type areInterruptionArgsHelper(OperationContext*, Date_t) {
     return {};
 }
 
-std::true_type areInterruptionArgsHelper(Date_t) {
+constexpr std::true_type areInterruptionArgsHelper(Milliseconds) {
+    return {};
+}
+
+constexpr std::true_type areInterruptionArgsHelper(Date_t) {
     return {};
 }
 
 template <typename U, typename... InterruptionArgs>
-auto areInterruptionArgs(U&& u, InterruptionArgs&&... args)
-    -> decltype(areInterruptionArgsHelper(std::forward<U>(u),
-                                          std::forward<InterruptionArgs>(args)...)) {
+constexpr auto areInterruptionArgs(U&& u, InterruptionArgs&&... args) {
     return areInterruptionArgsHelper(std::forward<U>(u), std::forward<InterruptionArgs>(args)...);
 }
 
-std::true_type areInterruptionArgs() {
+constexpr std::true_type areInterruptionArgs() {
     return {};
 }
 
@@ -166,7 +169,7 @@ public:
     // Leaves T unchanged if an interrupt exception is thrown while waiting for space
     template <
         typename... InterruptionArgs,
-        typename = stdx::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
+        typename = std::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
             std::declval<InterruptionArgs>()...))::value>>
     void push(T&& t, InterruptionArgs&&... interruptionArgs) {
         _pushRunner([&](stdx::unique_lock<stdx::mutex>& lk) {
@@ -198,7 +201,7 @@ public:
         typename StartIterator,
         typename EndIterator,
         typename... InterruptionArgs,
-        typename = stdx::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
+        typename = std::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
             std::declval<InterruptionArgs>()...))::value>>
     void pushMany(StartIterator start, EndIterator last, InterruptionArgs&&... interruptionArgs) {
         return _pushRunner([&](stdx::unique_lock<stdx::mutex>& lk) {
@@ -233,7 +236,7 @@ public:
     // Pops one T out of the queue
     template <
         typename... InterruptionArgs,
-        typename = stdx::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
+        typename = std::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
             std::declval<InterruptionArgs>()...))::value>>
     T pop(InterruptionArgs&&... interruptionArgs) {
         return _popRunner([&](stdx::unique_lock<stdx::mutex>& lk) {
@@ -252,7 +255,7 @@ public:
     template <
         typename OutputIterator,
         typename... InterruptionArgs,
-        typename = stdx::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
+        typename = std::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
             std::declval<InterruptionArgs>()...))::value>>
     std::pair<size_t, OutputIterator> popMany(OutputIterator iterator,
                                               InterruptionArgs&&... interruptionArgs) {
@@ -269,7 +272,7 @@ public:
     template <
         typename OutputIterator,
         typename... InterruptionArgs,
-        typename = stdx::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
+        typename = std::enable_if_t<decltype(producer_consumer_queue_detail::areInterruptionArgs(
             std::declval<InterruptionArgs>()...))::value>>
     std::pair<size_t, OutputIterator> popManyUpTo(size_t budget,
                                                   OutputIterator iterator,
@@ -385,8 +388,7 @@ private:
     }
 
     template <typename Callback>
-    auto _pushRunner(Callback&& cb) -> decltype(
-        cb(std::declval<std::add_lvalue_reference<stdx::unique_lock<stdx::mutex>>::type>())) {
+    auto _pushRunner(Callback&& cb) {
         stdx::unique_lock<stdx::mutex> lk(_mutex);
 
         _checkProducerClosed(lk);
@@ -397,8 +399,7 @@ private:
     }
 
     template <typename Callback>
-    auto _popRunner(Callback&& cb) -> decltype(
-        cb(std::declval<std::add_lvalue_reference<stdx::unique_lock<stdx::mutex>>::type>())) {
+    auto _popRunner(Callback&& cb) {
         stdx::unique_lock<stdx::mutex> lk(_mutex);
 
         _checkConsumerClosed(lk);
@@ -518,6 +519,17 @@ private:
         uassert(ErrorCodes::ExceededTimeLimit,
                 "exceeded timeout",
                 condvar.wait_until(lk, deadline.toSystemTimePoint(), pred));
+    }
+
+    template <typename Callback>
+    void _waitFor(stdx::unique_lock<stdx::mutex>& lk,
+                  stdx::condition_variable& condvar,
+                  Callback&& pred,
+                  OperationContext* opCtx,
+                  Milliseconds duration) {
+        uassert(ErrorCodes::ExceededTimeLimit,
+                "exceeded timeout",
+                opCtx->waitForConditionOrInterruptFor(condvar, lk, duration, pred));
     }
 
     template <typename Callback>

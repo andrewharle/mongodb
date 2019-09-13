@@ -1,3 +1,5 @@
+// @tags: [requires_non_retryable_writes, requires_fastcount]
+
 //
 //  Big Polygon related tests
 //  - Tests the capability for a geo query with a big polygon object (strictCRS)

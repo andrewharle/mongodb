@@ -1,30 +1,33 @@
 // @file sock.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
@@ -64,11 +67,10 @@
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/message.h"
+#include "mongo/util/net/private/socket_poll.h"
 #include "mongo/util/net/socket_exception.h"
-#include "mongo/util/net/socket_poll.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/net/ssl_manager.h"
-#include "mongo/util/quick_exit.h"
 #include "mongo/util/winutil.h"
 
 namespace mongo {
@@ -78,7 +80,7 @@ using std::string;
 using std::stringstream;
 using std::vector;
 
-MONGO_FP_DECLARE(throwSockExcep);
+MONGO_FAIL_POINT_DEFINE(throwSockExcep);
 
 namespace {
 
@@ -110,17 +112,6 @@ void networkWarnWithDescription(const Socket& socket, StringData call, int error
 
 const double kMaxConnectTimeoutMS = 5000;
 
-
-}  // namespace
-
-static bool ipv6 = false;
-void enableIPv6(bool state) {
-    ipv6 = state;
-}
-bool IPv6Enabled() {
-    return ipv6;
-}
-
 void setSockTimeouts(int sock, double secs) {
     bool report = shouldLog(logger::LogSeverity::Debug(4));
     DEV report = true;
@@ -146,96 +137,6 @@ void setSockTimeouts(int sock, double secs) {
 #endif
 }
 
-#ifdef _WIN32
-#ifdef _UNICODE
-#define X_STR_CONST(str) (L##str)
-#else
-#define X_STR_CONST(str) (str)
-#endif
-const CString kKeepAliveGroup(
-    X_STR_CONST("SYSTEM\\CurrentControlSet\\Services\\Tcpip\\Parameters"));
-const CString kKeepAliveTime(X_STR_CONST("KeepAliveTime"));
-const CString kKeepAliveInterval(X_STR_CONST("KeepAliveInterval"));
-#undef X_STR_CONST
-#endif
-
-void setSocketKeepAliveParams(int sock,
-                              unsigned int maxKeepIdleSecs,
-                              unsigned int maxKeepIntvlSecs) {
-#ifdef _WIN32
-    // Defaults per MSDN when registry key does not exist.
-    // Expressed in seconds here to be consistent with posix,
-    // though Windows uses milliseconds.
-    const DWORD kWindowsKeepAliveTimeSecsDefault = 2 * 60 * 60;
-    const DWORD kWindowsKeepAliveIntervalSecsDefault = 1;
-
-    const auto getKey = [](const CString& key, DWORD default_value) {
-        auto withval = windows::getDWORDRegistryKey(kKeepAliveGroup, key);
-        if (withval.isOK()) {
-            auto val = withval.getValue();
-            // Return seconds
-            return val ? (val.get() / 1000) : default_value;
-        }
-        error() << "can't get KeepAlive parameter: " << withval.getStatus();
-        return default_value;
-    };
-
-    const auto keepIdleSecs = getKey(kKeepAliveTime, kWindowsKeepAliveTimeSecsDefault);
-    const auto keepIntvlSecs = getKey(kKeepAliveInterval, kWindowsKeepAliveIntervalSecsDefault);
-
-    if ((keepIdleSecs > maxKeepIdleSecs) || (keepIntvlSecs > maxKeepIntvlSecs)) {
-        DWORD sent = 0;
-        struct tcp_keepalive keepalive;
-        keepalive.onoff = TRUE;
-        keepalive.keepalivetime = std::min<DWORD>(keepIdleSecs, maxKeepIdleSecs) * 1000;
-        keepalive.keepaliveinterval = std::min<DWORD>(keepIntvlSecs, maxKeepIntvlSecs) * 1000;
-        if (WSAIoctl(sock,
-                     SIO_KEEPALIVE_VALS,
-                     &keepalive,
-                     sizeof(keepalive),
-                     nullptr,
-                     0,
-                     &sent,
-                     nullptr,
-                     nullptr)) {
-            error() << "failed setting keepalive values: " << WSAGetLastError();
-        }
-    }
-#elif defined(__APPLE__) || defined(__linux__)
-    const auto updateSockOpt =
-        [sock](int level, int optnum, unsigned int maxval, StringData optname) {
-            unsigned int optval = 1;
-            socklen_t len = sizeof(optval);
-
-            if (getsockopt(sock, level, optnum, (char*)&optval, &len)) {
-                error() << "can't get " << optname << ": " << errnoWithDescription();
-            }
-
-            if (optval > maxval) {
-                optval = maxval;
-                if (setsockopt(sock, level, optnum, (char*)&optval, sizeof(optval))) {
-                    error() << "can't set " << optname << ": " << errnoWithDescription();
-                }
-            }
-        };
-
-#ifdef __APPLE__
-    updateSockOpt(IPPROTO_TCP, TCP_KEEPALIVE, maxKeepIdleSecs, "TCP_KEEPALIVE");
-#endif
-
-#ifdef __linux__
-#ifdef SOL_TCP
-    const int level = SOL_TCP;
-#else
-    const int level = SOL_SOCKET;
-#endif
-    updateSockOpt(level, TCP_KEEPIDLE, maxKeepIdleSecs, "TCP_KEEPIDLE");
-    updateSockOpt(level, TCP_KEEPINTVL, maxKeepIntvlSecs, "TCP_KEEPINTVL");
-#endif
-
-#endif
-}
-
 void disableNagle(int sock) {
     int x = 1;
 #ifdef _WIN32
@@ -257,63 +158,26 @@ void disableNagle(int sock) {
     setSocketKeepAliveParams(sock);
 }
 
-string getAddrInfoStrError(int code) {
-#if !defined(_WIN32)
-    return gai_strerror(code);
+int socketGetLastError() {
+#ifdef _WIN32
+    return WSAGetLastError();
 #else
-    /* gai_strerrorA is not threadsafe on windows. don't use it. */
-    return errnoWithDescription(code);
+    return errno;
 #endif
 }
 
-// --- SockAddr
-
-string makeUnixSockPath(int port) {
-    return mongoutils::str::stream() << serverGlobalParams.socket << "/mongodb-" << port << ".sock";
-}
-
-
-// If an ip address is passed in, just return that.  If a hostname is passed
-// in, look up its ip and return that.  Returns "" on failure.
-string hostbyname(const char* hostname) {
-    SockAddr sockAddr(hostname, 0);
-    if (!sockAddr.isValid() || sockAddr.getAddr() == "0.0.0.0")
-        return "";
-    else
-        return sockAddr.getAddr();
-}
-
-//  --- my --
-
-DiagStr& _hostNameCached = *(new DiagStr);  // this is also written to from commands/cloud.cpp
-
-string getHostName() {
-    char buf[256];
-    int ec = gethostname(buf, 127);
-    if (ec || *buf == 0) {
-        log() << "can't get this server's hostname " << errnoWithDescription();
-        return "";
+SockAddr getLocalAddrForBoundSocketFd(int fd) {
+    SockAddr result;
+    int rc = getsockname(fd, result.raw(), &result.addressSize);
+    if (rc != 0) {
+        warning() << "Could not resolve local address for socket with fd " << fd << ": "
+                  << getAddrInfoStrError(socketGetLastError());
+        result = SockAddr();
     }
-    return buf;
+    return result;
 }
 
-/** we store our host name once */
-string getHostNameCached() {
-    string temp = _hostNameCached.get();
-    if (_hostNameCached.empty()) {
-        temp = getHostName();
-        _hostNameCached = temp;
-    }
-    return temp;
-}
-
-string prettyHostName() {
-    StringBuilder s;
-    s << getHostNameCached();
-    if (serverGlobalParams.port != ServerGlobalParams::DefaultDBPort)
-        s << ':' << mongo::serverGlobalParams.port;
-    return s.str();
-}
+}  // namespace
 
 #ifdef MSG_NOSIGNAL
 const int portSendFlags = MSG_NOSIGNAL;
@@ -324,25 +188,6 @@ const int portRecvFlags = 0;
 #endif
 
 // ------------ Socket -----------------
-
-static int socketGetLastError() {
-#ifdef _WIN32
-    return WSAGetLastError();
-#else
-    return errno;
-#endif
-}
-
-static SockAddr getLocalAddrForBoundSocketFd(int fd) {
-    SockAddr result;
-    int rc = getsockname(fd, result.raw(), &result.addressSize);
-    if (rc != 0) {
-        warning() << "Could not resolve local address for socket with fd " << fd << ": "
-                  << getAddrInfoStrError(socketGetLastError());
-        result = SockAddr();
-    }
-    return result;
-}
 
 Socket::Socket(int fd, const SockAddr& remote)
     : _fd(fd),
@@ -397,7 +242,7 @@ bool Socket::secure(SSLManagerInterface* mgr, const std::string& remoteHost) {
     }
     _sslManager = mgr;
     _sslConnection.reset(_sslManager->connect(this));
-    mgr->parseAndValidatePeerCertificateDeprecated(_sslConnection.get(), remoteHost);
+    mgr->parseAndValidatePeerCertificateDeprecated(_sslConnection.get(), remoteHost, HostAndPort());
     return true;
 }
 
@@ -410,26 +255,20 @@ SSLPeerInfo Socket::doSSLHandshake(const char* firstBytes, int len) {
         return SSLPeerInfo();
     fassert(16506, _fd != INVALID_SOCKET);
     if (_sslConnection.get()) {
-        throw SocketException(SocketException::RECV_ERROR,
-                              "Attempt to call SSL_accept on already secure Socket from " +
-                                  remoteString());
+        throwSocketError(SocketErrorKind::RECV_ERROR,
+                         "Attempt to call SSL_accept on already secure Socket from " +
+                             remoteString());
     }
     _sslConnection.reset(_sslManager->accept(this, firstBytes, len));
-    return _sslManager->parseAndValidatePeerCertificateDeprecated(_sslConnection.get(), "");
+    return _sslManager->parseAndValidatePeerCertificateDeprecated(
+        _sslConnection.get(), "", HostAndPort());
 }
 
 std::string Socket::getSNIServerName() const {
     if (!_sslConnection)
         return "";
 
-    if (!_sslConnection->ssl)
-        return "";
-
-    const char* name = SSL_get_servername(_sslConnection->ssl, TLSEXT_NAMETYPE_host_name);
-    if (!name)
-        return "";
-
-    return name;
+    return _sslConnection->getSNIServerName();
 }
 #endif
 
@@ -705,18 +544,18 @@ void Socket::handleSendError(int ret, const char* context) {
     if ((mongo_errno == EAGAIN || mongo_errno == EWOULDBLOCK) && _timeout != 0) {
 #endif
         LOG(_logLevel) << "Socket " << context << " send() timed out " << remoteString();
-        throw SocketException(SocketException::SEND_TIMEOUT, remoteString());
+        throwSocketError(SocketErrorKind::SEND_TIMEOUT, remoteString());
     } else if (mongo_errno != EINTR) {
         LOG(_logLevel) << "Socket " << context << " send() " << errnoWithDescription(mongo_errno)
                        << ' ' << remoteString();
-        throw SocketException(SocketException::SEND_ERROR, remoteString());
+        throwSocketError(SocketErrorKind::SEND_ERROR, remoteString());
     }
 }
 
 void Socket::handleRecvError(int ret, int len) {
     if (ret == 0) {
         LOG(3) << "Socket recv() conn closed? " << remoteString();
-        throw SocketException(SocketException::CLOSED, remoteString());
+        throwSocketError(SocketErrorKind::CLOSED, remoteString());
     }
 
 // ret < 0
@@ -739,11 +578,11 @@ void Socket::handleRecvError(int ret, int len) {
 #endif
         // this is a timeout
         LOG(_logLevel) << "Socket recv() timeout  " << remoteString();
-        throw SocketException(SocketException::RECV_TIMEOUT, remoteString());
+        throwSocketError(SocketErrorKind::RECV_TIMEOUT, remoteString());
     }
 
     LOG(_logLevel) << "Socket recv() " << errnoWithDescription(e) << " " << remoteString();
-    throw SocketException(SocketException::RECV_ERROR, remoteString());
+    throwSocketError(SocketErrorKind::RECV_ERROR, remoteString());
 }
 
 void Socket::setTimeout(double secs) {
@@ -879,17 +718,5 @@ bool Socket::isStillConnected() {
 
     return false;
 }
-
-#if defined(_WIN32)
-struct WinsockInit {
-    WinsockInit() {
-        WSADATA d;
-        if (WSAStartup(MAKEWORD(2, 2), &d) != 0) {
-            log() << "ERROR: wsastartup failed " << errnoWithDescription();
-            quickExit(EXIT_NTSERVICE_ERROR);
-        }
-    }
-} winsock_init;
-#endif
 
 }  // namespace mongo

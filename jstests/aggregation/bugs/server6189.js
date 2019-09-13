@@ -30,15 +30,12 @@ function test(date, testSynthetics) {
                 ,
                 millisecondPlusTen: {$millisecond: {$add: ['$date', 10]}}
 
-                // $substr will call coerceToString
-                ,
-                string: {$substr: ['$date', 0, 1000]}
-
                 // server-11118
                 ,
                 format: {$dateToString: {format: ISOfmt, date: '$date'}}
             }
-        }]
+        }],
+        cursor: {}
     });
 
     if (date.valueOf() < 0 && _isWindows() && res.code == 16422) {
@@ -54,17 +51,26 @@ function test(date, testSynthetics) {
     }
 
     assert.commandWorked(res);
-    assert.eq(res.result[0], {
+    assert.eq(res.cursor.firstBatch[0].year, date.getUTCFullYear(), "year");
+    assert.eq(res.cursor.firstBatch[0].month, date.getUTCMonth() + 1, "month");
+    assert.eq(res.cursor.firstBatch[0].dayOfMonth, date.getUTCDate(), "dayOfMonth");
+    assert.eq(res.cursor.firstBatch[0].hour, date.getUTCHours(), "hour");
+    assert.eq(res.cursor.firstBatch[0].minute, date.getUTCMinutes(), "minute");
+    assert.eq(res.cursor.firstBatch[0].second, date.getUTCSeconds(), "second");
+    assert.eq(res.cursor.firstBatch[0].millisecond, date.getUTCMilliseconds(), "millisecond");
+    assert.eq(res.cursor.firstBatch[0].millisecondPlusTen,
+              (date.getUTCMilliseconds() + 10) % 1000,
+              "millisecondPlusTen");
+    assert.eq(res.cursor.firstBatch[0].format, date.tojson(), "format");
+    assert.eq(res.cursor.firstBatch[0], {
         year: date.getUTCFullYear(),
-        month: date.getUTCMonth() + 1  // jan == 1
-        ,
+        month: date.getUTCMonth() + 1,  // jan == 1
         dayOfMonth: date.getUTCDate(),
         hour: date.getUTCHours(),
         minute: date.getUTCMinutes(),
         second: date.getUTCSeconds(),
         millisecond: date.getUTCMilliseconds(),
         millisecondPlusTen: ((date.getUTCMilliseconds() + 10) % 1000),
-        string: date.tojson().slice(9, 28),
         format: date.tojson()
     });
 

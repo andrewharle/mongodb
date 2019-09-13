@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/db/matcher/expression.h"
@@ -59,7 +61,7 @@ public:
      * Example: a: {$elemMatch: {$gte: 1, $lte: 1}}.
      */
     static bool arrayUsesIndexOnOwnField(const MatchExpression* me) {
-        if (!me->isArray()) {
+        if (me->getCategory() != MatchExpression::MatchCategory::kArrayMatching) {
             return false;
         }
 
@@ -111,7 +113,7 @@ public:
      * Example: a: {$elemMatch: {b:1, c:1}}.
      */
     static bool arrayUsesIndexOnChildren(const MatchExpression* me) {
-        return me->isArray() && MatchExpression::ELEM_MATCH_OBJECT == me->matchType();
+        return MatchExpression::ELEM_MATCH_OBJECT == me->matchType();
     }
 
     /**
@@ -132,15 +134,6 @@ public:
     }
 
     /**
-     * Returns true if 'me' is of type EQ, GT, GTE, LT, or LTE.
-     */
-    static bool isEqualityOrInequality(const MatchExpression* me) {
-        return (me->matchType() == MatchExpression::EQ || me->matchType() == MatchExpression::GT ||
-                me->matchType() == MatchExpression::GTE || me->matchType() == MatchExpression::LT ||
-                me->matchType() == MatchExpression::LTE);
-    }
-
-    /**
      * Returns true if 'elt' is a BSONType for which exact index bounds can be generated.
      */
     static bool isExactBoundsGenerating(BSONElement elt) {
@@ -155,6 +148,11 @@ public:
             case BSONType::bsonTimestamp:
             case BSONType::jstOID:
             case BSONType::BinData:
+            case BSONType::Object:
+            case BSONType::Code:
+            case BSONType::CodeWScope:
+            case BSONType::MinKey:
+            case BSONType::MaxKey:
                 return true;
             default:
                 return false;
@@ -177,7 +175,9 @@ private:
             me->matchType() == MatchExpression::TYPE_OPERATOR ||
             me->matchType() == MatchExpression::GEO ||
             me->matchType() == MatchExpression::GEO_NEAR ||
-            me->matchType() == MatchExpression::EXISTS || me->matchType() == MatchExpression::TEXT;
+            me->matchType() == MatchExpression::EXISTS ||
+            me->matchType() == MatchExpression::TEXT ||
+            me->matchType() == MatchExpression::INTERNAL_EXPR_EQ;
     }
 };
 

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -18,8 +18,8 @@ util_list(WT_SESSION *session, int argc, char *argv[])
 {
 	WT_DECL_RET;
 	int ch;
-	bool cflag, vflag;
 	char *uri;
+	bool cflag, vflag;
 
 	cflag = vflag = false;
 	uri = NULL;
@@ -69,6 +69,8 @@ list_get_allocsize(WT_SESSION *session, const char *key, size_t *allocsize)
 	int tret;
 	char *config;
 
+	*allocsize = 0;
+
 	wt_api = session->connection->get_extension_api(session->connection);
 	if ((ret = wt_api->metadata_search(wt_api, session, key, &config)) != 0)
 		return (util_err(
@@ -78,10 +80,9 @@ list_get_allocsize(WT_SESSION *session, const char *key, size_t *allocsize)
 		return (util_err(
 		    session, ret, "WT_EXTENSION_API.config_parser_open"));
 	if ((ret = parser->get(parser, "allocation_size", &szvalue)) != 0) {
-		if (ret == WT_NOTFOUND) {
-			*allocsize = 0;
+		if (ret == WT_NOTFOUND)
 			ret = 0;
-		} else
+		else
 			ret = util_err(session, ret, "WT_CONFIG_PARSER.get");
 		if ((tret = parser->close(parser)) != 0)
 			(void)util_err(session, tret, "WT_CONFIG_PARSER.close");
@@ -102,8 +103,8 @@ list_print(WT_SESSION *session, const char *uri, bool cflag, bool vflag)
 {
 	WT_CURSOR *cursor;
 	WT_DECL_RET;
-	bool found;
 	const char *key, *value;
+	bool found;
 
 	/* Open the metadata file. */
 	if ((ret = session->open_cursor(
@@ -139,8 +140,11 @@ list_print(WT_SESSION *session, const char *uri, bool cflag, bool vflag)
 		 * We don't normally say anything about the WiredTiger metadata
 		 * and lookaside tables, they're not application/user "objects"
 		 * in the database.  I'm making an exception for the checkpoint
-		 * and verbose options.
+		 * and verbose options. However, skip over the metadata system
+		 * information for anything except the verbose option.
 		 */
+		if (!vflag && WT_PREFIX_MATCH(key, WT_SYSTEM_PREFIX))
+			continue;
 		if (cflag || vflag ||
 		    (strcmp(key, WT_METADATA_URI) != 0 &&
 		    strcmp(key, WT_LAS_URI) != 0))
@@ -175,8 +179,8 @@ static int
 list_print_checkpoint(WT_SESSION *session, const char *key)
 {
 	WT_BLOCK_CKPT ci;
-	WT_DECL_RET;
 	WT_CKPT *ckpt, *ckptbase;
+	WT_DECL_RET;
 	size_t allocsize, len;
 	time_t t;
 	uint64_t v;
@@ -231,7 +235,8 @@ list_print_checkpoint(WT_SESSION *session, const char *key)
 		if (ci.root_size != 0) {
 			printf("\t\t" "root offset: %" PRIuMAX
 			    " (0x%" PRIxMAX ")\n",
-			    (intmax_t)ci.root_offset, (intmax_t)ci.root_offset);
+			    (uintmax_t)ci.root_offset,
+			    (uintmax_t)ci.root_offset);
 			printf("\t\t" "root size: %" PRIu32
 			    " (0x%" PRIx32 ")\n",
 			    ci.root_size, ci.root_size);

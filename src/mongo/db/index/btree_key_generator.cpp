@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/db/index/btree_key_generator.h"
 
@@ -343,7 +345,8 @@ void BtreeKeyGeneratorV1::getKeysImpl(std::vector<const char*> fieldNames,
         invariant(multikeyPaths->empty());
         multikeyPaths->resize(fieldNames.size());
     }
-    getKeysImplWithArray(fieldNames, fixed, obj, keys, 0, _emptyPositionalInfo, multikeyPaths);
+    getKeysImplWithArray(
+        std::move(fieldNames), std::move(fixed), obj, keys, 0, _emptyPositionalInfo, multikeyPaths);
 }
 
 void BtreeKeyGeneratorV1::getKeysImplWithArray(
@@ -428,7 +431,23 @@ void BtreeKeyGeneratorV1::getKeysImplWithArray(
         }
         keys->insert(b.obj());
     } else if (arrElt.embeddedObject().firstElement().eoo()) {
-        // Empty array, so set matching fields to undefined.
+        // We've encountered an empty array.
+        if (multikeyPaths && mayExpandArrayUnembedded) {
+            // Any indexed path which traverses through the empty array must be recorded as an array
+            // component.
+            for (auto i : arrIdxs) {
+                // We need to determine which component of the indexed field causes the index to be
+                // multikey as a result of the empty array. Indexed empty arrays are considered
+                // multikey and may occur mid-path. For instance, the indexed path "a.b.c" has
+                // multikey components {0, 1} given the document {a: [{b: []}, {b: 1}]}.
+                size_t fullPathLength = _pathLengths[i];
+                size_t suffixPathLength = FieldRef{fieldNames[i]}.numParts();
+                invariant(suffixPathLength < fullPathLength);
+                arrComponents[i] = fullPathLength - suffixPathLength - 1;
+            }
+        }
+
+        // For an empty array, set matching fields to undefined.
         _getKeysArrEltFixed(&fieldNames,
                             &fixed,
                             undefinedElt,
@@ -510,7 +529,6 @@ void BtreeKeyGeneratorV1::getKeysImplWithArray(
         }
 
         // Generate a key for each element of the indexed array.
-        size_t nArrObjFields = 0;
         for (const auto arrObjElem : arrObj) {
             _getKeysArrEltFixed(&fieldNames,
                                 &fixed,
@@ -522,16 +540,14 @@ void BtreeKeyGeneratorV1::getKeysImplWithArray(
                                 mayExpandArrayUnembedded,
                                 subPositionalInfo,
                                 multikeyPaths);
-            ++nArrObjFields;
         }
+    }
 
-        if (multikeyPaths && nArrObjFields > 1) {
-            // The 'arrElt' array value contains multiple elements, so we say that it causes the
-            // index to be multikey.
-            for (size_t i = 0; i < arrComponents.size(); ++i) {
-                if (auto arrComponent = arrComponents[i]) {
-                    (*multikeyPaths)[i].insert(*arrComponent);
-                }
+    // Record multikey path components.
+    if (multikeyPaths) {
+        for (size_t i = 0; i < arrComponents.size(); ++i) {
+            if (auto arrComponent = arrComponents[i]) {
+                (*multikeyPaths)[i].insert(*arrComponent);
             }
         }
     }

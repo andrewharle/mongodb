@@ -1,5 +1,5 @@
-/*
- * Copyright (c) 2014-2016 MongoDB, Inc.
+/*-
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -352,7 +352,7 @@ __wt_huffman_open(WT_SESSION_IMPL *session,
 	 * duplicates.
 	 */
 	sym = symbol_frequency_array;
-	qsort(sym, symcnt, sizeof(INDEXED_SYMBOL), indexed_symbol_compare);
+	__wt_qsort(sym, symcnt, sizeof(INDEXED_SYMBOL), indexed_symbol_compare);
 	for (i = 0; i < symcnt; ++i) {
 		if (i > 0 && sym[i].symbol == sym[i - 1].symbol)
 			WT_ERR_MSG(session, EINVAL,
@@ -397,7 +397,7 @@ __wt_huffman_open(WT_SESSION_IMPL *session,
 	 * The array must be sorted by frequency to be able to use a linear time
 	 * construction algorithm.
 	 */
-	qsort((void *)indexed_freqs,
+	__wt_qsort((void *)indexed_freqs,
 	    symcnt, sizeof(INDEXED_SYMBOL), indexed_freq_compare);
 
 	/* We need two node queues to build the tree. */
@@ -483,7 +483,7 @@ __wt_huffman_open(WT_SESSION_IMPL *session,
 	set_codes(node, huffman->codes, 0, 0);
 
 	WT_ERR(__wt_calloc_def(
-	    session, 1U << huffman->max_depth, &huffman->code2symbol));
+	    session, (size_t)1U << huffman->max_depth, &huffman->code2symbol));
 	make_table(session, huffman->code2symbol,
 	    huffman->max_depth, huffman->codes, huffman->numSymbols);
 
@@ -520,11 +520,7 @@ __wt_huffman_open(WT_SESSION_IMPL *session,
 
 	*(void **)retp = huffman;
 
-	if (0) {
-err:		if (ret == 0)
-			ret = WT_ERROR;
-	}
-	__wt_free(session, indexed_freqs);
+err:	__wt_free(session, indexed_freqs);
 	if (leaves != NULL)
 		node_queue_close(session, leaves);
 	if (combined_nodes != NULL)
@@ -746,8 +742,8 @@ __wt_huffman_decode(WT_SESSION_IMPL *session, void *huffman_arg,
     const uint8_t *from_arg, size_t from_len, WT_ITEM *to_buf)
 {
 	WT_DECL_RET;
-	WT_ITEM *tmp;
 	WT_HUFFMAN_OBJ *huffman;
+	WT_ITEM *tmp;
 	size_t from_bytes, len, max_len, outlen;
 	uint64_t from_len_bits;
 	uint32_t bits, mask, max;

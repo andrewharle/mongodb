@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -33,6 +35,7 @@
 #include <cctype>
 #include <iomanip>
 
+#include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/scripting/mozjs/implscope.h"
 #include "mongo/scripting/mozjs/internedstring.h"
 #include "mongo/scripting/mozjs/objectwrapper.h"
@@ -42,6 +45,7 @@
 #include "mongo/util/base64.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 namespace mozjs {
@@ -84,7 +88,7 @@ void hexToBinData(JSContext* cx,
         int src_index = i * 2;
         if (!std::isxdigit(src[src_index]) || !std::isxdigit(src[src_index + 1]))
             uasserted(ErrorCodes::BadValue, "Invalid hex character in string");
-        data[i] = fromHex(src + src_index);
+        data[i] = uassertStatusOK(fromHex(src + src_index));
     }
 
     std::string encoded = base64::encode(data.get(), len);
@@ -114,16 +118,30 @@ void BinDataInfo::finalize(JSFreeOp* fop, JSObject* obj) {
 }
 
 void BinDataInfo::Functions::UUID::call(JSContext* cx, JS::CallArgs args) {
-    if (args.length() != 1)
-        uasserted(ErrorCodes::BadValue, "UUID needs 1 argument");
+    boost::optional<mongo::UUID> uuid;
 
-    auto arg = args.get(0);
-    auto str = ValueWriter(cx, arg).toString();
+    if (args.length() == 0) {
+        uuid = mongo::UUID::gen();
+    } else {
+        uassert(ErrorCodes::BadValue, "UUID needs 0 or 1 arguments", args.length() == 1);
+        auto arg = args.get(0);
+        std::string str = ValueWriter(cx, arg).toString();
 
-    if (str.length() != 32)
-        uasserted(ErrorCodes::BadValue, "UUID string must have 32 characters");
+        // For backward compatibility quietly accept and convert 32-character hex strings to
+        // BinData(3, ...) as used for the deprecated UUID v3 BSON type.
+        if (str.length() == 32) {
+            hexToBinData(cx, bdtUUID, arg, args.rval());
+            return;
+        }
+        uuid = uassertStatusOK(mongo::UUID::parse(str));
+    };
+    ConstDataRange cdr = uuid->toCDR();
+    std::string encoded = mongo::base64::encode(cdr.data(), cdr.length());
 
-    hexToBinData(cx, bdtUUID, arg, args.rval());
+    JS::AutoValueArray<2> newArgs(cx);
+    newArgs[0].setInt32(newUUID);
+    ValueReader(cx, newArgs[1]).fromStringData(encoded);
+    getScope(cx)->getProto<BinDataInfo>().newInstance(newArgs, args.rval());
 }
 
 void BinDataInfo::Functions::MD5::call(JSContext* cx, JS::CallArgs args) {
@@ -158,9 +176,21 @@ void BinDataInfo::Functions::toString::call(JSContext* cx, JS::CallArgs args) {
     auto str = getEncoded(args.thisv());
 
     str::stream ss;
+    auto binType = o.getNumber(InternedString::type);
 
-    ss << "BinData(" << o.getNumber(InternedString::type) << ",\"" << *str << "\")";
+    if (binType == newUUID) {
+        auto decoded = mongo::base64::decode(*str);
 
+        // If this is in fact a UUID, use a more friendly string representation.
+        if (decoded.length() == mongo::UUID::kNumBytes) {
+            mongo::UUID uuid = mongo::UUID::fromCDR({decoded.data(), decoded.length()});
+            ss << "UUID(\"" << uuid.toString() << "\")";
+            ValueReader(cx, args.rval()).fromStringData(ss.operator std::string());
+            return;
+        }
+    }
+
+    ss << "BinData(" << binType << ",\"" << *str << "\")";
     ValueReader(cx, args.rval()).fromStringData(ss.operator std::string());
 }
 

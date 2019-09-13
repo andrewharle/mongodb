@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -45,8 +47,6 @@ public:
 
     executor::TaskExecutor* getTaskExecutor() const override;
 
-    OldThreadPool* getDbWorkThreadPool() const override;
-
     OpTimeWithTerm getCurrentTermAndLastCommittedOpTime() override;
 
     void processMetadata(const rpc::ReplSetMetadata& metadata,
@@ -56,17 +56,15 @@ public:
                             const rpc::ReplSetMetadata& replMetadata,
                             boost::optional<rpc::OplogQueryMetadata> oqMetadata) override;
 
-    std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(OperationContext* txn) const override;
+    std::unique_ptr<OplogBuffer> makeInitialSyncOplogBuffer(OperationContext* opCtx) const override;
 
-    std::unique_ptr<OplogBuffer> makeSteadyStateOplogBuffer(OperationContext* txn) const override;
+    StatusWith<OplogApplier::Operations> getNextApplierBatch(OperationContext* opCtx,
+                                                             OplogBuffer* oplogBuffer) final;
 
     StatusWith<ReplSetConfig> getCurrentConfig() const override;
 
     // Task executor. Not owned by us.
     executor::TaskExecutor* taskExecutor = nullptr;
-
-    // DB worker thread pool. Not owned by us.
-    OldThreadPool* dbWorkThreadPool = nullptr;
 
     // Returned by getCurrentTermAndLastCommittedOpTime.
     long long currentTerm = OpTime::kUninitializedTerm;
@@ -86,26 +84,18 @@ public:
     bool shouldStopFetchingResult = false;
 
     // Override to change multiApply behavior.
-    MultiApplier::MultiApplyFn multiApplyFn;
-
-    // Override to change _multiInitialSyncApply behavior.
-    using MultiInitialSyncApplyFn = stdx::function<Status(
-        MultiApplier::OperationPtrs* ops, const HostAndPort& source, AtomicUInt32* fetchCount)>;
-    MultiInitialSyncApplyFn multiInitialSyncApplyFn = [](
-        MultiApplier::OperationPtrs*, const HostAndPort&, AtomicUInt32*) { return Status::OK(); };
+    using MultiApplyFn = stdx::function<StatusWith<OpTime>(
+        OperationContext*, MultiApplier::Operations, OplogApplier::Observer*)>;
+    MultiApplyFn multiApplyFn;
 
     StatusWith<ReplSetConfig> replSetConfigResult = ReplSetConfig();
 
 private:
-    StatusWith<OpTime> _multiApply(OperationContext* txn,
+    StatusWith<OpTime> _multiApply(OperationContext* opCtx,
                                    MultiApplier::Operations ops,
-                                   MultiApplier::ApplyOperationFn applyOperation) override;
-
-    Status _multiSyncApply(MultiApplier::OperationPtrs* ops) override;
-
-    Status _multiInitialSyncApply(MultiApplier::OperationPtrs* ops,
-                                  const HostAndPort& source,
-                                  AtomicUInt32* fetchCount) override;
+                                   OplogApplier::Observer* observer,
+                                   const HostAndPort& source,
+                                   ThreadPool* writerPool) override;
 };
 
 

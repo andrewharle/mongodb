@@ -1,30 +1,33 @@
 // @file time_support.h
 
-/*    Copyright 2010 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -36,11 +39,14 @@
 #include <string>
 
 #include "mongo/base/status_with.h"
+#include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/duration.h"
 
 namespace mongo {
+
+class BackgroundThreadClockSource;
 
 template <typename Allocator>
 class StringBuilderImpl;
@@ -58,10 +64,17 @@ class Date_t {
 public:
     /**
      * The largest representable Date_t.
-     *
-     * TODO(schwerin): Make constexpr when supported by all compilers.
      */
-    static Date_t max();
+    static constexpr Date_t max() {
+        return fromMillisSinceEpoch(std::numeric_limits<long long>::max());
+    }
+
+    /**
+     * The minimum representable Date_t.
+     */
+    static constexpr Date_t min() {
+        return fromMillisSinceEpoch(0);
+    }
 
     /**
      * Reads the system clock and returns a Date_t representing the present time.
@@ -71,7 +84,7 @@ public:
     /**
      * Returns a Date_t from an integer number of milliseconds since the epoch.
      */
-    static Date_t fromMillisSinceEpoch(long long m) {
+    static constexpr Date_t fromMillisSinceEpoch(long long m) {
         return Date_t(m);
     }
 
@@ -86,7 +99,7 @@ public:
     /**
      * Constructs a Date_t representing the epoch.
      */
-    Date_t() = default;
+    constexpr Date_t() = default;
 
     /**
      * Constructs a Date_t from a system clock time point.
@@ -168,7 +181,7 @@ public:
 
     template <typename Duration>
     Date_t& operator+=(Duration d) {
-        millis += duration_cast<Milliseconds>(d).count();
+        *this = *this + d;
         return *this;
     }
 
@@ -179,9 +192,7 @@ public:
 
     template <typename Duration>
     Date_t operator+(Duration d) const {
-        Date_t result = *this;
-        result += d;
-        return result;
+        return Date_t::fromDurationSinceEpoch(toDurationSinceEpoch() + d);
     }
 
     template <typename Duration>
@@ -219,10 +230,40 @@ public:
         return !(*this < other);
     }
 
+    friend std::ostream& operator<<(std::ostream& out, const Date_t& date) {
+        out << date.toString();
+        return out;
+    }
+
+    /**
+     * Only exposed for testing.  See lastNow()
+     */
+    static Date_t lastNowForTest() {
+        return lastNow();
+    }
+
 private:
-    explicit Date_t(long long m) : millis(m) {}
+    constexpr explicit Date_t(long long m) : millis(m) {}
 
     long long millis = 0;
+
+    friend class BackgroundThreadClockSource;
+
+    /**
+     * Returns the last time fetched from Date_t::now()
+     *
+     * Note that this is a private semi-implementation detail for BackgroundThreadClockSource.  Use
+     * svc->getFastClockSource()->now() over calling this method.
+     *
+     * If you think you have another use for it, please reconsider, or at least consider very
+     * carefully as correctly using it is complicated.
+     */
+    static Date_t lastNow() {
+        return fromMillisSinceEpoch(lastNowVal.loadRelaxed());
+    }
+
+    // Holds the last value returned from now()
+    static AtomicWord<long long> lastNowVal;
 };
 
 // uses ISO 8601 dates without trailing Z
@@ -340,5 +381,8 @@ char* asctime(const struct tm* tm);
 char* ctime(const time_t* timep);
 struct tm* gmtime(const time_t* timep);
 struct tm* localtime(const time_t* timep);
+
+// Find minimum system timer resolution of OS
+Nanoseconds getMinimumTimerResolution();
 
 }  // namespace mongo

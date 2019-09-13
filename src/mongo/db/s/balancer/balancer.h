@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -47,9 +49,7 @@ class Status;
 
 /**
  * The balancer is a background task that tries to keep the number of chunks across all
- * servers of the cluster even. Although every mongos will have one balancer running, only one
- * of them will be active at the any given point in time. The balancer uses a distributed lock
- * for that coordination.
+ * servers of the cluster even.
  *
  * The balancer does act continuously but in "rounds". At a given round, it would decide if
  * there is an imbalance by checking the difference in chunks between the most and least
@@ -84,7 +84,7 @@ public:
      * waitForBalancerToStop has been called before). Any code in this call must not try to acquire
      * any locks or to wait on operations, which acquire locks.
      */
-    void initiateBalancer(OperationContext* txn);
+    void initiateBalancer(OperationContext* opCtx);
 
     /**
      * Invoked when this node which is currently serving as a 'PRIMARY' steps down and is invoked
@@ -114,7 +114,7 @@ public:
      * balancer round and will block until the current round completes otherwise. If the operation
      * context's deadline is exceeded, it will throw an ExceededTimeLimit exception.
      */
-    void joinCurrentRound(OperationContext* txn);
+    void joinCurrentRound(OperationContext* opCtx);
 
     /**
      * Blocking call, which requests the balancer to move a single chunk to a more appropriate
@@ -122,7 +122,7 @@ public:
      * will actually move because it may already be at the best shard. An error will be returned if
      * the attempt to find a better shard or the actual migration fail for any reason.
      */
-    Status rebalanceSingleChunk(OperationContext* txn, const ChunkType& chunk);
+    Status rebalanceSingleChunk(OperationContext* opCtx, const ChunkType& chunk);
 
     /**
      * Blocking call, which requests the balancer to move a single chunk to the specified location
@@ -132,7 +132,7 @@ public:
      * NOTE: This call disregards the balancer enabled/disabled status and will proceed with the
      *       move regardless. If should be used only for user-initiated moves.
      */
-    Status moveSingleChunk(OperationContext* txn,
+    Status moveSingleChunk(OperationContext* opCtx,
                            const ChunkType& chunk,
                            const ShardId& newShardId,
                            uint64_t maxChunkSizeBytes,
@@ -142,7 +142,7 @@ public:
     /**
      * Appends the runtime state of the balancer instance to the specified builder.
      */
-    void report(OperationContext* txn, BSONObjBuilder* builder);
+    void report(OperationContext* opCtx, BSONObjBuilder* builder);
 
 private:
     /**
@@ -167,39 +167,39 @@ private:
     /**
      * Signals the beginning and end of a balancing round.
      */
-    void _beginRound(OperationContext* txn);
-    void _endRound(OperationContext* txn, Seconds waitTimeout);
+    void _beginRound(OperationContext* opCtx);
+    void _endRound(OperationContext* opCtx, Seconds waitTimeout);
 
     /**
      * Blocks the caller for the specified timeout or until the balancer condition variable is
      * signaled, whichever comes first.
      */
-    void _sleepFor(OperationContext* txn, Seconds waitTimeout);
+    void _sleepFor(OperationContext* opCtx, Seconds waitTimeout);
 
     /**
      * Returns true if all the servers listed in configdb as being shards are reachable and are
      * distinct processes (no hostname mixup).
      */
-    bool _checkOIDs(OperationContext* txn);
+    bool _checkOIDs(OperationContext* opCtx);
 
     /**
      * Iterates through all chunks in all collections and ensures that no chunks straddle tag
      * boundary. If any do, they will be split.
      */
-    Status _enforceTagRanges(OperationContext* txn);
+    Status _enforceTagRanges(OperationContext* opCtx);
 
     /**
      * Schedules migrations for the specified set of chunks and returns how many chunks were
      * successfully processed.
      */
-    int _moveChunks(OperationContext* txn,
+    int _moveChunks(OperationContext* opCtx,
                     const BalancerChunkSelectionPolicy::MigrateInfoVector& candidateChunks);
 
     /**
      * Performs a split on the chunk with min value "minKey". If the split fails, it is marked as
      * jumbo.
      */
-    void _splitOrMarkJumbo(OperationContext* txn,
+    void _splitOrMarkJumbo(OperationContext* opCtx,
                            const NamespaceString& nss,
                            const BSONObj& minKey);
 

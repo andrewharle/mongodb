@@ -259,16 +259,6 @@ function assertErrorCode(coll, pipe, code, errmsg) {
         pipe = [pipe];
     }
 
-    // Test non-cursor
-    var res = coll.runCommand("aggregate", {pipeline: pipe});
-    if (res.ok || res.code != code)
-        printjson({pipeline: pipe, result: res});
-
-    /* assert failure with proper error code */
-    assert(!res.ok, errmsg || "failed in assertErrorCode");
-    assert.eq(res.code, code);
-
-    // Test with cursors
     var cmd = {pipeline: pipe};
     // cmd.cursor = {};
     cmd.cursor = {batchSize: 0};
@@ -276,14 +266,27 @@ function assertErrorCode(coll, pipe, code, errmsg) {
     var cursorRes = coll.runCommand("aggregate", cmd);
     if (cursorRes.ok) {
         var followupBatchSize = 0;  // default
-        var cursor = new DBCommandCursor(cursorRes._mongo, cursorRes, followupBatchSize);
+        var cursor = new DBCommandCursor(coll.getDB(), cursorRes, followupBatchSize);
 
         var error = assert.throws(function() {
             cursor.itcount();
         }, [], "expected error: " + code);
 
-        assert.eq(error.code, code);
+        assert.eq(error.code, code, tojson(error));
     } else {
-        assert.eq(cursorRes.code, code);
+        assert.eq(cursorRes.code, code, tojson(cursorRes));
     }
+}
+
+/**
+ * Assert that an aggregation fails with a specific code and the error message contains the given
+ * string.
+ */
+function assertErrMsgContains(coll, pipe, code, expectedMessage) {
+    const response = assert.commandFailedWithCode(
+        coll.getDB().runCommand({aggregate: coll.getName(), pipeline: pipe, cursor: {}}), code);
+    assert.neq(
+        -1,
+        response.errmsg.indexOf(expectedMessage),
+        "Error message did not contain '" + expectedMessage + "', found:\n" + tojson(response));
 }

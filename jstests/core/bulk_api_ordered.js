@@ -1,3 +1,7 @@
+// Cannot implicitly shard accessed collections because of following errmsg: A single
+// update/delete on a sharded collection must contain an exact match on _id or contain the shard
+// key.
+// @tags: [assumes_unsharded_collection, requires_non_retryable_writes]
 
 var collectionName = "bulk_api_ordered";
 var coll = db.getCollection(collectionName);
@@ -16,15 +20,12 @@ jsTest.log("Starting bulk api ordered tests...");
  *******************************************************/
 var executeTests = function() {
     /**
-     * find() requires selector and $key is disallowed as field name
+     * find() requires selector.
      */
     var bulkOp = coll.initializeOrderedBulkOp();
 
     assert.throws(function() {
         bulkOp.find();
-    });
-    assert.throws(function() {
-        bulkOp.insert({$key: 1});
     });
 
     /**

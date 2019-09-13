@@ -2,18 +2,17 @@
 
 Import("env")
 
+env = env.Clone()
+
 env.Library(
     target='views_mongod',
     source=[
         'durable_view_catalog.cpp',
-        'view_sharding_check.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/dbhelpers',
         '$BUILD_DIR/mongo/db/views/views',
-        '$BUILD_DIR/mongo/db/catalog/catalog',
-        '$BUILD_DIR/mongo/db/s/sharding',
-    ]
+    ],
 )
 
 env.Library(
@@ -22,9 +21,9 @@ env.Library(
         'view.cpp',
         'view_catalog.cpp',
         'view_graph.cpp',
-        'resolved_view.cpp',
     ],
     LIBDEPS=[
+        'resolved_view',
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/server_parameters',
         '$BUILD_DIR/mongo/db/pipeline/aggregation',
@@ -33,30 +32,31 @@ env.Library(
     ]
 )
 
-env.CppUnitTest(
-    target='view_catalog_test',
+env.Library(
+    target='resolved_view',
     source=[
+        'resolved_view.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+    ]
+)
+
+env.CppUnitTest(
+    target='views_test',
+    source=[
+        'resolved_view_test.cpp',
         'view_catalog_test.cpp',
+        'view_definition_test.cpp',
         'view_graph_test.cpp',
     ],
     LIBDEPS=[
         'views',
-        '$BUILD_DIR/mongo/db/auth/authorization_manager_mock_init',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/query/collation/collator_interface_mock',
         '$BUILD_DIR/mongo/db/query/query_test_service_context',
-        '$BUILD_DIR/mongo/db/service_context_noop_init',
-        '$BUILD_DIR/mongo/unittest/unittest',
-    ],
-)
-
-env.CppUnitTest(
-    target='resolved_view_test',
-    source=[
-        'resolved_view_test.cpp',
-    ],
-    LIBDEPS=[
-        'views',
-        '$BUILD_DIR/mongo/db/auth/authorization_manager_mock_init',
-        '$BUILD_DIR/mongo/db/service_context_noop_init',
+        '$BUILD_DIR/mongo/db/repl/replmocks',
+        '$BUILD_DIR/mongo/s/is_mongos',
         '$BUILD_DIR/mongo/unittest/unittest',
     ],
 )

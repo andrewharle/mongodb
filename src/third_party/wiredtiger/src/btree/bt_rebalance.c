@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -76,14 +76,11 @@ __rebalance_leaf_append(WT_SESSION_IMPL *session,
 	WT_RET(__wt_calloc_one(session, &copy));
 	rs->leaf[rs->leaf_next++] = copy;
 
-	copy->page = NULL;
-	copy->home = NULL;
-	copy->pindex_hint = 0;
 	copy->state = WT_REF_DISK;
 
 	WT_RET(__wt_calloc_one(session, &copy_addr));
 	copy->addr = copy_addr;
-	WT_RET(__wt_strndup(session, addr, addr_len, &copy_addr->addr));
+	WT_RET(__wt_memdup(session, addr, addr_len, &copy_addr->addr));
 	copy_addr->size = (uint8_t)addr_len;
 	copy_addr->type = (uint8_t)addr_type;
 
@@ -92,7 +89,6 @@ __rebalance_leaf_append(WT_SESSION_IMPL *session,
 	else
 		copy->ref_recno = recno;
 
-	copy->page_del = NULL;
 	return (0);
 }
 
@@ -110,7 +106,7 @@ __rebalance_fl_append(WT_SESSION_IMPL *session,
 	    session, &rs->fl_allocated, rs->fl_next + 1, &rs->fl));
 	copy = &rs->fl[rs->fl_next++];
 
-	WT_RET(__wt_strndup(session, addr, addr_len, &copy->addr));
+	WT_RET(__wt_memdup(session, addr, addr_len, &copy->addr));
 	copy->size = (uint8_t)addr_len;
 	copy->type = 0;
 
@@ -239,7 +235,7 @@ __rebalance_col_walk(
 			    unpack.type == WT_CELL_ADDR_LEAF ?
 			    WT_ADDR_LEAF : WT_ADDR_LEAF_NO, rs));
 			break;
-		WT_ILLEGAL_VALUE_ERR(session);
+		WT_ILLEGAL_VALUE_ERR(session, unpack.type);
 		}
 	}
 
@@ -255,16 +251,19 @@ static int
 __rebalance_row_leaf_key(WT_SESSION_IMPL *session,
     const uint8_t *addr, size_t addr_len, WT_ITEM *key, WT_REBALANCE_STUFF *rs)
 {
-	WT_PAGE *page;
 	WT_DECL_RET;
+	WT_PAGE *page;
 
 	/*
 	 * We need the first key from a leaf page. Leaf pages are relatively
 	 * complex (Huffman encoding, prefix compression, and so on), do the
 	 * work to instantiate the page and copy the first key to the buffer.
+	 *
+	 * Page flags are 0 because we aren't releasing the memory used to read
+	 * the page into memory and we don't want page discard to free it.
 	 */
 	WT_RET(__wt_bt_read(session, rs->tmp1, addr, addr_len));
-	WT_RET(__wt_page_inmem(session, NULL, rs->tmp1->data, 0, 0, &page));
+	WT_RET(__wt_page_inmem(session, NULL, rs->tmp1->data, 0, &page));
 	ret = __wt_row_leaf_key_copy(session, page, &page->pg_row[0], key);
 	__wt_page_out(session, &page);
 	return (ret);
@@ -387,7 +386,7 @@ __rebalance_row_walk(
 
 			first_cell = false;
 			break;
-		WT_ILLEGAL_VALUE_ERR(session);
+		WT_ILLEGAL_VALUE_ERR(session, unpack.type);
 		}
 	}
 
@@ -441,7 +440,7 @@ __wt_bt_rebalance(WT_SESSION_IMPL *session, const char *cfg[])
 		WT_ERR(
 		    __rebalance_col_walk(session, btree->root.page->dsk, rs));
 		break;
-	WT_ILLEGAL_VALUE_ERR(session);
+	WT_ILLEGAL_VALUE_ERR(session, rs->type);
 	}
 
 	/* Build a new root page. */

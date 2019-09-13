@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,11 +38,13 @@
 #include "mongo/client/connection_string.h"
 #include "mongo/client/mongo_uri.h"
 #include "mongo/client/replica_set_monitor.h"
+#include "mongo/executor/network_connection_hook.h"
 #include "mongo/executor/network_interface_factory.h"
 #include "mongo/executor/network_interface_thread_pool.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/executor/thread_pool_task_executor.h"
+#include "mongo/rpc/metadata/egress_metadata_hook_list.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/util/log.h"
@@ -76,10 +80,13 @@ shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getMonitor(StringData se
 }
 
 void ReplicaSetMonitorManager::_setupTaskExecutorInLock(const std::string& name) {
+    auto hookList = stdx::make_unique<rpc::EgressMetadataHookList>();
+
     // do not restart taskExecutor if is in shutdown
     if (!_taskExecutor && !_isShutdown) {
         // construct task executor
-        auto net = executor::makeNetworkInterface("ReplicaSetMonitor-TaskExecutor");
+        auto net = executor::makeNetworkInterface(
+            "ReplicaSetMonitor-TaskExecutor", nullptr, std::move(hookList));
         auto netPtr = net.get();
         _taskExecutor = stdx::make_unique<ThreadPoolTaskExecutor>(
             stdx::make_unique<NetworkInterfaceThreadPool>(netPtr), std::move(net));
@@ -88,6 +95,12 @@ void ReplicaSetMonitorManager::_setupTaskExecutorInLock(const std::string& name)
                << redact(name);
         _taskExecutor->startup();
     }
+}
+
+namespace {
+void uassertNotMixingSSL(transport::ConnectSSLMode a, transport::ConnectSSLMode b) {
+    uassert(51042, "Mixing ssl modes with a single replica set is disallowed", a == b);
+}
 }
 
 shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getOrCreateMonitor(
@@ -99,6 +112,7 @@ shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getOrCreateMonitor(
     auto setName = connStr.getSetName();
     auto monitor = _monitors[setName].lock();
     if (monitor) {
+        uassertNotMixingSSL(monitor->getOriginalUri().getSSLMode(), transport::kGlobalSSLMode);
         return monitor;
     }
 
@@ -120,6 +134,7 @@ shared_ptr<ReplicaSetMonitor> ReplicaSetMonitorManager::getOrCreateMonitor(const
     const auto& setName = uri.getSetName();
     auto monitor = _monitors[setName].lock();
     if (monitor) {
+        uassertNotMixingSSL(monitor->getOriginalUri().getSSLMode(), uri.getSSLMode());
         return monitor;
     }
 
@@ -191,19 +206,22 @@ void ReplicaSetMonitorManager::removeAllMonitors() {
     }
 }
 
-void ReplicaSetMonitorManager::report(BSONObjBuilder* builder) {
+void ReplicaSetMonitorManager::report(BSONObjBuilder* builder, bool forFTDC) {
     // Don't hold _mutex the whole time to avoid ever taking a monitor's mutex while holding the
     // manager's mutex.  Otherwise we could get a deadlock between the manager's, monitor's, and
     // ShardRegistry's mutex due to the ReplicaSetMonitor's AsynchronousConfigChangeHook potentially
     // calling ShardRegistry::updateConfigServerConnectionString.
     auto setNames = getAllSetNames();
+
+    BSONObjBuilder setStats(
+        builder->subobjStart(forFTDC ? "replicaSetPingTimesMillis" : "replicaSets"));
+
     for (const auto& setName : setNames) {
         auto monitor = getMonitor(setName);
         if (!monitor) {
             continue;
         }
-        BSONObjBuilder monitorInfo(builder->subobjStart(setName));
-        monitor->appendInfo(monitorInfo);
+        monitor->appendInfo(setStats, forFTDC);
     }
 }
 

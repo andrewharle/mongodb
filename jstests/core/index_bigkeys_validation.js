@@ -1,3 +1,8 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   does_not_support_stepdowns,
+// ]
+
 // Tests that index validation succeeds for long keys when failIndexKeyTooLong is set to false.
 // See: SERVER-22234
 'use strict';
@@ -12,8 +17,7 @@
         assert.eq(res.valid, valid, tojson(res));
         // Verify that the top level response object is consistent with the index-specific one.
         if (full) {
-            assert.eq(
-                res.valid, res.indexDetails[coll.getFullName() + '.$_id_'].valid, tojson(res));
+            assert.eq(res.valid, res.indexDetails['_id_'].valid, tojson(res));
         }
     }
 
@@ -40,9 +44,11 @@
     // Change failIndexKeyTooLong back to the default value.
     assert.commandWorked(db.adminCommand({setParameter: 1, failIndexKeyTooLong: true}));
 
-    // Verify that a non-full validation fails when the failIndexKeyTooLong parameter is
+    // Verify that a non-full validation succeeds when the failIndexKeyTooLong parameter is
     // reverted to its old value and there are mismatched index keys and documents.
-    checkCollectionIsValid({valid: false, full: false});
+    // Since during the collection scan, we see the un-indexed long keys in the
+    // documents keys.
+    checkCollectionIsValid({valid: true, full: false});
 
     // Verify that a full validation still succeeds.
     checkCollectionIsValid({valid: true, full: true});

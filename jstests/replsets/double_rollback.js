@@ -2,13 +2,16 @@
  * This test causes node 2 to enter rollback, reach the common point, and exit rollback, but before
  * it can apply operations to bring it back to a consistent state, switch sync sources to the node
  * that originally gave it the ops it is now rolling back (node 0).  This test then verifies that
- * node 2 refuses to use node0 as a sync source because it doesn't contain the minValid document
+ * node 2 refuses to use node 0 as a sync source because it doesn't contain the minValid document
  * it needs to reach consistency.  Node 2 is then allowed to reconnect to the node it was
  * originally rolling back against (node 1) and finish its rollback.  This is a regression test
  * against the case where we *did* allow node 2 to sync from node 0 which gave it the very ops
  * it rolled back, which could then lead to a double-rollback when node 2 was reconnected
  * to node 1 and tried to apply its oplog despite not being in a consistent state.
  */
+
+// Rollback to a stable timestamp does not set a minValid and should be able to sync from any node.
+// @tags: [requires_mmapv1]
 
 (function() {
     'use strict';
@@ -40,7 +43,7 @@
     assert.eq(nodes[0], rst.getPrimary());
     // Wait for all data bearing nodes to get up to date.
     assert.writeOK(nodes[0].getDB(dbName).getCollection(collName).insert(
-        {a: 1}, {writeConcern: {w: 3, wtimeout: 5 * 60 * 1000}}));
+        {a: 1}, {writeConcern: {w: 3, wtimeout: ReplSetTest.kDefaultTimeoutMS}}));
 
     jsTestLog("Create two partitions: [1] and [0,2,3,4].");
     nodes[1].disconnect(nodes[0]);
@@ -50,7 +53,7 @@
 
     jsTestLog("Do a write that is replicated to [0,2,3,4].");
     assert.writeOK(nodes[0].getDB(dbName).getCollection(collName + "2").insert({a: 2}, {
-        writeConcern: {w: 2, wtimeout: 5 * 60 * 1000}
+        writeConcern: {w: 2, wtimeout: ReplSetTest.kDefaultTimeoutMS}
     }));
 
     jsTestLog("Repartition to: [0,2] and [1,3,4].");
@@ -106,8 +109,12 @@
     checkLog.contains(
         nodes[2], "remote oplog does not contain entry with optime matching our required optime");
 
-    var node0RBID = nodes[0].adminCommand('replSetGetRBID').rbid;
-    var node1RBID = nodes[1].adminCommand('replSetGetRBID').rbid;
+    // Ensure our connection to node 0 is re-established, since our
+    // original connection should have gotten killed after node 0 stepped down.
+    reconnect(nodes[0]);
+
+    var node0RBID = assert.commandWorked(nodes[0].adminCommand('replSetGetRBID')).rbid;
+    var node1RBID = assert.commandWorked(nodes[1].adminCommand('replSetGetRBID')).rbid;
 
     jsTestLog("Reconnect all nodes.");
     nodes[0].reconnect(nodes[1]);
@@ -122,14 +129,22 @@
     waitForState(nodes[2], ReplSetTest.State.SECONDARY);
     rst.awaitReplication();
 
+    // Ensure our connection to node 0 is re-established, since our connection should have gotten
+    // killed during node 0's transition to ROLLBACK.
+    reconnect(nodes[0]);
+
     // Check that rollback happened on node 0, but not on node 2 since it had already rolled back
     // and just needed to finish applying ops to reach minValid.
-    assert.neq(node0RBID, nodes[0].adminCommand('replSetGetRBID').rbid);
-    assert.eq(node1RBID, nodes[1].adminCommand('replSetGetRBID').rbid);
+    assert.neq(node0RBID, assert.commandWorked(nodes[0].adminCommand('replSetGetRBID')).rbid);
+    assert.eq(node1RBID, assert.commandWorked(nodes[1].adminCommand('replSetGetRBID')).rbid);
 
     // Node 1 should still be primary, and should now be able to satisfy majority writes again.
     assert.writeOK(nodes[1].getDB(dbName).getCollection(collName + "4").insert({a: 4}, {
-        writeConcern: {w: 3, wtimeout: 5 * 60 * 1000}
+        writeConcern: {w: 3, wtimeout: ReplSetTest.kDefaultTimeoutMS}
     }));
 
+    // Verify data consistency between nodes.
+    rst.checkReplicatedDataHashes();
+    rst.checkOplogs();
+    rst.stopSet();
 }());

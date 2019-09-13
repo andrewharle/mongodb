@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -50,12 +52,10 @@ bool ReplSetTag::operator!=(const ReplSetTag& other) const {
 }
 
 void ReplSetTagPattern::addTagCountConstraint(int32_t keyIndex, int32_t minCount) {
-    const std::vector<TagCountConstraint>::iterator iter = std::find_if(
-        _constraints.begin(),
-        _constraints.end(),
-        stdx::bind(std::equal_to<int32_t>(),
-                   keyIndex,
-                   stdx::bind(&TagCountConstraint::getKeyIndex, stdx::placeholders::_1)));
+    const auto iter =
+        std::find_if(_constraints.begin(), _constraints.end(), [=](const TagCountConstraint& x) {
+            return keyIndex == x.getKeyIndex();
+        });
     if (iter == _constraints.end()) {
         _constraints.push_back(TagCountConstraint(keyIndex, minCount));
     } else if (iter->getMinCount() < minCount) {
@@ -75,12 +75,10 @@ ReplSetTagMatch::ReplSetTagMatch(const ReplSetTagPattern& pattern) {
 }
 
 bool ReplSetTagMatch::update(const ReplSetTag& tag) {
-    const std::vector<BoundTagValue>::iterator iter =
+    const auto iter =
         std::find_if(_boundTagValues.begin(),
                      _boundTagValues.end(),
-                     stdx::bind(std::equal_to<int32_t>(),
-                                tag.getKeyIndex(),
-                                stdx::bind(&BoundTagValue::getKeyIndex, stdx::placeholders::_1)));
+                     [ki = tag.getKeyIndex()](const auto& x) { return ki == x.getKeyIndex(); });
     if (iter != _boundTagValues.end()) {
         if (!sequenceContains(iter->boundValues, tag.getValueIndex())) {
             iter->boundValues.push_back(tag.getValueIndex());
@@ -90,12 +88,9 @@ bool ReplSetTagMatch::update(const ReplSetTag& tag) {
 }
 
 bool ReplSetTagMatch::isSatisfied() const {
-    const std::vector<BoundTagValue>::const_iterator iter =
-        std::find_if(_boundTagValues.begin(),
-                     _boundTagValues.end(),
-                     stdx::bind(std::logical_not<bool>(),
-                                stdx::bind(&BoundTagValue::isSatisfied, stdx::placeholders::_1)));
-    return iter == _boundTagValues.end();
+    return std::find_if(_boundTagValues.begin(), _boundTagValues.end(), [](const auto& x) {
+               return !x.isSatisfied();
+           }) == _boundTagValues.end();
 }
 
 bool ReplSetTagMatch::BoundTagValue::isSatisfied() const {

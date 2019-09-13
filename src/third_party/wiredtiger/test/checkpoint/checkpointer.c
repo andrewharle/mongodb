@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -28,7 +28,7 @@
 
 #include "test_checkpoint.h"
 
-static void *checkpointer(void *);
+static WT_THREAD_RET checkpointer(void *);
 static int compare_cursors(
     WT_CURSOR *, const char *, WT_CURSOR *, const char *);
 static int diagnose_key_error(WT_CURSOR *, int, WT_CURSOR *, int);
@@ -39,46 +39,39 @@ static int verify_checkpoint(WT_SESSION *);
  * start_checkpoints --
  *     Responsible for creating the checkpoint thread.
  */
-int
+void
 start_checkpoints(void)
 {
-	int ret;
-
-	if ((ret = pthread_create(
-	    &g.checkpoint_thread, NULL, checkpointer, NULL)) != 0)
-		return (log_print_err("pthread_create", ret, 1));
-	return (0);
+	testutil_check(__wt_thread_create(NULL,
+	    &g.checkpoint_thread, checkpointer, NULL));
 }
 
 /*
  * end_checkpoints --
  *     Responsible for cleanly shutting down the checkpoint thread.
  */
-int
+void
 end_checkpoints(void)
 {
-	void *thread_ret;
-
-	return (pthread_join(g.checkpoint_thread, &thread_ret));
-
+	testutil_check(__wt_thread_join(NULL, &g.checkpoint_thread));
 }
 
 /*
  * checkpointer --
  *	Checkpoint thread start function.
  */
-static void *
+static WT_THREAD_RET
 checkpointer(void *arg)
 {
 	char tid[128];
 
 	WT_UNUSED(arg);
 
-	testutil_check(__wt_thread_id(tid, sizeof(tid)));
+	testutil_check(__wt_thread_str(tid, sizeof(tid)));
 	printf("checkpointer thread starting: tid: %s\n", tid);
 
 	(void)real_checkpointer();
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }
 
 /*
@@ -90,8 +83,8 @@ static int
 real_checkpointer(void)
 {
 	WT_SESSION *session;
-	char *checkpoint_config, _buf[128];
 	int ret;
+	char buf[128], *checkpoint_config;
 
 	if (g.running == 0)
 		return (log_print_err(
@@ -103,14 +96,14 @@ real_checkpointer(void)
 	if ((ret = g.conn->open_session(g.conn, NULL, NULL, &session)) != 0)
 		return (log_print_err("conn.open_session", ret, 1));
 
-	if (strncmp(g.checkpoint_name,
-	    "WiredTigerCheckpoint", strlen("WiredTigerCheckpoint")) == 0)
+	if (WT_PREFIX_MATCH(g.checkpoint_name, "WiredTigerCheckpoint"))
 		checkpoint_config = NULL;
 	else {
 		testutil_check(__wt_snprintf(
-		    _buf, sizeof(_buf), "name=%s", g.checkpoint_name));
-		checkpoint_config = _buf;
+		    buf, sizeof(buf), "name=%s", g.checkpoint_name));
+		checkpoint_config = buf;
 	}
+
 	while (g.running) {
 		/* Execute a checkpoint */
 		if ((ret = session->checkpoint(
@@ -141,10 +134,10 @@ static int
 verify_checkpoint(WT_SESSION *session)
 {
 	WT_CURSOR **cursors;
-	const char *type0, *typei;
-	char next_uri[128], ckpt[128];
-	int i, ret, t_ret;
 	uint64_t key_count;
+	int i, ret, t_ret;
+	char ckpt[128], next_uri[128];
+	const char *type0, *typei;
 
 	ret = t_ret = 0;
 	key_count = 0;
@@ -247,8 +240,8 @@ compare_cursors(
     WT_CURSOR *cursor2, const char *type2)
 {
 	uint64_t key1, key2;
-	char *val1, *val2, buf[128];
 	int ret;
+	char buf[128], *val1, *val2;
 
 	ret = 0;
 	memset(buf, 0, 128);
@@ -292,8 +285,8 @@ diagnose_key_error(
 	WT_CURSOR *c;
 	WT_SESSION *session;
 	uint64_t key1, key1_orig, key2, key2_orig;
-	char next_uri[128], ckpt[128];
 	int ret;
+	char ckpt[128], next_uri[128];
 
 	/* Hack to avoid passing session as parameter. */
 	session = cursor1->session;

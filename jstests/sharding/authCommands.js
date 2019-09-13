@@ -3,20 +3,26 @@
  */
 (function() {
     'use strict';
+
+    // TODO SERVER-35447: Multiple users cannot be authenticated on one connection within a session.
+    TestData.disableImplicitSessions = true;
+
     load("jstests/replsets/rslib.js");
+
+    // Replica set nodes started with --shardsvr do not enable key generation until they are added
+    // to a sharded cluster and reject commands with gossiped clusterTime from users without the
+    // advanceClusterTime privilege. This causes ShardingTest setup to fail because the shell
+    // briefly authenticates as __system and recieves clusterTime metadata then will fail trying to
+    // gossip that time later in setup.
+    //
+    // TODO SERVER-32672: remove this flag.
+    TestData.skipGossipingClusterTime = true;
 
     var st = new ShardingTest({
         shards: 2,
         rs: {oplogSize: 10, useHostname: false},
-        other: {
-            // Temporarily increasing mongos/config verbosity for BF insight (SERVER-28519)
-            mongosOptions: {verbose: 1},
-            configOptions: {verbose: 1},
-            keyFile: 'jstests/libs/key1',
-            useHostname: false,
-            chunkSize: 2,
-            enableAutoSplit: true
-        },
+        other:
+            {keyFile: 'jstests/libs/key1', useHostname: false, chunkSize: 2, enableAutoSplit: true},
     });
 
     var mongos = st.s;
@@ -54,7 +60,7 @@
     jsTestLog('Creating initial data');
 
     st.adminCommand({enablesharding: "test"});
-    st.ensurePrimaryShard('test', 'test-rs0');
+    st.ensurePrimaryShard('test', st.shard0.shardName);
     st.adminCommand({shardcollection: "test.foo", key: {i: 1, j: 1}});
 
     // Balancer is stopped by default, so no moveChunks will interfere with the splits we're testing
@@ -102,20 +108,16 @@
     };
 
     var checkCommandSucceeded = function(db, cmdObj) {
-        print("Running command that should succeed: ");
-        printjson(cmdObj);
-        var resultObj = db.runCommand(cmdObj);
+        print("Running command that should succeed: " + tojson(cmdObj));
+        var resultObj = assert.commandWorked(db.runCommand(cmdObj));
         printjson(resultObj);
-        assert(resultObj.ok);
         return resultObj;
     };
 
     var checkCommandFailed = function(db, cmdObj) {
-        print("Running command that should fail: ");
-        printjson(cmdObj);
-        var resultObj = db.runCommand(cmdObj);
+        print("Running command that should fail: " + tojson(cmdObj));
+        var resultObj = assert.commandFailed(db.runCommand(cmdObj));
         printjson(resultObj);
-        assert(!resultObj.ok);
         return resultObj;
     };
 
@@ -124,9 +126,9 @@
             print("Checking read operations, should work");
             assert.eq(expectedDocs, testDB.foo.find().itcount());
             assert.eq(expectedDocs, testDB.foo.count());
+
             // NOTE: This is an explicit check that GLE can be run with read prefs, not the result
-            // of
-            // above.
+            // of above.
             assert.eq(null, testDB.runCommand({getlasterror: 1}).err);
             checkCommandSucceeded(testDB, {dbstats: 1});
             checkCommandSucceeded(testDB, {collstats: 'foo'});
@@ -139,9 +141,10 @@
 
             res = checkCommandSucceeded(testDB, {
                 aggregate: 'foo',
-                pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}]
+                pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}],
+                cursor: {}
             });
-            assert.eq(4500, res.result[0].sum);
+            assert.eq(4500, res.cursor.firstBatch[0].sum);
         } else {
             print("Checking read operations, should fail");
             assert.throws(function() {
@@ -153,7 +156,8 @@
                                {mapreduce: 'foo', map: map, reduce: reduce, out: {inline: 1}});
             checkCommandFailed(testDB, {
                 aggregate: 'foo',
-                pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}]
+                pipeline: [{$project: {j: 1}}, {$group: {_id: 'j', sum: {$sum: '$j'}}}],
+                cursor: {}
             });
         }
     };
@@ -170,7 +174,6 @@
             testDB.foo.remove({a: 1});
             assert.eq(null, testDB.runCommand({getlasterror: 1}).err);
             checkCommandSucceeded(testDB, {reIndex: 'foo'});
-            checkCommandSucceeded(testDB, {repairDatabase: 1});
             checkCommandSucceeded(testDB,
                                   {mapreduce: 'foo', map: map, reduce: reduce, out: 'mrOutput'});
             assert.eq(100, testDB.mrOutput.count());
@@ -190,7 +193,6 @@
             checkCommandFailed(
                 testDB, {findAndModify: "foo", query: {a: 1, i: 1, j: 1}, update: {$set: {b: 1}}});
             checkCommandFailed(testDB, {reIndex: 'foo'});
-            checkCommandFailed(testDB, {repairDatabase: 1});
             checkCommandFailed(testDB,
                                {mapreduce: 'foo', map: map, reduce: reduce, out: 'mrOutput'});
             checkCommandFailed(testDB, {drop: 'foo'});
@@ -221,7 +223,7 @@
             checkCommandSucceeded(adminDB, {isdbgrid: 1});
             checkCommandSucceeded(adminDB, {ismaster: 1});
             checkCommandSucceeded(adminDB, {split: 'test.foo', find: {i: 1, j: 1}});
-            var chunk = configDB.chunks.findOne({shard: st.rs0.name});
+            var chunk = configDB.chunks.findOne({ns: 'test.foo', shard: st.rs0.name});
             checkCommandSucceeded(
                 adminDB,
                 {moveChunk: 'test.foo', find: chunk.min, to: st.rs1.name, _waitForDelete: true});

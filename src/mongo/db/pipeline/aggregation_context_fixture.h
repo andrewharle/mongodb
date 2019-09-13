@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,11 +33,10 @@
 #include <boost/intrusive_ptr.hpp>
 #include <memory>
 
-#include "mongo/db/client.h"
 #include "mongo/db/pipeline/expression_context_for_test.h"
-#include "mongo/db/query/query_test_service_context.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -43,21 +44,27 @@ namespace mongo {
 /**
  * Test fixture which provides an ExpressionContext for use in testing.
  */
-class AggregationContextFixture : public unittest::Test {
+class AggregationContextFixture : public ServiceContextTest {
 public:
     AggregationContextFixture()
-        : _queryServiceContext(stdx::make_unique<QueryTestServiceContext>()),
-          _opCtx(_queryServiceContext->makeOperationContext()),
-          _expCtx(new ExpressionContextForTest(
-              _opCtx.get(), AggregationRequest(NamespaceString("unittests.pipeline_test"), {}))) {}
+        : AggregationContextFixture(NamespaceString("unittests.pipeline_test")) {}
 
-    boost::intrusive_ptr<ExpressionContextForTest> getExpCtx() {
+    AggregationContextFixture(NamespaceString nss) {
+        TimeZoneDatabase::set(getServiceContext(), std::make_unique<TimeZoneDatabase>());
+        // Must instantiate ExpressionContext _after_ setting the TZ database on the service
+        // context.
+        _expCtx = new ExpressionContext(_opCtx.get(), nullptr);
+        _expCtx->ns = std::move(nss);
+        unittest::TempDir tempDir("AggregationContextFixture");
+        _expCtx->tempDir = tempDir.path();
+    }
+
+    boost::intrusive_ptr<ExpressionContext> getExpCtx() {
         return _expCtx.get();
     }
 
 private:
-    std::unique_ptr<QueryTestServiceContext> _queryServiceContext;
-    ServiceContext::UniqueOperationContext _opCtx;
-    boost::intrusive_ptr<ExpressionContextForTest> _expCtx;
+    ServiceContext::UniqueOperationContext _opCtx = makeOperationContext();
+    boost::intrusive_ptr<ExpressionContext> _expCtx;
 };
 }  // namespace mongo

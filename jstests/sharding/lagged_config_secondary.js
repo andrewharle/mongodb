@@ -1,7 +1,16 @@
 /**
  * Test that mongos times out when the config server replica set only contains nodes that
  * are behind the majority opTime.
+ *
+ * This test triggers a compiler bug that causes a crash when compiling with optimizations on, see
+ * SERVER-35632.
+ * @tags: [blacklist_from_rhel_67_s390x]
  */
+
+// Checking UUID consistency involves mongos being able to do a read from the config server, but
+// this test is designed to make mongos time out when reading from the config server.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     var st = new ShardingTest(
         {shards: 1, configReplSetTestOptions: {settings: {chainingAllowed: false}}});
@@ -26,7 +35,7 @@
     assert.writeOK(st.getDB('config').TestConfigColl.insert({TestKey: 'Test value'}));
 
     st.configRS.stopMaster();
-    MongoRunner.stopMongod(configSecondaryToKill.port);
+    MongoRunner.stopMongod(configSecondaryToKill);
 
     // Clears all cached info so mongos will be forced to query from the config.
     st.s.adminCommand({flushRouterConfig: 1});
@@ -36,7 +45,7 @@
         testDB.user.find({}).maxTimeMS(15000).itcount();
     });
 
-    assert.eq(ErrorCodes.ExceededTimeLimit, exception.code);
+    assert(ErrorCodes.isExceededTimeLimitError(exception.code));
 
     var msg = 'Command on database config timed out waiting for read concern to be satisfied.';
     assert.soon(function() {

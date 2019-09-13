@@ -5,6 +5,10 @@
 //   # former operation may be routed to a secondary in the replica set, whereas the latter must be
 //   # routed to the primary.
 //   assumes_read_preference_unchanged,
+//   does_not_support_stepdowns,
+//   # Uses $where operator
+//   requires_scripting,
+//   uses_multiple_connections,
 // ]
 
 t = db.count10;
@@ -19,7 +23,7 @@ for (i = 0; i < 100; i++) {
 // kill it via db.killOp().
 s = startParallelShell('assert.soon(function() {' +
                        '   current = db.currentOp({"ns": db.count10.getFullName(), ' +
-                       '                           "query.count": db.count10.getName()}); ' +
+                       '                           "command.count": db.count10.getName()}); ' +
 
                        // Check that we found the count op. If not, return false so
                        // that assert.soon will retry.

@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -93,10 +93,11 @@ class test_txn14(wttest.WiredTigerTestCase, suite_subprocess):
         c.close()
         self.session.log_flush(cfgarg)
         if self.sync == 'background':
-            # If doing a background flush, wait a few seconds.  I have
-            # seen an individual log file's fsync take more than a second
-            # on some systems.  So give it time to flush perhaps a few files.
-            self.session.transaction_sync('timeout_ms=4000')
+            # If doing a background flush, wait 30 seconds. I have seen an
+            # individual log file's fsync take more than a second on some
+            # systems, and we've seen timeouts at 10 seconds on systems
+            # with slow I/O. So give it time to flush perhaps a few files.
+            self.session.transaction_sync('timeout_ms=30000')
         self.simulate_crash_restart(".", "RESTART")
         c = self.session.open_cursor(self.t1, None, None)
         i = 0

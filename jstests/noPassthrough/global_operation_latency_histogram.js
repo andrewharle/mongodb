@@ -1,10 +1,11 @@
 // Checks that global histogram counters for collections are updated as we expect.
+// @tags: [requires_replication]
 
 (function() {
     "use strict";
     var name = "operationalLatencyHistogramTest";
 
-    var mongo = MongoRunner.runMongod({master: ""});
+    var mongo = MongoRunner.runMongod();
     var testDB = mongo.getDB("test");
     var testColl = testDB[name + "coll"];
 
@@ -165,4 +166,5 @@
     // Test non-command.
     assert.commandFailed(testColl.runCommand("IHopeNobodyEverMakesThisACommand"));
     lastHistogram = checkHistogramDiff(0, 0, 1);
+    MongoRunner.stopMongod(mongo);
 }());

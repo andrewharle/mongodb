@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -32,6 +34,8 @@
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/secure_allocator.h"
+#include "mongo/base/shim.h"
 #include "mongo/base/status.h"
 #include "mongo/bson/mutable/element.h"
 #include "mongo/bson/oid.h"
@@ -44,10 +48,11 @@
 #include "mongo/db/auth/user_name_hash.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/platform/unordered_map.h"
+#include "mongo/db/server_options.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
 
 namespace mongo {
 
@@ -66,21 +71,32 @@ struct AuthInfo {
 extern AuthInfo internalSecurity;  // set at startup and not changed after initialization.
 
 /**
+ * How user management functions should structure the BSON representation of privileges and roles.
+ */
+enum class AuthenticationRestrictionsFormat {
+    kOmit,  // AuthenticationRestrictions should not be included in the BSON representation.
+    kShow,  // AuthenticationRestrictions should be included in the BSON representation.
+};
+
+/**
  * Contains server/cluster-wide information about Authorization.
  */
 class AuthorizationManager {
-    MONGO_DISALLOW_COPYING(AuthorizationManager);
+    AuthorizationManager(const AuthorizationManager&) = delete;
+    AuthorizationManager& operator=(const AuthorizationManager&) = delete;
 
 public:
     static AuthorizationManager* get(ServiceContext* service);
     static AuthorizationManager* get(ServiceContext& service);
     static void set(ServiceContext* service, std::unique_ptr<AuthorizationManager> authzManager);
 
-    // The newly constructed AuthorizationManager takes ownership of "externalState"
-    explicit AuthorizationManager(std::unique_ptr<AuthzManagerExternalState> externalState);
+    virtual ~AuthorizationManager() = default;
 
-    ~AuthorizationManager();
+    AuthorizationManager() = default;
 
+    static MONGO_DECLARE_SHIM(()->std::unique_ptr<AuthorizationManager>) create;
+
+    static const std::string USERID_FIELD_NAME;
     static const std::string USER_NAME_FIELD_NAME;
     static const std::string USER_DB_FIELD_NAME;
     static const std::string ROLE_NAME_FIELD_NAME;
@@ -97,6 +113,12 @@ public:
     static const NamespaceString versionCollectionNamespace;
     static const NamespaceString defaultTempUsersCollectionNamespace;  // for mongorestore
     static const NamespaceString defaultTempRolesCollectionNamespace;  // for mongorestore
+
+    /**
+     * Status to be returned when authentication fails. Being consistent about our returned Status
+     * prevents information leakage.
+     */
+    static const Status authenticationFailedStatus;
 
     /**
      * Query to match the auth schema version document in the versionCollectionNamespace.
@@ -139,51 +161,30 @@ public:
      */
     static const int schemaVersion28SCRAM = 5;
 
-    // TODO: Make the following functions no longer static.
-
-    /**
-     * Takes a vector of privileges and fills the output param "resultArray" with a BSON array
-     * representation of the privileges.
-     */
-    static Status getBSONForPrivileges(const PrivilegeVector& privileges,
-                                       mutablebson::Element resultArray);
-
-    /**
-     * Takes a role name and a role graph and fills the output param "result" with a BSON
-     * representation of the role object.
-     * This function does no locking - it is up to the caller to synchronize access to the
-     * role graph.
-     * Note: The passed in RoleGraph can't be marked const because some of its accessors can
-     * actually modify it internally (to set up built-in roles).
-     */
-    static Status getBSONForRole(/*const*/ RoleGraph* graph,
-                                 const RoleName& roleName,
-                                 mutablebson::Element result);
-
     /**
      * Returns a new AuthorizationSession for use with this AuthorizationManager.
      */
-    std::unique_ptr<AuthorizationSession> makeAuthorizationSession();
+    virtual std::unique_ptr<AuthorizationSession> makeAuthorizationSession() = 0;
 
     /**
      * Sets whether or not startup AuthSchema validation checks should be applied in this manager.
      */
-    void setShouldValidateAuthSchemaOnStartup(bool validate);
+    virtual void setShouldValidateAuthSchemaOnStartup(bool validate) = 0;
 
     /**
      * Returns true if startup AuthSchema validation checks should be applied in this manager.
      */
-    bool shouldValidateAuthSchemaOnStartup();
+    virtual bool shouldValidateAuthSchemaOnStartup() = 0;
 
     /**
      * Sets whether or not access control enforcement is enabled for this manager.
      */
-    void setAuthEnabled(bool enabled);
+    virtual void setAuthEnabled(bool enabled) = 0;
 
     /**
      * Returns true if access control is enabled for this manager .
      */
-    bool isAuthEnabled() const;
+    virtual bool isAuthEnabled() const = 0;
 
     /**
      * Returns via the output parameter "version" the version number of the authorization
@@ -192,12 +193,12 @@ public:
      * returns a non-OK status.  When returning a non-OK status, *version will be set to
      * schemaVersionInvalid (0).
      */
-    Status getAuthorizationVersion(OperationContext* txn, int* version);
+    virtual Status getAuthorizationVersion(OperationContext* opCtx, int* version) = 0;
 
     /**
      * Returns the user cache generation identifier.
      */
-    OID getCacheGeneration();
+    virtual OID getCacheGeneration() = 0;
 
     /**
      * Returns true if there exists at least one privilege document in the system.
@@ -207,47 +208,50 @@ public:
      * meaning that once this method returns true it will continue to return true for the
      * lifetime of this process, even if all users are subsequently dropped from the system.
      */
-    bool hasAnyPrivilegeDocuments(OperationContext* txn);
-
-    // Checks to see if "doc" is a valid privilege document, assuming it is stored in the
-    // "system.users" collection of database "dbname".
-    //
-    // Returns Status::OK() if the document is good, or Status(ErrorCodes::BadValue), otherwise.
-    Status checkValidPrivilegeDocument(StringData dbname, const BSONObj& doc);
-
-    // Given a database name and a readOnly flag return an ActionSet describing all the actions
-    // that an old-style user with those attributes should be given.
-    ActionSet getActionsForOldStyleUser(const std::string& dbname, bool readOnly) const;
+    virtual bool hasAnyPrivilegeDocuments(OperationContext* opCtx) = 0;
 
     /**
      * Delegates method call to the underlying AuthzManagerExternalState.
      */
-    Status getUserDescription(OperationContext* txn, const UserName& userName, BSONObj* result);
+    virtual Status getUserDescription(OperationContext* opCtx,
+                                      const UserName& userName,
+                                      BSONObj* result) = 0;
 
     /**
      * Delegates method call to the underlying AuthzManagerExternalState.
      */
-    Status getRoleDescription(OperationContext* txn,
-                              const RoleName& roleName,
-                              PrivilegeFormat privilegeFormat,
-                              BSONObj* result);
+    virtual Status getRoleDescription(OperationContext* opCtx,
+                                      const RoleName& roleName,
+                                      PrivilegeFormat privilegeFormat,
+                                      AuthenticationRestrictionsFormat,
+                                      BSONObj* result) = 0;
+
+    /**
+     * Convenience wrapper for getRoleDescription() defaulting formats to kOmit.
+     */
+    Status getRoleDescription(OperationContext* ctx, const RoleName& roleName, BSONObj* result) {
+        return getRoleDescription(
+            ctx, roleName, PrivilegeFormat::kOmit, AuthenticationRestrictionsFormat::kOmit, result);
+    }
 
     /**
      * Delegates method call to the underlying AuthzManagerExternalState.
      */
-    Status getRolesDescription(OperationContext* txn,
-                               const std::vector<RoleName>& roleName,
-                               PrivilegeFormat privilegeFormat,
-                               BSONObj* result);
+    virtual Status getRolesDescription(OperationContext* opCtx,
+                                       const std::vector<RoleName>& roleName,
+                                       PrivilegeFormat privilegeFormat,
+                                       AuthenticationRestrictionsFormat,
+                                       BSONObj* result) = 0;
 
     /**
      * Delegates method call to the underlying AuthzManagerExternalState.
      */
-    Status getRoleDescriptionsForDB(OperationContext* txn,
-                                    const std::string dbname,
-                                    PrivilegeFormat privilegeFormat,
-                                    bool showBuiltinRoles,
-                                    std::vector<BSONObj>* result);
+    virtual Status getRoleDescriptionsForDB(OperationContext* opCtx,
+                                            const std::string dbname,
+                                            PrivilegeFormat privilegeFormat,
+                                            AuthenticationRestrictionsFormat,
+                                            bool showBuiltinRoles,
+                                            std::vector<BSONObj>* result) = 0;
 
     /**
      *  Returns the User object for the given userName in the out parameter "acquiredUser".
@@ -259,35 +263,45 @@ public:
      *  The AuthorizationManager retains ownership of the returned User object.
      *  On non-OK Status return values, acquiredUser will not be modified.
      */
-    Status acquireUser(OperationContext* txn, const UserName& userName, User** acquiredUser);
+    virtual Status acquireUser(OperationContext* opCtx,
+                               const UserName& userName,
+                               User** acquiredUser) = 0;
+
+    /**
+     * Validate the ID associated with a known user while refreshing session cache.
+     */
+    virtual Status acquireUserForSessionRefresh(OperationContext* opCtx,
+                                                const UserName& userName,
+                                                const User::UserId& uid,
+                                                User** acquiredUser) = 0;
 
     /**
      * Decrements the refcount of the given User object.  If the refcount has gone to zero,
      * deletes the User.  Caller must stop using its pointer to "user" after calling this.
      */
-    void releaseUser(User* user);
+    virtual void releaseUser(User* user) = 0;
 
     /**
      * Marks the given user as invalid and removes it from the user cache.
      */
-    void invalidateUserByName(const UserName& user);
+    virtual void invalidateUserByName(const UserName& user) = 0;
 
     /**
      * Invalidates all users who's source is "dbname" and removes them from the user cache.
      */
-    void invalidateUsersFromDB(const std::string& dbname);
+    virtual void invalidateUsersFromDB(const std::string& dbname) = 0;
 
     /**
      * Initializes the authorization manager.  Depending on what version the authorization
      * system is at, this may involve building up the user cache and/or the roles graph.
      * Call this function at startup and after resynchronizing a slave/secondary.
      */
-    Status initialize(OperationContext* txn);
+    virtual Status initialize(OperationContext* opCtx) = 0;
 
     /**
      * Invalidates all of the contents of the user cache.
      */
-    void invalidateUserCache();
+    virtual void invalidateUserCache() = 0;
 
     /**
      * Parses privDoc and fully initializes the user object (credentials, roles, and privileges)
@@ -295,123 +309,17 @@ public:
      * This should never be called from outside the AuthorizationManager - the only reason it's
      * public instead of private is so it can be unit tested.
      */
-    Status _initializeUserFromPrivilegeDocument(User* user, const BSONObj& privDoc);
+    virtual Status _initializeUserFromPrivilegeDocument(User* user, const BSONObj& privDoc) = 0;
 
     /**
      * Hook called by replication code to let the AuthorizationManager observe changes
      * to relevant collections.
      */
-    void logOp(OperationContext* txn,
-               const char* opstr,
-               const char* ns,
-               const BSONObj& obj,
-               const BSONObj* patt);
-
-private:
-    /**
-     * Type used to guard accesses and updates to the user cache.
-     */
-    class CacheGuard;
-    friend class AuthorizationManager::CacheGuard;
-
-    /**
-     * Invalidates all User objects in the cache and removes them from the cache.
-     * Should only be called when already holding _cacheMutex.
-     */
-    void _invalidateUserCache_inlock();
-
-    /**
-     * Given the objects describing an oplog entry that affects authorization data, invalidates
-     * the portion of the user cache that is affected by that operation.  Should only be called
-     * with oplog entries that have been pre-verified to actually affect authorization data.
-     */
-    void _invalidateRelevantCacheData(const char* op,
-                                      const char* ns,
-                                      const BSONObj& o,
-                                      const BSONObj* o2);
-
-    /**
-     * Updates _cacheGeneration to a new OID
-     */
-    void _updateCacheGeneration_inlock();
-
-    /**
-     * Fetches user information from a v2-schema user document for the named user,
-     * and stores a pointer to a new user object into *acquiredUser on success.
-     */
-    Status _fetchUserV2(OperationContext* txn,
-                        const UserName& userName,
-                        std::unique_ptr<User>* acquiredUser);
-
-    /**
-     * True if AuthSchema startup checks should be applied in this AuthorizationManager.
-     *
-     * Defaults to true.  Changes to its value are not synchronized, so it should only be set
-     * at initalization-time.
-     */
-    bool _startupAuthSchemaValidation;
-
-    /**
-     * True if access control enforcement is enabled in this AuthorizationManager.
-     *
-     * Defaults to false.  Changes to its value are not synchronized, so it should only be set
-     * at initalization-time.
-     */
-    bool _authEnabled;
-
-    /**
-     * A cache of whether there are any users set up for the cluster.
-     */
-    bool _privilegeDocsExist;
-
-    // Protects _privilegeDocsExist
-    mutable stdx::mutex _privilegeDocsExistMutex;
-
-    std::unique_ptr<AuthzManagerExternalState> _externalState;
-
-    /**
-     * Cached value of the authorization schema version.
-     *
-     * May be set by acquireUser() and getAuthorizationVersion().  Invalidated by
-     * invalidateUserCache().
-     *
-     * Reads and writes guarded by CacheGuard.
-     */
-    int _version;
-
-    /**
-     * Caches User objects with information about user privileges, to avoid the need to
-     * go to disk to read user privilege documents whenever possible.  Every User object
-     * has a reference count - the AuthorizationManager must not delete a User object in the
-     * cache unless its reference count is zero.
-     */
-    unordered_map<UserName, User*> _userCache;
-
-    /**
-     * Current generation of cached data.  Updated every time part of the cache gets
-     * invalidated.  Protected by CacheGuard.
-     */
-    OID _cacheGeneration;
-
-    /**
-     * True if there is an update to the _userCache in progress, and that update is currently in
-     * the "fetch phase", during which it does not hold the _cacheMutex.
-     *
-     * Manipulated via CacheGuard.
-     */
-    bool _isFetchPhaseBusy;
-
-    /**
-     * Protects _userCache, _cacheGeneration, _version and _isFetchPhaseBusy.  Manipulated
-     * via CacheGuard.
-     */
-    stdx::mutex _cacheMutex;
-
-    /**
-     * Condition used to signal that it is OK for another CacheGuard to enter a fetch phase.
-     * Manipulated via CacheGuard.
-     */
-    stdx::condition_variable _fetchPhaseIsReady;
+    virtual void logOp(OperationContext* opCtx,
+                       const char* opstr,
+                       const NamespaceString& nss,
+                       const BSONObj& obj,
+                       const BSONObj* patt) = 0;
 };
 
 }  // namespace mongo

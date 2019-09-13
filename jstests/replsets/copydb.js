@@ -9,7 +9,7 @@
     replTest.startSet();
     replTest.initiate();
     var primary = replTest.getPrimary();
-    var secondary = replTest.liveNodes.slaves[0];
+    var secondary = replTest._slaves[0];
 
     var sourceDBName = 'copydb-repl-test-source';
     var targetDBName = 'copydb-repl-test-target';
@@ -93,4 +93,5 @@
     assert.eq(primaryTargetDB.foo.getIndexes().length,
               secondaryTargetDB.foo.getIndexes().length,
               'incorrect number of indexes in target collection on secondary after copy');
+    replTest.stopSet();
 }());

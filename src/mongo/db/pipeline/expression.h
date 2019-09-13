@@ -1,35 +1,38 @@
+
 /**
- * Copyright (c) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
 #include "mongo/platform/basic.h"
 
+#include <algorithm>
 #include <boost/intrusive_ptr.hpp>
 #include <map>
 #include <string>
@@ -41,10 +44,12 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/value.h"
+#include "mongo/db/pipeline/variables.h"
+#include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/server_options.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/string_map.h"
 
 namespace mongo {
 
@@ -54,126 +59,51 @@ class BSONObjBuilder;
 class DocumentSource;
 
 /**
- * Registers an Parser so it can be called from parseExpression and friends.
+ * Registers a Parser so it can be called from parseExpression and friends.
  *
  * As an example, if your expression looks like {"$foo": [1,2,3]} you would add this line:
  * REGISTER_EXPRESSION(foo, ExpressionFoo::parse);
+ *
+ * An expression registered this way can be used in any featureCompatibilityVersion.
  */
 #define REGISTER_EXPRESSION(key, parser)                                     \
     MONGO_INITIALIZER(addToExpressionParserMap_##key)(InitializerContext*) { \
-        Expression::registerExpression("$" #key, (parser));                  \
+        Expression::registerExpression("$" #key, (parser), boost::none);     \
         return Status::OK();                                                 \
     }
 
-// TODO: Look into merging with ExpressionContext.
-/// The state used as input and working space for Expressions.
-class Variables {
-    MONGO_DISALLOW_COPYING(Variables);
-
-public:
-    /**
-     * Each unique variable is assigned a unique id of this type
-     */
-    typedef size_t Id;
-
-    // This is only for expressions that use no variables (even ROOT).
-    Variables() : _numVars(0) {}
-
-    explicit Variables(size_t numVars, const Document& root = Document())
-        : _root(root), _rest(numVars == 0 ? NULL : new Value[numVars]), _numVars(numVars) {}
-
-    static void uassertValidNameForUserWrite(StringData varName);
-    static void uassertValidNameForUserRead(StringData varName);
-
-    static const Id ROOT_ID = Id(-1);
-
-    /**
-     * Use this instead of setValue for setting ROOT
-     */
-    void setRoot(const Document& root) {
-        _root = root;
-    }
-    void clearRoot() {
-        _root = Document();
-    }
-    const Document& getRoot() const {
-        return _root;
-    }
-
-    void setValue(Id id, const Value& value);
-    Value getValue(Id id) const;
-
-    /**
-     * returns Document() for non-document values.
-     */
-    Document getDocument(Id id) const;
-
-private:
-    Document _root;
-    const std::unique_ptr<Value[]> _rest;
-    const size_t _numVars;
-};
-
 /**
- * Generates Variables::Ids and keeps track of the number of Ids handed out.
- */
-class VariablesIdGenerator {
-public:
-    VariablesIdGenerator() : _nextId(0) {}
-
-    Variables::Id generateId() {
-        return _nextId++;
-    }
-
-    /**
-     * Returns the number of Ids handed out by this Generator.
-     * Return value is intended to be passed to Variables constructor.
-     */
-    Variables::Id getIdCount() const {
-        return _nextId;
-    }
-
-private:
-    Variables::Id _nextId;
-};
-
-/**
- * This class represents the Variables that are defined in an Expression tree.
+ * Registers a Parser so it can be called from parseExpression and friends. Use this version if your
+ * expression can only be persisted to a catalog data structure in a feature compatibility version
+ * >= X.
  *
- * All copies from a given instance share enough information to ensure unique Ids are assigned
- * and to propagate back to the original instance enough information to correctly construct a
- * Variables instance.
+ * As an example, if your expression looks like {"$foo": [1,2,3]}, and can only be used in a feature
+ * compatibility version >= X, you would add this line:
+ * REGISTER_EXPRESSION_WITH_MIN_VERSION(foo, ExpressionFoo::parse, X);
  */
-class VariablesParseState {
-public:
-    explicit VariablesParseState(VariablesIdGenerator* idGenerator) : _idGenerator(idGenerator) {}
+#define REGISTER_EXPRESSION_WITH_MIN_VERSION(key, parser, minVersion)        \
+    MONGO_INITIALIZER(addToExpressionParserMap_##key)(InitializerContext*) { \
+        Expression::registerExpression("$" #key, (parser), (minVersion));    \
+        return Status::OK();                                                 \
+    }
 
-    /**
-     * Assigns a named variable a unique Id. This differs from all other variables, even
-     * others with the same name.
-     *
-     * The special variables ROOT and CURRENT are always implicitly defined with CURRENT
-     * equivalent to ROOT. If CURRENT is explicitly defined by a call to this function, it
-     * breaks that equivalence.
-     *
-     * NOTE: Name validation is responsibility of caller.
-     */
-    Variables::Id defineVariable(StringData name);
-
-    /**
-     * Returns the current Id for a variable. uasserts if the variable isn't defined.
-     */
-    Variables::Id getVariable(StringData name) const;
-
-private:
-    StringMap<Variables::Id> _variables;
-    VariablesIdGenerator* _idGenerator;
-};
-
-class Expression : public IntrusiveCounterUnsigned {
+class Expression : public RefCountable {
 public:
     using Parser = stdx::function<boost::intrusive_ptr<Expression>(
         const boost::intrusive_ptr<ExpressionContext>&, BSONElement, const VariablesParseState&)>;
+
+    /**
+     * Represents new paths computed by an expression. Computed paths are partitioned into renames
+     * and non-renames. See the comments for Expression::getComputedPaths() for more information.
+     */
+    struct ComputedPaths {
+        // Non-rename computed paths.
+        std::set<std::string> paths;
+
+        // Mappings from the old name of a path before applying this expression, to the new one
+        // after applying this expression.
+        StringMap<std::string> renames;
+    };
 
     virtual ~Expression(){};
 
@@ -193,11 +123,17 @@ public:
     }
 
     /**
-     * Add the fields used as input to this expression to 'deps'.
-     *
-     * Expressions are trees, so this is often recursive.
+     * Add the fields and variables used in this expression to 'deps'. References to variables which
+     * are local to a particular expression will be filtered out of the tracker upon return.
      */
-    virtual void addDependencies(DepsTracker* deps) const = 0;
+    void addDependencies(DepsTracker* deps) {
+        _doAddDependencies(deps);
+
+        // Filter out references to any local variables.
+        if (_boundaryVariableId) {
+            deps->vars.erase(deps->vars.upper_bound(*_boundaryVariableId), deps->vars.end());
+        }
+    }
 
     /**
      * Serialize the Expression tree recursively.
@@ -208,24 +144,40 @@ public:
     virtual Value serialize(bool explain) const = 0;
 
     /**
-     * Evaluate expression with respect to the Document given by 'root', and return the result.
-     *
-     * This method should only be used for testing.
+     * Evaluate the expression with respect to the Document given by 'root' and the Variables given
+     * by 'variables'. It is an error to supply a Variables argument whose built-in variables (like
+     * $$NOW) are not set. This method is thread-safe, so long as the 'variables' passed in here is
+     * not shared between threads.
      */
-    Value evaluate(const Document& root) const {
-        Variables vars(0, root);
-        return evaluate(&vars);
-    }
+    virtual Value evaluate(const Document& root, Variables* variables) const = 0;
 
     /**
-     * Evaluate expression with variables given by 'vars', and return the result.
+     * Returns information about the paths computed by this expression. This only needs to be
+     * overridden by expressions that have renaming semantics, where optimization code could take
+     * advantage of knowledge of these renames.
      *
-     * While vars is non-const, a subexpression's modifications to it should not effect outer
-     * Expressions, since variables defined in the subexpression's scope will be given unique
-     * variable ids.
+     * Partitions paths involved in this expression into the set of computed paths and the set of
+     * ("new" => "old") rename mappings. Here "new" refers to the name of the path after applying
+     * this expression, whereas "old" refers to the name of the path before applying this
+     * expression.
+     *
+     * The 'exprFieldPath' is the field path at which the result of this expression will be stored.
+     * This is used to determine the value of the "new" path created by the rename.
+     *
+     * The 'renamingVar' is needed for checking whether a field path is a rename. For example, at
+     * the top level only field paths that begin with the ROOT variable, as in "$$ROOT.path", are
+     * renames. A field path such as "$$var.path" is not a rename.
+     *
+     * Now consider the example of a rename expressed via a $map:
+     *
+     *    {$map: {input: "$array", as: "iter", in: {...}}}
+     *
+     * In this case, only field paths inside the "in" clause beginning with "iter", such as
+     * "$$iter.path", are renames.
      */
-    Value evaluate(Variables* vars) const {
-        return evaluateInternal(vars);
+    virtual ComputedPaths getComputedPaths(const std::string& exprFieldPath,
+                                           Variables::Id renamingVar = Variables::kRootId) const {
+        return {{exprFieldPath}, {}};
     }
 
     /**
@@ -273,41 +225,43 @@ public:
      */
     static std::string removeFieldPrefix(const std::string& prefixedField);
 
-    /** Evaluate the subclass Expression using the given Variables as context and return result.
-     *
-     *  Should only be called by subclasses, but can't be protected because they need to call
-     *  this function on each other.
-     */
-    virtual Value evaluateInternal(Variables* vars) const = 0;
-
     /**
      * Registers an Parser so it can be called from parseExpression.
      *
      * DO NOT call this method directly. Instead, use the REGISTER_EXPRESSION macro defined in this
      * file.
      */
-    static void registerExpression(std::string key, Parser parser);
-
-protected:
-    Expression(const boost::intrusive_ptr<ExpressionContext>& expCtx) : _expCtx(expCtx) {}
-
-    typedef std::vector<boost::intrusive_ptr<Expression>> ExpressionVector;
+    static void registerExpression(
+        std::string key,
+        Parser parser,
+        boost::optional<ServerGlobalParams::FeatureCompatibility::Version> requiredMinVersion);
 
     const boost::intrusive_ptr<ExpressionContext>& getExpressionContext() const {
         return _expCtx;
     }
 
+protected:
+    Expression(const boost::intrusive_ptr<ExpressionContext>& expCtx) : _expCtx(expCtx) {
+        auto varIds = _expCtx->variablesParseState.getDefinedVariableIDs();
+        if (!varIds.empty()) {
+            _boundaryVariableId = *std::prev(varIds.end());
+        }
+    }
+
+    typedef std::vector<boost::intrusive_ptr<Expression>> ExpressionVector;
+
+    virtual void _doAddDependencies(DepsTracker* deps) const = 0;
+
 private:
+    boost::optional<Variables::Id> _boundaryVariableId;
     boost::intrusive_ptr<ExpressionContext> _expCtx;
 };
 
-
-/// Inherit from ExpressionVariadic or ExpressionFixedArity instead of directly from this class.
+// Inherit from ExpressionVariadic or ExpressionFixedArity instead of directly from this class.
 class ExpressionNary : public Expression {
 public:
     boost::intrusive_ptr<Expression> optimize() override;
     Value serialize(bool explain) const override;
-    void addDependencies(DepsTracker* deps) const override;
 
     /*
       Add an operand to the n-ary expression.
@@ -340,9 +294,15 @@ public:
                                            BSONElement bsonExpr,
                                            const VariablesParseState& vps);
 
+    const ExpressionVector& getOperandList() const {
+        return vpOperand;
+    }
+
 protected:
     explicit ExpressionNary(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : Expression(expCtx) {}
+
+    void _doAddDependencies(DepsTracker* deps) const override;
 
     ExpressionVector vpOperand;
 };
@@ -428,13 +388,13 @@ public:
     explicit ExpressionFromAccumulator(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionFromAccumulator<Accumulator>>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final {
+    Value evaluate(const Document& root, Variables* variables) const final {
         Accumulator accum(this->getExpressionContext());
         const size_t n = this->vpOperand.size();
         // If a single array arg is given, loop through it passing each member to the accumulator.
         // If a single, non-array arg is given, pass it directly to the accumulator.
         if (n == 1) {
-            Value singleVal = this->vpOperand[0]->evaluateInternal(vars);
+            Value singleVal = this->vpOperand[0]->evaluate(root, variables);
             if (singleVal.getType() == Array) {
                 for (const Value& val : singleVal.getArray()) {
                     accum.process(val, false);
@@ -445,7 +405,7 @@ public:
         } else {
             // If multiple arguments are given, pass all arguments to the accumulator.
             for (auto&& argument : this->vpOperand) {
-                accum.process(argument->evaluateInternal(vars), false);
+                accum.process(argument->evaluate(root, variables), false);
             }
         }
         return accum.getValue(false);
@@ -480,8 +440,8 @@ public:
 
     virtual ~ExpressionSingleNumericArg() {}
 
-    Value evaluateInternal(Variables* vars) const final {
-        Value arg = this->vpOperand[0]->evaluateInternal(vars);
+    Value evaluate(const Document& root, Variables* variables) const final {
+        Value arg = this->vpOperand[0]->evaluate(root, variables);
         if (arg.nullish())
             return Value(BSONNULL);
 
@@ -496,6 +456,209 @@ public:
     virtual Value evaluateNumericArg(const Value& numericArg) const = 0;
 };
 
+/**
+ * A constant expression. Repeated calls to evaluate() will always return the same thing.
+ */
+class ExpressionConstant final : public Expression {
+public:
+    boost::intrusive_ptr<Expression> optimize() final;
+    Value evaluate(const Document& root, Variables* variables) const final;
+    Value serialize(bool explain) const final;
+
+    const char* getOpName() const;
+
+    /**
+     * Creates a new ExpressionConstant with value 'value'.
+     */
+    static boost::intrusive_ptr<ExpressionConstant> create(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx, const Value& value);
+
+    static boost::intrusive_ptr<Expression> parse(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BSONElement bsonExpr,
+        const VariablesParseState& vps);
+
+    /**
+     * Returns true if 'expression' is nullptr or if 'expression' is an instance of an
+     * ExpressionConstant.
+     */
+    static bool isNullOrConstant(boost::intrusive_ptr<Expression> expression) {
+        return !expression || dynamic_cast<ExpressionConstant*>(expression.get());
+    }
+
+    /**
+     * Returns true if every expression in 'expressions' is either a nullptr or an instance of an
+     * ExpressionConstant.
+     */
+    static bool allNullOrConstant(
+        const std::initializer_list<boost::intrusive_ptr<Expression>>& expressions) {
+        return std::all_of(expressions.begin(), expressions.end(), [](auto exp) {
+            return ExpressionConstant::isNullOrConstant(exp);
+        });
+    }
+
+    /**
+     * Returns the constant value represented by this Expression.
+     */
+    Value getValue() const {
+        return _value;
+    }
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const override;
+
+private:
+    ExpressionConstant(const boost::intrusive_ptr<ExpressionContext>& expCtx, const Value& value);
+
+    Value _value;
+};
+
+/**
+ * Inherit from this class if your expression works with date types, and accepts either a single
+ * argument which is a date, or an object {date: <date>, timezone: <string>}.
+ */
+template <typename SubClass>
+class DateExpressionAcceptingTimeZone : public Expression {
+public:
+    virtual ~DateExpressionAcceptingTimeZone() {}
+
+    Value evaluate(const Document& root, Variables* variables) const final {
+        auto dateVal = _date->evaluate(root, variables);
+        if (dateVal.nullish()) {
+            return Value(BSONNULL);
+        }
+        auto date = dateVal.coerceToDate();
+
+        if (!_timeZone) {
+            return evaluateDate(date, TimeZoneDatabase::utcZone());
+        }
+        auto timeZoneId = _timeZone->evaluate(root, variables);
+        if (timeZoneId.nullish()) {
+            return Value(BSONNULL);
+        }
+
+        uassert(40533,
+                str::stream() << _opName
+                              << " requires a string for the timezone argument, but was given a "
+                              << typeName(timeZoneId.getType())
+                              << " ("
+                              << timeZoneId.toString()
+                              << ")",
+                timeZoneId.getType() == BSONType::String);
+
+        invariant(getExpressionContext()->timeZoneDatabase);
+        auto timeZone =
+            getExpressionContext()->timeZoneDatabase->getTimeZone(timeZoneId.getString());
+        return evaluateDate(date, timeZone);
+    }
+
+    /**
+     * Always serializes to the full {date: <date arg>, timezone: <timezone arg>} format, leaving
+     * off the timezone if not specified.
+     */
+    Value serialize(bool explain) const final {
+        return Value(Document{
+            {_opName,
+             Document{{"date", _date->serialize(explain)},
+                      {"timezone", _timeZone ? _timeZone->serialize(explain) : Value()}}}});
+    }
+
+    boost::intrusive_ptr<Expression> optimize() final {
+        _date = _date->optimize();
+        if (_timeZone) {
+            _timeZone = _timeZone->optimize();
+        }
+        if (ExpressionConstant::allNullOrConstant({_date, _timeZone})) {
+            // Everything is a constant, so we can turn into a constant.
+            return ExpressionConstant::create(
+                getExpressionContext(), evaluate(Document{}, &(getExpressionContext()->variables)));
+        }
+        return this;
+    }
+
+    static boost::intrusive_ptr<Expression> parse(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BSONElement operatorElem,
+        const VariablesParseState& variablesParseState) {
+        boost::intrusive_ptr<DateExpressionAcceptingTimeZone> dateExpression{new SubClass(expCtx)};
+        if (operatorElem.type() == BSONType::Object) {
+            if (operatorElem.embeddedObject().firstElementFieldName()[0] == '$') {
+                // Assume this is an expression specification representing the date argument
+                // like {$add: [<date>, 1000]}.
+                dateExpression->_date = Expression::parseObject(
+                    expCtx, operatorElem.embeddedObject(), variablesParseState);
+                return dateExpression;
+            } else {
+                // It's an object specifying the date and timezone options like {date: <date>,
+                // timezone: <timezone>}.
+                auto opName = operatorElem.fieldNameStringData();
+                for (const auto& subElem : operatorElem.embeddedObject()) {
+                    auto argName = subElem.fieldNameStringData();
+                    if (argName == "date"_sd) {
+                        dateExpression->_date =
+                            Expression::parseOperand(expCtx, subElem, variablesParseState);
+                    } else if (argName == "timezone"_sd) {
+                        dateExpression->_timeZone =
+                            Expression::parseOperand(expCtx, subElem, variablesParseState);
+                    } else {
+                        uasserted(40535,
+                                  str::stream() << "unrecognized option to " << opName << ": \""
+                                                << argName
+                                                << "\"");
+                    }
+                }
+                uassert(40539,
+                        str::stream() << "missing 'date' argument to " << opName << ", provided: "
+                                      << operatorElem,
+                        dateExpression->_date);
+            }
+            return dateExpression;
+        } else if (operatorElem.type() == BSONType::Array) {
+            auto elems = operatorElem.Array();
+            uassert(
+                40536,
+                str::stream() << dateExpression->_opName
+                              << " accepts exactly one argument if given an array, but was given "
+                              << elems.size(),
+                elems.size() == 1);
+            // We accept an argument wrapped in a single array. For example, either {$week: <date>}
+            // or {$week: [<date>]} are valid, but not {$week: [{date: <date>}]}.
+            operatorElem = elems[0];
+        }
+        // It's some literal value, or the first element of a user-specified array. Either way it
+        // should be treated as the date argument.
+        dateExpression->_date = Expression::parseOperand(expCtx, operatorElem, variablesParseState);
+        return dateExpression;
+    }
+
+protected:
+    explicit DateExpressionAcceptingTimeZone(StringData opName,
+                                             const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : Expression(expCtx), _opName(opName) {}
+
+    void _doAddDependencies(DepsTracker* deps) const final {
+        _date->addDependencies(deps);
+        if (_timeZone) {
+            _timeZone->addDependencies(deps);
+        }
+    }
+
+    /**
+     * Subclasses should implement this to do their actual date-related logic. Uses 'timezone' to
+     * evaluate the expression against 'data'. If the user did not specify a time zone, 'timezone'
+     * will represent the UTC zone.
+     */
+    virtual Value evaluateDate(Date_t date, const TimeZone& timezone) const = 0;
+
+private:
+    // The name of this expression, e.g. $week or $month.
+    StringData _opName;
+
+    // The expression representing the date argument.
+    boost::intrusive_ptr<Expression> _date;
+    // The expression representing the timezone argument, nullptr if not specified.
+    boost::intrusive_ptr<Expression> _timeZone = nullptr;
+};
 
 class ExpressionAbs final : public ExpressionSingleNumericArg<ExpressionAbs> {
 public:
@@ -512,7 +675,7 @@ public:
     explicit ExpressionAdd(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionAdd>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -530,7 +693,7 @@ public:
     explicit ExpressionAllElementsTrue(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionAllElementsTrue, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -541,7 +704,7 @@ public:
         : ExpressionVariadic<ExpressionAnd>(expCtx) {}
 
     boost::intrusive_ptr<Expression> optimize() final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -559,7 +722,7 @@ public:
     explicit ExpressionAnyElementTrue(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionAnyElementTrue, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -569,8 +732,9 @@ public:
     explicit ExpressionArray(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionArray>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     Value serialize(bool explain) const final;
+    boost::intrusive_ptr<Expression> optimize() final;
     const char* getOpName() const final;
 };
 
@@ -580,7 +744,7 @@ public:
     explicit ExpressionArrayElemAt(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionArrayElemAt, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -589,7 +753,7 @@ public:
     explicit ExpressionObjectToArray(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionObjectToArray, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -598,7 +762,7 @@ public:
     explicit ExpressionArrayToObject(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionArrayToObject, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -615,13 +779,15 @@ public:
 class ExpressionCoerceToBool final : public Expression {
 public:
     boost::intrusive_ptr<Expression> optimize() final;
-    void addDependencies(DepsTracker* deps) const final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     Value serialize(bool explain) const final;
 
     static boost::intrusive_ptr<ExpressionCoerceToBool> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const boost::intrusive_ptr<Expression>& pExpression);
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
 
 private:
     ExpressionCoerceToBool(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -650,8 +816,12 @@ public:
     ExpressionCompare(const boost::intrusive_ptr<ExpressionContext>& expCtx, CmpOp cmpOp)
         : ExpressionFixedArity<ExpressionCompare, 2>(expCtx), cmpOp(cmpOp) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
+
+    CmpOp getOp() const {
+        return cmpOp;
+    }
 
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -675,7 +845,7 @@ public:
     explicit ExpressionConcat(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionConcat>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -689,7 +859,7 @@ public:
     explicit ExpressionConcatArrays(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionConcatArrays>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -702,7 +872,7 @@ class ExpressionCond final : public ExpressionFixedArity<ExpressionCond, 3> {
 public:
     explicit ExpressionCond(const boost::intrusive_ptr<ExpressionContext>& expCtx) : Base(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     static boost::intrusive_ptr<Expression> parse(
@@ -714,109 +884,199 @@ private:
     typedef ExpressionFixedArity<ExpressionCond, 3> Base;
 };
 
-
-class ExpressionConstant final : public Expression {
-public:
-    boost::intrusive_ptr<Expression> optimize() final;
-    void addDependencies(DepsTracker* deps) const final;
-    Value evaluateInternal(Variables* vars) const final;
-    Value serialize(bool explain) const final;
-
-    const char* getOpName() const;
-
-    static boost::intrusive_ptr<ExpressionConstant> create(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx, const Value& pValue);
-
-    static boost::intrusive_ptr<Expression> parse(
-        const boost::intrusive_ptr<ExpressionContext>& expCtx,
-        BSONElement bsonExpr,
-        const VariablesParseState& vps);
-
-    /*
-      Get the constant value represented by this Expression.
-
-      @returns the value
-     */
-    Value getValue() const {
-        return pValue;
-    }
-
-private:
-    ExpressionConstant(const boost::intrusive_ptr<ExpressionContext>& expCtx, const Value& pValue);
-
-    Value pValue;
-};
-
-class ExpressionDateToString final : public Expression {
+class ExpressionDateFromString final : public Expression {
 public:
     boost::intrusive_ptr<Expression> optimize() final;
     Value serialize(bool explain) const final;
-    Value evaluateInternal(Variables* vars) const final;
-    void addDependencies(DepsTracker* deps) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
 
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONElement expr,
         const VariablesParseState& vps);
 
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
+private:
+    ExpressionDateFromString(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                             boost::intrusive_ptr<Expression> dateString,
+                             boost::intrusive_ptr<Expression> timeZone,
+                             boost::intrusive_ptr<Expression> format,
+                             boost::intrusive_ptr<Expression> onNull,
+                             boost::intrusive_ptr<Expression> onError);
+
+    boost::intrusive_ptr<Expression> _dateString;
+    boost::intrusive_ptr<Expression> _timeZone;
+    boost::intrusive_ptr<Expression> _format;
+    boost::intrusive_ptr<Expression> _onNull;
+    boost::intrusive_ptr<Expression> _onError;
+};
+
+class ExpressionDateFromParts final : public Expression {
+public:
+    boost::intrusive_ptr<Expression> optimize() final;
+    Value serialize(bool explain) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
+
+    static boost::intrusive_ptr<Expression> parse(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BSONElement expr,
+        const VariablesParseState& vps);
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
+private:
+    ExpressionDateFromParts(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                            boost::intrusive_ptr<Expression> year,
+                            boost::intrusive_ptr<Expression> month,
+                            boost::intrusive_ptr<Expression> day,
+                            boost::intrusive_ptr<Expression> hour,
+                            boost::intrusive_ptr<Expression> minute,
+                            boost::intrusive_ptr<Expression> second,
+                            boost::intrusive_ptr<Expression> millisecond,
+                            boost::intrusive_ptr<Expression> isoWeekYear,
+                            boost::intrusive_ptr<Expression> isoWeek,
+                            boost::intrusive_ptr<Expression> isoDayOfWeek,
+                            boost::intrusive_ptr<Expression> timeZone);
+
+    /**
+     * This function checks whether a field is a number.
+     *
+     * If 'field' is null, the default value is returned trough the 'returnValue' out
+     * parameter and the function returns true.
+     *
+     * If 'field' is not null:
+     * - if the value is "nullish", the function returns false.
+     * - if the value can not be coerced to an integral value, a UserException is thrown.
+     * - otherwise, the coerced integral value is returned through the 'returnValue'
+     *   out parameter, and the function returns true.
+     */
+    bool evaluateNumberWithDefault(const Document& root,
+                                   const Expression* field,
+                                   StringData fieldName,
+                                   long long defaultValue,
+                                   long long* returnValue,
+                                   Variables* variables) const;
+
+    /**
+     * This function has the same behavior as evaluteNumberWithDefault(), except that it uasserts if
+     * the resulting value is not in the range defined by kMaxValueForDatePart and
+     * kMinValueForDatePart.
+     */
+    bool evaluateNumberWithDefaultAndBounds(const Document& root,
+                                            const Expression* field,
+                                            StringData fieldName,
+                                            long long defaultValue,
+                                            long long* returnValue,
+                                            Variables* variables) const;
+
+    boost::intrusive_ptr<Expression> _year;
+    boost::intrusive_ptr<Expression> _month;
+    boost::intrusive_ptr<Expression> _day;
+    boost::intrusive_ptr<Expression> _hour;
+    boost::intrusive_ptr<Expression> _minute;
+    boost::intrusive_ptr<Expression> _second;
+    boost::intrusive_ptr<Expression> _millisecond;
+    boost::intrusive_ptr<Expression> _isoWeekYear;
+    boost::intrusive_ptr<Expression> _isoWeek;
+    boost::intrusive_ptr<Expression> _isoDayOfWeek;
+    boost::intrusive_ptr<Expression> _timeZone;
+
+    // Some date conversions spend a long time iterating through date tables when dealing with large
+    // input numbers, so we place a reasonable limit on the magnitude of any argument to
+    // $dateFromParts: inputs that fit within a 16-bit int are permitted.
+    static constexpr long long kMaxValueForDatePart = std::numeric_limits<int16_t>::max();
+    static constexpr long long kMinValueForDatePart = std::numeric_limits<int16_t>::lowest();
+};
+
+class ExpressionDateToParts final : public Expression {
+public:
+    boost::intrusive_ptr<Expression> optimize() final;
+    Value serialize(bool explain) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
+
+    static boost::intrusive_ptr<Expression> parse(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BSONElement expr,
+        const VariablesParseState& vps);
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
+private:
+    /**
+     * The iso8601 argument controls whether to output ISO8601 elements or natural calendar.
+     */
+    ExpressionDateToParts(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                          boost::intrusive_ptr<Expression> date,
+                          boost::intrusive_ptr<Expression> timeZone,
+                          boost::intrusive_ptr<Expression> iso8601);
+
+    boost::optional<int> evaluateIso8601Flag(const Document& root, Variables* variables) const;
+
+    boost::intrusive_ptr<Expression> _date;
+    boost::intrusive_ptr<Expression> _timeZone;
+    boost::intrusive_ptr<Expression> _iso8601;
+};
+
+class ExpressionDateToString final : public Expression {
+public:
+    boost::intrusive_ptr<Expression> optimize() final;
+    Value serialize(bool explain) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
+
+    static boost::intrusive_ptr<Expression> parse(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BSONElement expr,
+        const VariablesParseState& vps);
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
 private:
     ExpressionDateToString(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                           const std::string& format,               // the format string
-                           boost::intrusive_ptr<Expression> date);  // the date to format
+                           boost::intrusive_ptr<Expression> format,
+                           boost::intrusive_ptr<Expression> date,
+                           boost::intrusive_ptr<Expression> timeZone,
+                           boost::intrusive_ptr<Expression> onNull);
 
-    // Will uassert on invalid data
-    static void validateFormat(const std::string& format);
-
-    // Need raw date as tm doesn't have millisecond resolution.
-    // Format must be valid.
-    static std::string formatDate(const std::string& format, const tm& tm, const long long date);
-
-    static void insertPadded(StringBuilder& sb, int number, int spaces);
-
-    const std::string _format;
+    boost::intrusive_ptr<Expression> _format;
     boost::intrusive_ptr<Expression> _date;
+    boost::intrusive_ptr<Expression> _timeZone;
+    boost::intrusive_ptr<Expression> _onNull;
 };
 
-class ExpressionDayOfMonth final : public ExpressionFixedArity<ExpressionDayOfMonth, 1> {
+class ExpressionDayOfMonth final : public DateExpressionAcceptingTimeZone<ExpressionDayOfMonth> {
 public:
     explicit ExpressionDayOfMonth(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionDayOfMonth, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionDayOfMonth>("$dayOfMonth", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static inline int extract(const tm& tm) {
-        return tm.tm_mday;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dateParts(date).dayOfMonth);
     }
 };
 
 
-class ExpressionDayOfWeek final : public ExpressionFixedArity<ExpressionDayOfWeek, 1> {
+class ExpressionDayOfWeek final : public DateExpressionAcceptingTimeZone<ExpressionDayOfWeek> {
 public:
     explicit ExpressionDayOfWeek(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionDayOfWeek, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionDayOfWeek>("$dayOfWeek", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    // MySQL uses 1-7, tm uses 0-6
-    static inline int extract(const tm& tm) {
-        return tm.tm_wday + 1;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dayOfWeek(date));
     }
 };
 
 
-class ExpressionDayOfYear final : public ExpressionFixedArity<ExpressionDayOfYear, 1> {
+class ExpressionDayOfYear final : public DateExpressionAcceptingTimeZone<ExpressionDayOfYear> {
 public:
     explicit ExpressionDayOfYear(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionDayOfYear, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionDayOfYear>("$dayOfYear", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    // MySQL uses 1-366, tm uses 0-365
-    static inline int extract(const tm& tm) {
-        return tm.tm_yday + 1;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dayOfYear(date));
     }
 };
 
@@ -826,7 +1086,7 @@ public:
     explicit ExpressionDivide(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionDivide, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -843,9 +1103,12 @@ public:
 
 class ExpressionFieldPath final : public Expression {
 public:
+    bool isRootFieldPath() const {
+        return _variable == Variables::kRootId;
+    }
+
     boost::intrusive_ptr<Expression> optimize() final;
-    void addDependencies(DepsTracker* deps) const final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     Value serialize(bool explain) const final;
 
     /*
@@ -874,13 +1137,19 @@ public:
         return _fieldPath;
     }
 
+    ComputedPaths getComputedPaths(const std::string& exprFieldPath,
+                                   Variables::Id renamingVar) const final;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
 private:
     ExpressionFieldPath(const boost::intrusive_ptr<ExpressionContext>& expCtx,
                         const std::string& fieldPath,
                         Variables::Id variable);
 
     /*
-      Internal implementation of evaluateInternal(), used recursively.
+      Internal implementation of evaluate(), used recursively.
 
       The internal implementation doesn't just use a loop because of
       the possibility that we need to skip over an array.  If the path
@@ -906,13 +1175,15 @@ class ExpressionFilter final : public Expression {
 public:
     boost::intrusive_ptr<Expression> optimize() final;
     Value serialize(bool explain) const final;
-    Value evaluateInternal(Variables* vars) const final;
-    void addDependencies(DepsTracker* deps) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
 
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONElement expr,
         const VariablesParseState& vps);
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
 
 private:
     ExpressionFilter(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -942,16 +1213,13 @@ public:
 };
 
 
-class ExpressionHour final : public ExpressionFixedArity<ExpressionHour, 1> {
+class ExpressionHour final : public DateExpressionAcceptingTimeZone<ExpressionHour> {
 public:
     explicit ExpressionHour(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionHour, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionHour>("$hour", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static inline int extract(const tm& tm) {
-        return tm.tm_hour;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dateParts(date).hour);
     }
 };
 
@@ -961,7 +1229,7 @@ public:
     explicit ExpressionIfNull(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionIfNull, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -971,18 +1239,45 @@ public:
     explicit ExpressionIn(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionIn, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
 
-class ExpressionIndexOfArray final : public ExpressionRangedArity<ExpressionIndexOfArray, 2, 4> {
+class ExpressionIndexOfArray : public ExpressionRangedArity<ExpressionIndexOfArray, 2, 4> {
 public:
     explicit ExpressionIndexOfArray(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionRangedArity<ExpressionIndexOfArray, 2, 4>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+
+    Value evaluate(const Document& root, Variables* variables) const;
+    boost::intrusive_ptr<Expression> optimize() final;
     const char* getOpName() const final;
+
+protected:
+    struct Arguments {
+        Arguments(Value targetOfSearch, int startIndex, int endIndex)
+            : targetOfSearch(targetOfSearch), startIndex(startIndex), endIndex(endIndex) {}
+
+        Value targetOfSearch;
+        int startIndex;
+        int endIndex;
+    };
+    /**
+     * When given 'operands' which correspond to the arguments to $indexOfArray, evaluates and
+     * validates the target value, starting index, and ending index arguments and returns their
+     * values as a Arguments struct. The starting index and ending index are optional, so as default
+     * 'startIndex' will be 0 and 'endIndex' will be the length of the input array. Throws a
+     * UserException if the values are found to be invalid in some way, e.g. if the indexes are not
+     * numbers.
+     */
+    Arguments evaluateAndValidateArguments(const Document& root,
+                                           const ExpressionVector& operands,
+                                           size_t arrayLength,
+                                           Variables* variables) const;
+
+private:
+    class Optimized;
 };
 
 
@@ -991,7 +1286,7 @@ public:
     explicit ExpressionIndexOfBytes(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionRangedArity<ExpressionIndexOfBytes, 2, 4>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1004,7 +1299,7 @@ public:
     explicit ExpressionIndexOfCP(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionRangedArity<ExpressionIndexOfCP, 2, 4>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1013,8 +1308,7 @@ class ExpressionLet final : public Expression {
 public:
     boost::intrusive_ptr<Expression> optimize() final;
     Value serialize(bool explain) const final;
-    Value evaluateInternal(Variables* vars) const final;
-    void addDependencies(DepsTracker* deps) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
 
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -1031,6 +1325,9 @@ public:
     };
 
     typedef std::map<Variables::Id, NameAndExpression> VariableMap;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
 
 private:
     ExpressionLet(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -1055,7 +1352,7 @@ public:
     explicit ExpressionLog(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionLog, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1072,13 +1369,18 @@ class ExpressionMap final : public Expression {
 public:
     boost::intrusive_ptr<Expression> optimize() final;
     Value serialize(bool explain) const final;
-    Value evaluateInternal(Variables* vars) const final;
-    void addDependencies(DepsTracker* deps) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
 
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONElement expr,
         const VariablesParseState& vps);
+
+    ComputedPaths getComputedPaths(const std::string& exprFieldPath,
+                                   Variables::Id renamingVar) const final;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
 
 private:
     ExpressionMap(
@@ -1097,13 +1399,15 @@ private:
 class ExpressionMeta final : public Expression {
 public:
     Value serialize(bool explain) const final;
-    Value evaluateInternal(Variables* vars) const final;
-    void addDependencies(DepsTracker* deps) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
 
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONElement expr,
         const VariablesParseState& vps);
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
 
 private:
     enum MetaType {
@@ -1116,28 +1420,24 @@ private:
     MetaType _metaType;
 };
 
-class ExpressionMillisecond final : public ExpressionFixedArity<ExpressionMillisecond, 1> {
+class ExpressionMillisecond final : public DateExpressionAcceptingTimeZone<ExpressionMillisecond> {
 public:
     explicit ExpressionMillisecond(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionMillisecond, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionMillisecond>("$millisecond", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static int extract(const long long date);
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dateParts(date).millisecond);
+    }
 };
 
 
-class ExpressionMinute final : public ExpressionFixedArity<ExpressionMinute, 1> {
+class ExpressionMinute final : public DateExpressionAcceptingTimeZone<ExpressionMinute> {
 public:
     explicit ExpressionMinute(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionMinute, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionMinute>("$minute", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static int extract(const tm& tm) {
-        return tm.tm_min;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dateParts(date).minute);
     }
 };
 
@@ -1147,7 +1447,7 @@ public:
     explicit ExpressionMod(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionMod, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1157,7 +1457,7 @@ public:
     explicit ExpressionMultiply(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionMultiply>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -1170,17 +1470,13 @@ public:
 };
 
 
-class ExpressionMonth final : public ExpressionFixedArity<ExpressionMonth, 1> {
+class ExpressionMonth final : public DateExpressionAcceptingTimeZone<ExpressionMonth> {
 public:
     explicit ExpressionMonth(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionMonth, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionMonth>("$month", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    // MySQL uses 1-12, tm uses 0-11
-    static inline int extract(const tm& tm) {
-        return tm.tm_mon + 1;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dateParts(date).month);
     }
 };
 
@@ -1190,7 +1486,7 @@ public:
     explicit ExpressionNot(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionNot, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1206,8 +1502,7 @@ public:
 class ExpressionObject final : public Expression {
 public:
     boost::intrusive_ptr<Expression> optimize() final;
-    void addDependencies(DepsTracker* deps) const final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     Value serialize(bool explain) const final;
 
     static boost::intrusive_ptr<ExpressionObject> create(
@@ -1230,6 +1525,12 @@ public:
         return _expressions;
     }
 
+    ComputedPaths getComputedPaths(const std::string& exprFieldPath,
+                                   Variables::Id renamingVar) const final;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
 private:
     ExpressionObject(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -1247,7 +1548,7 @@ public:
         : ExpressionVariadic<ExpressionOr>(expCtx) {}
 
     boost::intrusive_ptr<Expression> optimize() final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -1268,7 +1569,7 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx, Value base, Value exp);
 
 private:
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1278,7 +1579,7 @@ public:
     explicit ExpressionRange(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionRangedArity<ExpressionRange, 2, 3>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1288,14 +1589,16 @@ public:
     explicit ExpressionReduce(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : Expression(expCtx) {}
 
-    void addDependencies(DepsTracker* deps) const final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     boost::intrusive_ptr<Expression> optimize() final;
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONElement expr,
         const VariablesParseState& vpsIn);
     Value serialize(bool explain) const final;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
 
 private:
     boost::intrusive_ptr<Expression> _input;
@@ -1307,16 +1610,13 @@ private:
 };
 
 
-class ExpressionSecond final : public ExpressionFixedArity<ExpressionSecond, 1> {
+class ExpressionSecond final : public DateExpressionAcceptingTimeZone<ExpressionSecond> {
 public:
     explicit ExpressionSecond(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionSecond, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionSecond>("$second", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static inline int extract(const tm& tm) {
-        return tm.tm_sec;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dateParts(date).second);
     }
 };
 
@@ -1326,7 +1626,7 @@ public:
     explicit ExpressionSetDifference(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionSetDifference, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1336,7 +1636,7 @@ public:
     explicit ExpressionSetEquals(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionSetEquals>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
     void validateArguments(const ExpressionVector& args) const final;
 };
@@ -1347,7 +1647,7 @@ public:
     explicit ExpressionSetIntersection(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionSetIntersection>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -1367,7 +1667,7 @@ public:
         : ExpressionFixedArity<ExpressionSetIsSubset, 2>(expCtx) {}
 
     boost::intrusive_ptr<Expression> optimize() override;
-    Value evaluateInternal(Variables* vars) const override;
+    Value evaluate(const Document& root, Variables* variables) const override;
     const char* getOpName() const final;
 
 private:
@@ -1380,7 +1680,7 @@ public:
     explicit ExpressionSetUnion(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionVariadic<ExpressionSetUnion>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 
     bool isAssociative() const final {
@@ -1398,7 +1698,7 @@ public:
     explicit ExpressionSize(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionSize, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1408,7 +1708,7 @@ public:
     explicit ExpressionReverseArray(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionReverseArray, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1418,7 +1718,7 @@ public:
     explicit ExpressionSlice(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionRangedArity<ExpressionSlice, 2, 3>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1428,17 +1728,16 @@ public:
     explicit ExpressionIsArray(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionIsArray, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
-
 
 class ExpressionSplit final : public ExpressionFixedArity<ExpressionSplit, 2> {
 public:
     explicit ExpressionSplit(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionSplit, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1458,7 +1757,7 @@ public:
     explicit ExpressionStrcasecmp(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionStrcasecmp, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1468,7 +1767,7 @@ public:
     explicit ExpressionSubstrBytes(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionSubstrBytes, 3>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const;
 };
 
@@ -1478,7 +1777,7 @@ public:
     explicit ExpressionSubstrCP(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionSubstrCP, 3>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1488,7 +1787,7 @@ public:
     explicit ExpressionStrLenBytes(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionStrLenBytes, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1498,7 +1797,7 @@ public:
     explicit ExpressionStrLenCP(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionStrLenCP, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1508,7 +1807,7 @@ public:
     explicit ExpressionSubtract(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionSubtract, 2>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1518,14 +1817,16 @@ public:
     explicit ExpressionSwitch(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : Expression(expCtx) {}
 
-    void addDependencies(DepsTracker* deps) const final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     boost::intrusive_ptr<Expression> optimize() final;
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         BSONElement expr,
         const VariablesParseState& vpsIn);
     Value serialize(bool explain) const final;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
 
 private:
     using ExpressionPair =
@@ -1541,7 +1842,7 @@ public:
     explicit ExpressionToLower(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionToLower, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
@@ -1551,8 +1852,76 @@ public:
     explicit ExpressionToUpper(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionToUpper, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
+};
+
+
+/**
+ * This class is used to implement all three trim expressions: $trim, $ltrim, and $rtrim.
+ */
+class ExpressionTrim final : public Expression {
+private:
+    enum class TrimType {
+        kBoth,
+        kLeft,
+        kRight,
+    };
+
+public:
+    ExpressionTrim(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                   TrimType trimType,
+                   StringData name,
+                   const boost::intrusive_ptr<Expression>& input,
+                   const boost::intrusive_ptr<Expression>& charactersToTrim)
+        : Expression(expCtx),
+          _trimType(trimType),
+          _name(name.toString()),
+          _input(input),
+          _characters(charactersToTrim) {}
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+    boost::intrusive_ptr<Expression> optimize() final;
+    static boost::intrusive_ptr<Expression> parse(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BSONElement expr,
+        const VariablesParseState& vpsIn);
+    Value serialize(bool explain) const final;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
+private:
+    /**
+     * Returns true if the unicode character found at index 'indexIntoInput' of 'input' is equal to
+     * 'testCP'.
+     */
+    static bool codePointMatchesAtIndex(const StringData& input,
+                                        std::size_t indexIntoInput,
+                                        const StringData& testCP);
+
+    /**
+     * Given the input string and the code points to trim from that string, returns a substring of
+     * 'input' with any code point from 'trimCPs' trimmed from the left.
+     */
+    static StringData trimFromLeft(StringData input, const std::vector<StringData>& trimCPs);
+
+    /**
+     * Given the input string and the code points to trim from that string, returns a substring of
+     * 'input' with any code point from 'trimCPs' trimmed from the right.
+     */
+    static StringData trimFromRight(StringData input, const std::vector<StringData>& trimCPs);
+
+    /**
+     * Returns the trimmed version of 'input', with all code points in 'trimCPs' removed from the
+     * front, back, or both - depending on _trimType.
+     */
+    StringData doTrim(StringData input, const std::vector<StringData>& trimCPs) const;
+
+    TrimType _trimType;
+    std::string _name;  // "$trim", "$ltrim", or "$rtrim".
+    boost::intrusive_ptr<Expression> _input;
+    boost::intrusive_ptr<Expression> _characters;  // Optional, null if not specified.
 };
 
 
@@ -1571,70 +1940,63 @@ public:
     explicit ExpressionType(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : ExpressionFixedArity<ExpressionType, 1>(expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     const char* getOpName() const final;
 };
 
 
-class ExpressionWeek final : public ExpressionFixedArity<ExpressionWeek, 1> {
+class ExpressionWeek final : public DateExpressionAcceptingTimeZone<ExpressionWeek> {
 public:
     explicit ExpressionWeek(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionWeek, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionWeek>("$week"_sd, expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static int extract(const tm& tm);
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.week(date));
+    }
 };
 
 
-class ExpressionIsoWeekYear final : public ExpressionFixedArity<ExpressionIsoWeekYear, 1> {
+class ExpressionIsoWeekYear final : public DateExpressionAcceptingTimeZone<ExpressionIsoWeekYear> {
 public:
     explicit ExpressionIsoWeekYear(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionIsoWeekYear, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionIsoWeekYear>("$isoWeekYear"_sd, expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static int extract(const tm& tm);
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.isoYear(date));
+    }
 };
 
 
-class ExpressionIsoDayOfWeek final : public ExpressionFixedArity<ExpressionIsoDayOfWeek, 1> {
+class ExpressionIsoDayOfWeek final
+    : public DateExpressionAcceptingTimeZone<ExpressionIsoDayOfWeek> {
 public:
     explicit ExpressionIsoDayOfWeek(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionIsoDayOfWeek, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionIsoDayOfWeek>("$isoDayOfWeek"_sd, expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static int extract(const tm& tm);
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.isoDayOfWeek(date));
+    }
 };
 
 
-class ExpressionIsoWeek final : public ExpressionFixedArity<ExpressionIsoWeek, 1> {
+class ExpressionIsoWeek final : public DateExpressionAcceptingTimeZone<ExpressionIsoWeek> {
 public:
     explicit ExpressionIsoWeek(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionIsoWeek, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionIsoWeek>("$isoWeek", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    static int extract(const tm& tm);
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.isoWeek(date));
+    }
 };
 
 
-class ExpressionYear final : public ExpressionFixedArity<ExpressionYear, 1> {
+class ExpressionYear final : public DateExpressionAcceptingTimeZone<ExpressionYear> {
 public:
     explicit ExpressionYear(const boost::intrusive_ptr<ExpressionContext>& expCtx)
-        : ExpressionFixedArity<ExpressionYear, 1>(expCtx) {}
+        : DateExpressionAcceptingTimeZone<ExpressionYear>("$year", expCtx) {}
 
-    Value evaluateInternal(Variables* vars) const final;
-    const char* getOpName() const final;
-
-    // tm_year is years since 1990
-    static int extract(const tm& tm) {
-        return tm.tm_year + 1900;
+    Value evaluateDate(Date_t date, const TimeZone& timeZone) const final {
+        return Value(timeZone.dateParts(date).year);
     }
 };
 
@@ -1644,8 +2006,7 @@ public:
     explicit ExpressionZip(const boost::intrusive_ptr<ExpressionContext>& expCtx)
         : Expression(expCtx) {}
 
-    void addDependencies(DepsTracker* deps) const final;
-    Value evaluateInternal(Variables* vars) const final;
+    Value evaluate(const Document& root, Variables* variables) const final;
     boost::intrusive_ptr<Expression> optimize() final;
     static boost::intrusive_ptr<Expression> parse(
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -1653,9 +2014,51 @@ public:
         const VariablesParseState& vpsIn);
     Value serialize(bool explain) const final;
 
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
 private:
     bool _useLongestLength = false;
     ExpressionVector _inputs;
     ExpressionVector _defaults;
+};
+
+class ExpressionConvert final : public Expression {
+public:
+    /**
+     * Creates a $convert expression converting from 'input' to the type given by 'toType'. Leaves
+     * 'onNull' and 'onError' unspecified.
+     */
+    static boost::intrusive_ptr<Expression> create(const boost::intrusive_ptr<ExpressionContext>&,
+                                                   const boost::intrusive_ptr<Expression>& input,
+                                                   BSONType toType);
+
+    static boost::intrusive_ptr<Expression> parse(
+        const boost::intrusive_ptr<ExpressionContext>& expCtx,
+        BSONElement expr,
+        const VariablesParseState& vpsIn);
+
+    explicit ExpressionConvert(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : Expression(expCtx) {}
+
+    Value evaluate(const Document& root, Variables* variables) const final;
+    boost::intrusive_ptr<Expression> optimize() final;
+    Value serialize(bool explain) const final;
+
+protected:
+    void _doAddDependencies(DepsTracker* deps) const final;
+
+private:
+    ExpressionConvert(const boost::intrusive_ptr<ExpressionContext>&,
+                      const boost::intrusive_ptr<Expression>& input,
+                      BSONType toType);
+
+    BSONType computeTargetType(Value typeName) const;
+    Value performConversion(BSONType targetType, Value inputValue) const;
+
+    boost::intrusive_ptr<Expression> _input;
+    boost::intrusive_ptr<Expression> _to;
+    boost::intrusive_ptr<Expression> _onError;
+    boost::intrusive_ptr<Expression> _onNull;
 };
 }

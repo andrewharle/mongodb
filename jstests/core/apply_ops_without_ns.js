@@ -1,3 +1,10 @@
+// @tags: [
+//     requires_non_retryable_commands,
+//
+//     # applyOps uses the oplog that require replication support
+//     requires_replication,
+// ]
+
 (function() {
     'use strict';
 

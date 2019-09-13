@@ -1,3 +1,5 @@
+// @tags: [does_not_support_stepdowns, requires_capped]
+
 // Check that a warning message about doing a capped collection scan for a query with an _id
 // constraint is printed at appropriate times.  SERVER-5353
 
@@ -28,11 +30,12 @@ t.drop();
 
 notCappedCollectionName = testCollectionName + '_notCapped';
 
-notCapped = db[notCappedCollectionName];
+notCapped = db.getSiblingDB("local").getCollection(notCappedCollectionName);
 notCapped.drop();
 
-db.createCollection(testCollectionName, {capped: true, size: 1000});
-db.createCollection(notCappedCollectionName, {autoIndexId: false});
+assert.commandWorked(db.createCollection(testCollectionName, {capped: true, size: 1000}));
+assert.commandWorked(
+    notCapped.getDB().createCollection(notCappedCollectionName, {autoIndexId: false}));
 
 t.insert({});
 notCapped.insert({});

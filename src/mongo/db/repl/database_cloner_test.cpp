@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,6 +34,7 @@
 #include <memory>
 #include <utility>
 
+#include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/commands/list_collections_filter.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/base_cloner_test_fixture.h"
@@ -40,6 +43,7 @@
 #include "mongo/unittest/task_executor_proxy.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/uuid.h"
 
 namespace {
 
@@ -57,36 +61,38 @@ struct CollectionCloneInfo {
 
 class DatabaseClonerTest : public BaseClonerTest {
 public:
-    void collectionWork(const Status& status, const NamespaceString& sourceNss);
     void clear() override;
     BaseCloner* getCloner() const override;
 
 protected:
+    auto makeCollectionWorkClosure() {
+        return [this](const Status& status, const NamespaceString& srcNss) {
+            _collections[srcNss].status = status;
+        };
+    }
+    auto makeSetStatusClosure() {
+        return [this](const Status& status) { setStatus(status); };
+    }
+
     void setUp() override;
     void tearDown() override;
 
     std::map<NamespaceString, CollectionCloneInfo> _collections;
     std::unique_ptr<DatabaseCloner> _databaseCloner;
 };
-void DatabaseClonerTest::collectionWork(const Status& status, const NamespaceString& srcNss) {
-    _collections[srcNss].status = status;
-}
 
 void DatabaseClonerTest::setUp() {
     BaseClonerTest::setUp();
-    _databaseCloner.reset(new DatabaseCloner(
-        &getExecutor(),
-        dbWorkThreadPool.get(),
-        target,
-        dbname,
-        BSONObj(),
-        DatabaseCloner::ListCollectionsPredicateFn(),
-        storageInterface.get(),
-        stdx::bind(&DatabaseClonerTest::collectionWork,
-                   this,
-                   stdx::placeholders::_1,
-                   stdx::placeholders::_2),
-        stdx::bind(&DatabaseClonerTest::setStatus, this, stdx::placeholders::_1)));
+    _databaseCloner =
+        stdx::make_unique<DatabaseCloner>(&getExecutor(),
+                                          dbWorkThreadPool.get(),
+                                          target,
+                                          dbname,
+                                          BSONObj(),
+                                          DatabaseCloner::ListCollectionsPredicateFn(),
+                                          storageInterface.get(),
+                                          makeCollectionWorkClosure(),
+                                          makeSetStatusClosure());
     _databaseCloner->setScheduleDbWorkFn_forTest(
         [this](const executor::TaskExecutor::CallbackFn& work) {
             return getExecutor().scheduleWork(work);
@@ -99,7 +105,8 @@ void DatabaseClonerTest::setUp() {
                const std::vector<BSONObj>& secondaryIndexSpecs) {
             const auto collInfo = &_collections[nss];
             (collInfo->loader = new CollectionBulkLoaderMock(&collInfo->stats))
-                ->init(nullptr, secondaryIndexSpecs);
+                ->init(secondaryIndexSpecs)
+                .transitional_ignore();
 
             return StatusWith<std::unique_ptr<CollectionBulkLoader>>(
                 std::unique_ptr<CollectionBulkLoader>(collInfo->loader));
@@ -124,30 +131,27 @@ TEST_F(DatabaseClonerTest, InvalidConstruction) {
     const BSONObj filter;
     DatabaseCloner::ListCollectionsPredicateFn pred;
     StorageInterface* si = storageInterface.get();
-    namespace stdxph = stdx::placeholders;
-    const DatabaseCloner::CollectionCallbackFn ccb =
-        stdx::bind(&DatabaseClonerTest::collectionWork, this, stdxph::_1, stdxph::_2);
-
-    const auto& cb = [](const Status&) { FAIL("should not reach here"); };
+    auto ccb = makeCollectionWorkClosure();
+    auto cb = [](const Status&) { FAIL("should not reach here"); };
 
     // Null executor -- error from Fetcher, not _databaseCloner.
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabaseCloner(nullptr, dbWorkThreadPool.get(), target, dbname, filter, pred, si, ccb, cb),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "task executor cannot be null");
 
     // Null db worker thread pool.
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabaseCloner(&executor, nullptr, target, dbname, filter, pred, si, ccb, cb),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "db worker thread pool cannot be null");
 
     // Empty database name -- error from Fetcher, not _databaseCloner.
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabaseCloner(&executor, dbWorkThreadPool.get(), target, "", filter, pred, si, ccb, cb),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "database name in remote command request cannot be empty");
 
@@ -155,7 +159,7 @@ TEST_F(DatabaseClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabaseCloner(
             &executor, dbWorkThreadPool.get(), target, dbname, filter, pred, si, ccb, nullptr),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "callback function cannot be null");
 
@@ -163,7 +167,7 @@ TEST_F(DatabaseClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabaseCloner(
             &executor, dbWorkThreadPool.get(), target, dbname, filter, pred, nullptr, ccb, cb),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "storage interface cannot be null");
 
@@ -171,7 +175,7 @@ TEST_F(DatabaseClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabaseCloner(
             &executor, dbWorkThreadPool.get(), target, dbname, filter, pred, si, nullptr, cb),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "collection callback function cannot be null");
 
@@ -179,7 +183,7 @@ TEST_F(DatabaseClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabaseCloner(
             &executor, dbWorkThreadPool.get(), target, dbname, filter, pred, si, ccb, nullptr),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "callback function cannot be null");
 }
@@ -204,12 +208,14 @@ public:
                                                    ShouldFailRequestFn shouldFailRequest)
         : unittest::TaskExecutorProxy(executor), _shouldFailRequest(shouldFailRequest) {}
 
-    StatusWith<CallbackHandle> scheduleRemoteCommand(const executor::RemoteCommandRequest& request,
-                                                     const RemoteCommandCallbackFn& cb) override {
+    StatusWith<CallbackHandle> scheduleRemoteCommand(
+        const executor::RemoteCommandRequest& request,
+        const RemoteCommandCallbackFn& cb,
+        const transport::BatonHandle& baton = nullptr) override {
         if (_shouldFailRequest(request)) {
             return Status(ErrorCodes::OperationFailed, "failed to schedule remote command");
         }
-        return getExecutor()->scheduleRemoteCommand(request, cb);
+        return getExecutor()->scheduleRemoteCommand(request, cb, baton);
     }
 
 private:
@@ -263,19 +269,16 @@ TEST_F(DatabaseClonerTest, FirstRemoteCommandWithoutFilter) {
 TEST_F(DatabaseClonerTest, FirstRemoteCommandWithFilter) {
     const BSONObj listCollectionsFilter = BSON("name"
                                                << "coll");
-    _databaseCloner.reset(new DatabaseCloner(
-        &getExecutor(),
-        dbWorkThreadPool.get(),
-        target,
-        dbname,
-        listCollectionsFilter,
-        DatabaseCloner::ListCollectionsPredicateFn(),
-        storageInterface.get(),
-        stdx::bind(&DatabaseClonerTest::collectionWork,
-                   this,
-                   stdx::placeholders::_1,
-                   stdx::placeholders::_2),
-        stdx::bind(&DatabaseClonerTest::setStatus, this, stdx::placeholders::_1)));
+    _databaseCloner =
+        stdx::make_unique<DatabaseCloner>(&getExecutor(),
+                                          dbWorkThreadPool.get(),
+                                          target,
+                                          dbname,
+                                          listCollectionsFilter,
+                                          DatabaseCloner::ListCollectionsPredicateFn(),
+                                          storageInterface.get(),
+                                          makeCollectionWorkClosure(),
+                                          makeSetStatusClosure());
     ASSERT_EQUALS(DatabaseCloner::State::kPreStart, _databaseCloner->getState_forTest());
 
     ASSERT_OK(_databaseCloner->startup());
@@ -348,19 +351,15 @@ TEST_F(DatabaseClonerTest, ListCollectionsPredicate) {
     DatabaseCloner::ListCollectionsPredicateFn pred = [](const BSONObj& info) {
         return info["name"].String() != "b";
     };
-    _databaseCloner.reset(new DatabaseCloner(
-        &getExecutor(),
-        dbWorkThreadPool.get(),
-        target,
-        dbname,
-        BSONObj(),
-        pred,
-        storageInterface.get(),
-        stdx::bind(&DatabaseClonerTest::collectionWork,
-                   this,
-                   stdx::placeholders::_1,
-                   stdx::placeholders::_2),
-        stdx::bind(&DatabaseClonerTest::setStatus, this, stdx::placeholders::_1)));
+    _databaseCloner = stdx::make_unique<DatabaseCloner>(&getExecutor(),
+                                                        dbWorkThreadPool.get(),
+                                                        target,
+                                                        dbname,
+                                                        BSONObj(),
+                                                        pred,
+                                                        storageInterface.get(),
+                                                        makeCollectionWorkClosure(),
+                                                        makeSetStatusClosure());
     ASSERT_EQUALS(DatabaseCloner::State::kPreStart, _databaseCloner->getState_forTest());
 
     ASSERT_OK(_databaseCloner->startup());
@@ -584,20 +583,41 @@ TEST_F(DatabaseClonerTest, InvalidCollectionOptions) {
     ASSERT_EQUALS(DatabaseCloner::State::kComplete, _databaseCloner->getState_forTest());
 }
 
+TEST_F(DatabaseClonerTest, DatabaseClonerResendsListCollectionsRequestOnRetriableError) {
+    ASSERT_EQUALS(DatabaseCloner::State::kPreStart, _databaseCloner->getState_forTest());
+
+    ASSERT_OK(_databaseCloner->startup());
+    ASSERT_EQUALS(DatabaseCloner::State::kRunning, _databaseCloner->getState_forTest());
+
+    auto net = getNet();
+    executor::NetworkInterfaceMock::InNetworkGuard guard(net);
+
+    // Respond to first listCollections request with a retriable error.
+    assertRemoteCommandNameEquals("listCollections",
+                                  net->scheduleErrorResponse(Status(ErrorCodes::HostNotFound, "")));
+    net->runReadyNetworkOperations();
+
+    // DatabaseCloner stays active because it resends the listCollections request.
+    ASSERT_TRUE(_databaseCloner->isActive());
+    ASSERT_EQUALS(DatabaseCloner::State::kRunning, _databaseCloner->getState_forTest());
+
+    // DatabaseCloner should resend listCollections request.
+    auto noi = net->getNextReadyRequest();
+    assertRemoteCommandNameEquals("listCollections", noi->getRequest());
+    net->blackHole(noi);
+}
+
 TEST_F(DatabaseClonerTest, ListCollectionsReturnsEmptyCollectionName) {
-    _databaseCloner.reset(new DatabaseCloner(
-        &getExecutor(),
-        dbWorkThreadPool.get(),
-        target,
-        dbname,
-        BSONObj(),
-        DatabaseCloner::ListCollectionsPredicateFn(),
-        storageInterface.get(),
-        stdx::bind(&DatabaseClonerTest::collectionWork,
-                   this,
-                   stdx::placeholders::_1,
-                   stdx::placeholders::_2),
-        stdx::bind(&DatabaseClonerTest::setStatus, this, stdx::placeholders::_1)));
+    _databaseCloner =
+        stdx::make_unique<DatabaseCloner>(&getExecutor(),
+                                          dbWorkThreadPool.get(),
+                                          target,
+                                          dbname,
+                                          BSONObj(),
+                                          DatabaseCloner::ListCollectionsPredicateFn(),
+                                          storageInterface.get(),
+                                          makeCollectionWorkClosure(),
+                                          makeSetStatusClosure());
     ASSERT_EQUALS(DatabaseCloner::State::kPreStart, _databaseCloner->getState_forTest());
 
     ASSERT_OK(_databaseCloner->startup());
@@ -616,6 +636,37 @@ TEST_F(DatabaseClonerTest, ListCollectionsReturnsEmptyCollectionName) {
     ASSERT_STRING_CONTAINS(getStatus().reason(), "invalid collection namespace: db.");
     ASSERT_FALSE(_databaseCloner->isActive());
     ASSERT_EQUALS(DatabaseCloner::State::kComplete, _databaseCloner->getState_forTest());
+}
+
+TEST_F(DatabaseClonerTest, DatabaseClonerAcceptsCollectionOptionsContainUuid) {
+    ASSERT_EQUALS(DatabaseCloner::State::kPreStart, _databaseCloner->getState_forTest());
+
+    ASSERT_OK(_databaseCloner->startup());
+    ASSERT_EQUALS(DatabaseCloner::State::kRunning, _databaseCloner->getState_forTest());
+
+    bool collectionClonerStarted = false;
+    _databaseCloner->setStartCollectionClonerFn(
+        [&collectionClonerStarted](CollectionCloner& cloner) {
+            collectionClonerStarted = true;
+            return cloner.startup();
+        });
+
+    {
+        executor::NetworkInterfaceMock::InNetworkGuard guard(getNet());
+        CollectionOptions options;
+        options.uuid = UUID::gen();
+        processNetworkResponse(
+            createListCollectionsResponse(0,
+                                          BSON_ARRAY(BSON("name"
+                                                          << "a"
+                                                          << "options"
+                                                          << options.toBSON()))));
+    }
+
+    ASSERT_EQUALS(getDetectableErrorStatus(), getStatus());
+    ASSERT_TRUE(collectionClonerStarted);
+    ASSERT_TRUE(_databaseCloner->isActive());
+    ASSERT_EQUALS(DatabaseCloner::State::kRunning, _databaseCloner->getState_forTest());
 }
 
 TEST_F(DatabaseClonerTest, StartFirstCollectionClonerFailed) {

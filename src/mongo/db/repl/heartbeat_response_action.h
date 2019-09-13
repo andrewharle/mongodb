@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -50,7 +52,8 @@ public:
         StartElection,
         StepDownSelf,
         StepDownRemotePrimary,
-        PriorityTakeover
+        PriorityTakeover,
+        CatchupTakeover
     };
 
     /**
@@ -73,6 +76,12 @@ public:
      * primary after the appropriate priority takeover delay.
      */
     static HeartbeatResponseAction makePriorityTakeoverAction();
+
+    /**
+     * Makes a new action telling the current node to schedule an event to attempt to elect itself
+     * primary after the appropriate catchup takeover delay.
+     */
+    static HeartbeatResponseAction makeCatchupTakeoverAction();
 
     /**
      * Makes a new action telling the current node to step down as primary.
@@ -101,6 +110,11 @@ public:
     void setNextHeartbeatStartDate(Date_t when);
 
     /**
+     * Sets whether or not the heartbeat response advanced the member's opTime.
+     */
+    void setAdvancedOpTime(bool advanced);
+
+    /**
      * Gets the action type of this action.
      */
     Action getAction() const {
@@ -123,10 +137,19 @@ public:
         return _primaryIndex;
     }
 
+    /*
+     * Returns true if the heartbeat response resulting in our conception of the
+     * member's optime moving forward, so we need to recalculate lastCommittedOpTime.
+     */
+    bool getAdvancedOpTime() const {
+        return _advancedOpTime;
+    }
+
 private:
     Action _action;
     int _primaryIndex;
     Date_t _nextHeartbeatStartDate;
+    bool _advancedOpTime = false;
 };
 
 }  // namespace repl

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -373,6 +375,12 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
             return false;
         }
 
+        if (isn->index.multikey && isn->index.multikeyPaths.empty()) {
+            // The index is multikey but has no path-level multikeyness metadata. In this case, the
+            // index can never provide a sort.
+            return false;
+        }
+
         // How many scans will we create if we blow up this ixscan?
         size_t numScans = 1;
 
@@ -405,7 +413,13 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
         // the bounds.
         BSONObjBuilder resultingSortBob;
         while (kpIt.more()) {
-            resultingSortBob.append(kpIt.next());
+            auto elem = kpIt.next();
+            if (isn->multikeyFields.find(elem.fieldNameStringData()) != isn->multikeyFields.end()) {
+                // One of the indexed fields providing the sort is multikey. It is not correct for a
+                // field with multikey components to provide a sort, so bail out.
+                return false;
+            }
+            resultingSortBob.append(elem);
         }
 
         // See if it's the order we're looking for.
@@ -432,7 +446,7 @@ bool QueryPlannerAnalysis::explodeForSort(const CanonicalQuery& query,
     }
 
     // Too many ixscans spoil the performance.
-    if (totalNumScans > (size_t)internalQueryMaxScansToExplode) {
+    if (totalNumScans > (size_t)internalQueryMaxScansToExplode.load()) {
         LOG(5) << "Could expand ixscans to pull out sort order but resulting scan count"
                << "(" << totalNumScans << ") is too high.";
         return false;
@@ -525,7 +539,6 @@ QuerySolutionNode* QueryPlannerAnalysis::analyzeSort(const CanonicalQuery& query
     // And build the full sort stage. The sort stage has to have a sort key generating stage
     // as its child, supplying it with the appropriate sort keys.
     SortKeyGeneratorNode* keyGenNode = new SortKeyGeneratorNode();
-    keyGenNode->queryObj = qr.getFilter();
     keyGenNode->sortSpec = sortObj;
     keyGenNode->children.push_back(solnRoot);
     solnRoot = keyGenNode;
@@ -604,17 +617,17 @@ QuerySolutionNode* QueryPlannerAnalysis::analyzeSort(const CanonicalQuery& query
     return solnRoot;
 }
 
-// static
-QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& query,
-                                                       const QueryPlannerParams& params,
-                                                       QuerySolutionNode* solnRoot) {
-    unique_ptr<QuerySolution> soln(new QuerySolution());
+std::unique_ptr<QuerySolution> QueryPlannerAnalysis::analyzeDataAccess(
+    const CanonicalQuery& query,
+    const QueryPlannerParams& params,
+    std::unique_ptr<QuerySolutionNode> solnRoot) {
+    auto soln = stdx::make_unique<QuerySolution>();
     soln->filterData = query.getQueryObj();
     soln->indexFilterApplied = params.indexFiltersApplied;
 
     solnRoot->computeProperties();
 
-    analyzeGeo(params, solnRoot);
+    analyzeGeo(params, solnRoot.get());
 
     // solnRoot finds all our results.  Let's see what transformations we must perform to the
     // data.
@@ -638,27 +651,27 @@ QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& que
 
             if (fetch) {
                 FetchNode* fetch = new FetchNode();
-                fetch->children.push_back(solnRoot);
-                solnRoot = fetch;
+                fetch->children.push_back(solnRoot.release());
+                solnRoot.reset(fetch);
             }
         }
 
         ShardingFilterNode* sfn = new ShardingFilterNode();
-        sfn->children.push_back(solnRoot);
-        solnRoot = sfn;
+        sfn->children.push_back(solnRoot.release());
+        solnRoot.reset(sfn);
     }
 
     bool hasSortStage = false;
-    solnRoot = analyzeSort(query, params, solnRoot, &hasSortStage);
+    solnRoot.reset(analyzeSort(query, params, solnRoot.release(), &hasSortStage));
 
     // This can happen if we need to create a blocking sort stage and we're not allowed to.
-    if (NULL == solnRoot) {
+    if (!solnRoot) {
         return NULL;
     }
 
     // A solution can be blocking if it has a blocking sort stage or
     // a hashed AND stage.
-    bool hasAndHashStage = hasNode(solnRoot, STAGE_AND_HASH);
+    bool hasAndHashStage = hasNode(solnRoot.get(), STAGE_AND_HASH);
     soln->hasBlockingStage = hasSortStage || hasAndHashStage;
 
     const QueryRequest& qr = query.getQueryRequest();
@@ -684,12 +697,13 @@ QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& que
     // shallow in terms of query nodes.
     const bool hasNotRootSort = hasSortStage && STAGE_SORT != solnRoot->getType();
 
-    const bool cannotKeepFlagged = hasNode(solnRoot, STAGE_TEXT) ||
-        hasNode(solnRoot, STAGE_GEO_NEAR_2D) || hasNode(solnRoot, STAGE_GEO_NEAR_2DSPHERE) ||
+    const bool cannotKeepFlagged = hasNode(solnRoot.get(), STAGE_TEXT) ||
+        hasNode(solnRoot.get(), STAGE_GEO_NEAR_2D) ||
+        hasNode(solnRoot.get(), STAGE_GEO_NEAR_2DSPHERE) ||
         (!qr.getSort().isEmpty() && !hasSortStage) || hasNotRootSort;
 
     // Only index intersection stages ever produce flagged results.
-    const bool couldProduceFlagged = hasAndHashStage || hasNode(solnRoot, STAGE_AND_SORTED);
+    const bool couldProduceFlagged = hasAndHashStage || hasNode(solnRoot.get(), STAGE_AND_SORTED);
 
     const bool shouldAddMutation = !cannotKeepFlagged && couldProduceFlagged;
 
@@ -705,67 +719,67 @@ QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& que
             keep->children.push_back(solnRoot->children[0]);
             solnRoot->children[0] = keep;
         } else {
-            keep->children.push_back(solnRoot);
-            solnRoot = keep;
+            keep->children.push_back(solnRoot.release());
+            solnRoot.reset(keep);
         }
+    }
+
+    if (qr.getSkip()) {
+        auto skip = std::make_unique<SkipNode>();
+        skip->skip = *qr.getSkip();
+        skip->children.push_back(solnRoot.release());
+        solnRoot = std::move(skip);
     }
 
     // Project the results.
     if (NULL != query.getProj()) {
-        LOG(5) << "PROJECTION: fetched status: " << solnRoot->fetched();
         LOG(5) << "PROJECTION: Current plan is:\n" << redact(solnRoot->toString());
 
         ProjectionNode::ProjectionType projType = ProjectionNode::DEFAULT;
         BSONObj coveredKeyObj;
 
         if (query.getProj()->requiresDocument()) {
-            LOG(5) << "PROJECTION: claims to require doc adding fetch.";
             // If the projection requires the entire document, somebody must fetch.
             if (!solnRoot->fetched()) {
                 FetchNode* fetch = new FetchNode();
-                fetch->children.push_back(solnRoot);
-                solnRoot = fetch;
+                fetch->children.push_back(solnRoot.release());
+                solnRoot.reset(fetch);
             }
         } else if (!query.getProj()->wantIndexKey()) {
-            // The only way we're here is if it's a simple projection.  That is, we can pick out
-            // the fields we want to include and they're not dotted.  So we want to execute the
-            // projection in the fast-path simple fashion.  Just don't know which fast path yet.
-            LOG(5) << "PROJECTION: requires fields";
+            // The only way we're here is if it's a simple inclusion projection. Often such
+            // simple projections are eligible for an optimized execution path. However, in some
+            // special cases (e.g. dotted paths or the presence of a sortKey $meta projection), we
+            // may have to fall back to the default execution path.
             const vector<StringData>& fields = query.getProj()->getRequiredFields();
             bool covered = true;
             for (size_t i = 0; i < fields.size(); ++i) {
                 if (!solnRoot->hasField(fields[i].toString())) {
-                    LOG(5) << "PROJECTION: not covered due to field " << fields[i];
                     covered = false;
                     break;
                 }
             }
 
-            LOG(5) << "PROJECTION: is covered?: = " << covered;
-
             // If any field is missing from the list of fields the projection wants,
             // a fetch is required.
             if (!covered) {
                 FetchNode* fetch = new FetchNode();
-                fetch->children.push_back(solnRoot);
-                solnRoot = fetch;
+                fetch->children.push_back(solnRoot.release());
+                solnRoot.reset(fetch);
 
                 // It's simple but we'll have the full document and we should just iterate
                 // over that.
                 projType = ProjectionNode::SIMPLE_DOC;
-                LOG(5) << "PROJECTION: not covered, fetching.";
             } else {
                 if (solnRoot->fetched()) {
                     // Fetched implies hasObj() so let's run with that.
                     projType = ProjectionNode::SIMPLE_DOC;
-                    LOG(5) << "PROJECTION: covered via FETCH, using SIMPLE_DOC fast path";
                 } else {
                     // If we're here we're not fetched so we're covered.  Let's see if we can
                     // get out of using the default projType.  If there's only one leaf
                     // underneath and it's giving us index data we can use the faster covered
                     // impl.
                     vector<QuerySolutionNode*> leafNodes;
-                    getLeafNodes(solnRoot, &leafNodes);
+                    getLeafNodes(solnRoot.get(), &leafNodes);
 
                     if (1 == leafNodes.size()) {
                         // Both the IXSCAN and DISTINCT stages provide covered key data.
@@ -773,12 +787,10 @@ QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& que
                             projType = ProjectionNode::COVERED_ONE_INDEX;
                             IndexScanNode* ixn = static_cast<IndexScanNode*>(leafNodes[0]);
                             coveredKeyObj = ixn->index.keyPattern;
-                            LOG(5) << "PROJECTION: covered via IXSCAN, using COVERED fast path";
                         } else if (STAGE_DISTINCT_SCAN == leafNodes[0]->getType()) {
                             projType = ProjectionNode::COVERED_ONE_INDEX;
                             DistinctNode* dn = static_cast<DistinctNode*>(leafNodes[0]);
                             coveredKeyObj = dn->index.keyPattern;
-                            LOG(5) << "PROJECTION: covered via DISTINCT, using COVERED fast path";
                         }
                     }
                 }
@@ -786,16 +798,16 @@ QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& que
 
             // If we have a $meta sortKey, just use the project default path, as currently the
             // project fast paths cannot handle $meta sortKey projections.
-            if (query.getProj()->wantSortKey()) {
+            //
+            // Similarly, the fast paths cannot handle dotted field paths.
+            if (query.getProj()->wantSortKey() || query.getProj()->hasDottedFieldPath()) {
                 projType = ProjectionNode::DEFAULT;
-                LOG(5) << "PROJECTION: needs $meta sortKey, using DEFAULT path instead";
             }
         }
         // If we don't have a covered project, and we're not allowed to put an uncovered one in,
         // bail out.
         if (solnRoot->fetched() &&
             (params.options & QueryPlannerParams::NO_UNCOVERED_PROJECTIONS)) {
-            delete solnRoot;
             return nullptr;
         }
 
@@ -803,34 +815,26 @@ QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& que
         // generate the sort key computed data.
         if (!hasSortStage && query.getProj()->wantSortKey()) {
             SortKeyGeneratorNode* keyGenNode = new SortKeyGeneratorNode();
-            keyGenNode->queryObj = qr.getFilter();
             keyGenNode->sortSpec = qr.getSort();
-            keyGenNode->children.push_back(solnRoot);
-            solnRoot = keyGenNode;
+            keyGenNode->children.push_back(solnRoot.release());
+            solnRoot.reset(keyGenNode);
         }
 
         // We now know we have whatever data is required for the projection.
         ProjectionNode* projNode = new ProjectionNode(*query.getProj());
-        projNode->children.push_back(solnRoot);
+        projNode->children.push_back(solnRoot.release());
         projNode->fullExpression = query.root();
         projNode->projection = qr.getProj();
         projNode->projType = projType;
         projNode->coveredKeyObj = coveredKeyObj;
-        solnRoot = projNode;
+        solnRoot.reset(projNode);
     } else {
         // If there's no projection, we must fetch, as the user wants the entire doc.
-        if (!solnRoot->fetched()) {
+        if (!solnRoot->fetched() && !(params.options & QueryPlannerParams::IS_COUNT)) {
             FetchNode* fetch = new FetchNode();
-            fetch->children.push_back(solnRoot);
-            solnRoot = fetch;
+            fetch->children.push_back(solnRoot.release());
+            solnRoot.reset(fetch);
         }
-    }
-
-    if (qr.getSkip()) {
-        SkipNode* skip = new SkipNode();
-        skip->skip = *qr.getSkip();
-        skip->children.push_back(solnRoot);
-        solnRoot = skip;
     }
 
     // When there is both a blocking sort and a limit, the limit will
@@ -843,20 +847,20 @@ QuerySolution* QueryPlannerAnalysis::analyzeDataAccess(const CanonicalQuery& que
         if (qr.getLimit()) {
             LimitNode* limit = new LimitNode();
             limit->limit = *qr.getLimit();
-            limit->children.push_back(solnRoot);
-            solnRoot = limit;
+            limit->children.push_back(solnRoot.release());
+            solnRoot.reset(limit);
         } else if (qr.getNToReturn() && !qr.wantMore()) {
             // We have a "legacy limit", i.e. a negative ntoreturn value from an OP_QUERY style
             // find.
             LimitNode* limit = new LimitNode();
             limit->limit = *qr.getNToReturn();
-            limit->children.push_back(solnRoot);
-            solnRoot = limit;
+            limit->children.push_back(solnRoot.release());
+            solnRoot.reset(limit);
         }
     }
 
-    soln->root.reset(solnRoot);
-    return soln.release();
+    soln->root = std::move(solnRoot);
+    return soln;
 }
 
 }  // namespace mongo

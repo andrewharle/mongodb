@@ -21,12 +21,7 @@
  * 9, Disable fail point on SECONDARY so the rest of the capped collection documents are cloned.
  * 8. Once initial sync completes, ensure that capped collection indexes on the SECONDARY are valid.
  *
- * This is a regression test for SERVER-29197. This test does not need to be run on 3.2 initial sync
- * since the bug described in SERVER-29197 only applies to the initial sync logic in versions >=
- * 3.4.
- *
- * @tags: [requires_3dot4_initial_sync]
- *
+ * This is a regression test for SERVER-29197.
  */
 (function() {
     "use strict";
@@ -89,7 +84,7 @@
     replTest.add();
 
     var secondary = replTest.getSecondary();
-    var collectionClonerFailPoint = "initialSyncHangCollectionClonerAfterInitialFind";
+    var collectionClonerFailPoint = "initialSyncHangCollectionClonerAfterHandlingBatchResponse";
 
     // Make the collection cloner pause after its initial 'find' response on the capped collection.
     var nss = dbName + "." + cappedCollName;
@@ -103,7 +98,8 @@
 
     jsTestLog("Waiting for the initial 'find' response of capped collection cloner to complete.");
     checkLog.contains(
-        secondary, "initialSyncHangCollectionClonerAfterInitialFind fail point enabled for " + nss);
+        secondary,
+        "initialSyncHangCollectionClonerAfterHandlingBatchResponse fail point enabled for " + nss);
 
     // Append documents to the capped collection so that the SECONDARY will clone these
     // additional documents.
@@ -126,5 +122,5 @@
     var failMsg =
         "Index validation of '" + secondaryCappedColl.name + "' failed: " + tojson(validate_result);
     assert(validate_result.valid, failMsg);
-
+    replTest.stopSet();
 })();

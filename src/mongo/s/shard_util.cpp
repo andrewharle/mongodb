@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -53,8 +55,8 @@ const char kShouldMigrate[] = "shouldMigrate";
 
 }  // namespace
 
-StatusWith<long long> retrieveTotalShardSize(OperationContext* txn, const ShardId& shardId) {
-    auto shardStatus = Grid::get(txn)->shardRegistry()->getShard(txn, shardId);
+StatusWith<long long> retrieveTotalShardSize(OperationContext* opCtx, const ShardId& shardId) {
+    auto shardStatus = Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardId);
     if (!shardStatus.isOK()) {
         return shardStatus.getStatus();
     }
@@ -64,7 +66,7 @@ StatusWith<long long> retrieveTotalShardSize(OperationContext* txn, const ShardI
     const Minutes maxTimeMSOverride{10};
 
     auto listDatabasesStatus = shardStatus.getValue()->runCommandWithFixedRetryAttempts(
-        txn,
+        opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
         "admin",
         BSON("listDatabases" << 1),
@@ -87,7 +89,7 @@ StatusWith<long long> retrieveTotalShardSize(OperationContext* txn, const ShardI
     return totalSizeElem.numberLong();
 }
 
-StatusWith<std::vector<BSONObj>> selectChunkSplitPoints(OperationContext* txn,
+StatusWith<std::vector<BSONObj>> selectChunkSplitPoints(OperationContext* opCtx,
                                                         const ShardId& shardId,
                                                         const NamespaceString& nss,
                                                         const ShardKeyPattern& shardKeyPattern,
@@ -103,13 +105,13 @@ StatusWith<std::vector<BSONObj>> selectChunkSplitPoints(OperationContext* txn,
         cmd.append("maxChunkObjects", *maxObjs);
     }
 
-    auto shardStatus = Grid::get(txn)->shardRegistry()->getShard(txn, shardId);
+    auto shardStatus = Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardId);
     if (!shardStatus.isOK()) {
         return shardStatus.getStatus();
     }
 
     auto cmdStatus = shardStatus.getValue()->runCommandWithFixedRetryAttempts(
-        txn,
+        opCtx,
         ReadPreferenceSetting{ReadPreference::PrimaryPreferred},
         "admin",
         cmd.obj(),
@@ -134,7 +136,7 @@ StatusWith<std::vector<BSONObj>> selectChunkSplitPoints(OperationContext* txn,
 }
 
 StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
-    OperationContext* txn,
+    OperationContext* opCtx,
     const ShardId& shardId,
     const NamespaceString& nss,
     const ShardKeyPattern& shardKeyPattern,
@@ -172,11 +174,11 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
 
     BSONObjBuilder cmd;
     cmd.append("splitChunk", nss.ns());
-    cmd.append("configdb",
-               Grid::get(txn)->shardRegistry()->getConfigServerConnectionString().toString());
     cmd.append("from", shardId.toString());
     cmd.append("keyPattern", shardKeyPattern.toBSON());
-    collectionVersion.appendForCommands(&cmd);
+    cmd.append("epoch", collectionVersion.epoch());
+    collectionVersion.appendWithField(
+        &cmd, ChunkVersion::kShardVersionField);  // backwards compatibility with v3.4
     chunkRange.append(&cmd);
     cmd.append("splitKeys", splitPoints);
 
@@ -185,12 +187,12 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
     Status status{ErrorCodes::InternalError, "Uninitialized value"};
     BSONObj cmdResponse;
 
-    auto shardStatus = Grid::get(txn)->shardRegistry()->getShard(txn, shardId);
+    auto shardStatus = Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardId);
     if (!shardStatus.isOK()) {
         status = shardStatus.getStatus();
     } else {
         auto cmdStatus = shardStatus.getValue()->runCommandWithFixedRetryAttempts(
-            txn,
+            opCtx,
             ReadPreferenceSetting{ReadPreference::PrimaryOnly},
             "admin",
             cmdObj,
@@ -205,7 +207,7 @@ StatusWith<boost::optional<ChunkRange>> splitChunkAtMultiplePoints(
 
     if (!status.isOK()) {
         log() << "Split chunk " << redact(cmdObj) << " failed" << causedBy(redact(status));
-        return {status.code(), str::stream() << "split failed due to " << status.toString()};
+        return status.withContext("split failed");
     }
 
     BSONElement shouldMigrateElement;

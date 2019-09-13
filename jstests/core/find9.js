@@ -1,3 +1,5 @@
+// @tags: [requires_getmore]
+
 // Test that the MaxBytesToReturnToClientAtOnce limit is enforced.
 
 t = db.jstests_find9;
@@ -26,3 +28,6 @@ while (c.hasNext()) {
     assert.gt(60, c.objsLeftInBatch());
     c.next();
 }
+
+assert.eq(120, t.find().sort({$natural: 1}).itcount());
+assert.eq(120, t.find().sort({_id: 1}).itcount());

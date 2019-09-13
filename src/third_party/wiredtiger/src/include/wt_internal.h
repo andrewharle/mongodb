@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -35,6 +35,7 @@ extern "C" {
 #endif
 #include <errno.h>
 #include <fcntl.h>
+#include <float.h>
 #include <inttypes.h>
 #ifdef _WIN32
 #include <io.h>
@@ -96,6 +97,8 @@ struct __wt_cache;
     typedef struct __wt_cache WT_CACHE;
 struct __wt_cache_pool;
     typedef struct __wt_cache_pool WT_CACHE_POOL;
+struct __wt_capacity;
+    typedef struct __wt_capacity WT_CAPACITY;
 struct __wt_cell;
     typedef struct __wt_cell WT_CELL;
 struct __wt_cell_unpack;
@@ -246,12 +249,14 @@ struct __wt_named_extractor;
     typedef struct __wt_named_extractor WT_NAMED_EXTRACTOR;
 struct __wt_named_snapshot;
     typedef struct __wt_named_snapshot WT_NAMED_SNAPSHOT;
+struct __wt_optrack_header;
+    typedef struct __wt_optrack_header WT_OPTRACK_HEADER;
+struct __wt_optrack_record;
+    typedef struct __wt_optrack_record WT_OPTRACK_RECORD;
 struct __wt_ovfl_reuse;
     typedef struct __wt_ovfl_reuse WT_OVFL_REUSE;
 struct __wt_ovfl_track;
     typedef struct __wt_ovfl_track WT_OVFL_TRACK;
-struct __wt_ovfl_txnc;
-    typedef struct __wt_ovfl_txnc WT_OVFL_TXNC;
 struct __wt_page;
     typedef struct __wt_page WT_PAGE;
 struct __wt_page_deleted;
@@ -260,12 +265,22 @@ struct __wt_page_header;
     typedef struct __wt_page_header WT_PAGE_HEADER;
 struct __wt_page_index;
     typedef struct __wt_page_index WT_PAGE_INDEX;
+struct __wt_page_lookaside;
+    typedef struct __wt_page_lookaside WT_PAGE_LOOKASIDE;
 struct __wt_page_modify;
     typedef struct __wt_page_modify WT_PAGE_MODIFY;
 struct __wt_process;
     typedef struct __wt_process WT_PROCESS;
+struct __wt_rec_chunk;
+    typedef struct __wt_rec_chunk WT_REC_CHUNK;
+struct __wt_rec_dictionary;
+    typedef struct __wt_rec_dictionary WT_REC_DICTIONARY;
+struct __wt_rec_kv;
+    typedef struct __wt_rec_kv WT_REC_KV;
 struct __wt_ref;
     typedef struct __wt_ref WT_REF;
+struct __wt_ref_hist;
+    typedef struct __wt_ref_hist WT_REF_HIST;
 struct __wt_row;
     typedef struct __wt_row WT_ROW;
 struct __wt_rwlock;
@@ -278,12 +293,16 @@ struct __wt_scratch_track;
     typedef struct __wt_scratch_track WT_SCRATCH_TRACK;
 struct __wt_session_impl;
     typedef struct __wt_session_impl WT_SESSION_IMPL;
+struct __wt_session_stash;
+    typedef struct __wt_session_stash WT_SESSION_STASH;
+struct __wt_session_stats;
+    typedef struct __wt_session_stats WT_SESSION_STATS;
 struct __wt_size;
     typedef struct __wt_size WT_SIZE;
 struct __wt_spinlock;
     typedef struct __wt_spinlock WT_SPINLOCK;
-struct __wt_split_stash;
-    typedef struct __wt_split_stash WT_SPLIT_STASH;
+struct __wt_stash;
+    typedef struct __wt_stash WT_STASH;
 struct __wt_table;
     typedef struct __wt_table WT_TABLE;
 struct __wt_thread;
@@ -296,6 +315,8 @@ struct __wt_txn_global;
     typedef struct __wt_txn_global WT_TXN_GLOBAL;
 struct __wt_txn_op;
     typedef struct __wt_txn_op WT_TXN_OP;
+struct __wt_txn_printlog_args;
+    typedef struct __wt_txn_printlog_args WT_TXN_PRINTLOG_ARGS;
 struct __wt_txn_state;
     typedef struct __wt_txn_state WT_TXN_STATE;
 struct __wt_update;
@@ -304,6 +325,9 @@ union __wt_lsn;
     typedef union __wt_lsn WT_LSN;
 union __wt_rand_state;
     typedef union __wt_rand_state WT_RAND_STATE;
+
+typedef uint64_t wt_timestamp_t;
+
 /*
  * Forward type declarations for internal types: END
  * DO NOT EDIT: automatically built by dist/s_typedef.
@@ -343,16 +367,19 @@ union __wt_rand_state;
 #include "btmem.h"
 #include "btree.h"
 #include "cache.h"
+#include "capacity.h"
+#include "cell.h"
 #include "compact.h"
 #include "config.h"
 #include "cursor.h"
 #include "dlh.h"
 #include "error.h"
-#include "flags.h"
 #include "log.h"
 #include "lsm.h"
 #include "meta.h"
+#include "optrack.h"
 #include "os.h"
+#include "reconcile.h"
 #include "schema.h"
 #include "thread_group.h"
 #include "txn.h"
@@ -370,6 +397,7 @@ union __wt_rand_state;
 
 #include "ctype.i"			/* required by packing.i */
 #include "intpack.i"			/* required by cell.i, packing.i */
+#include "misc.i"			/* required by mutex.i */
 
 #include "buf.i"                        /* required by cell.i */
 #include "cache.i"			/* required by txn.i */
@@ -383,11 +411,11 @@ union __wt_rand_state;
 #include "column.i"
 #include "cursor.i"
 #include "log.i"
-#include "misc.i"
 #include "os_fhandle.i"
 #include "os_fs.i"
 #include "os_fstream.i"
 #include "packing.i"
+#include "reconcile.i"
 #include "serial.i"
 
 #if defined(__cplusplus)

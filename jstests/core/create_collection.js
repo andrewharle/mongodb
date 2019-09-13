@@ -1,3 +1,7 @@
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop]
+
 // Tests for the "create" command.
 (function() {
     "use strict";
@@ -130,4 +134,6 @@
     indexSpec = GetIndexHelpers.findByName(db.create_collection.getIndexes(), "_id_");
     assert.neq(indexSpec, null);
     assert.eq(indexSpec.collation.locale, "en_US", tojson(indexSpec));
+
+    assert.commandFailed(db.createCollection('capped_no_size', {capped: true}));
 })();

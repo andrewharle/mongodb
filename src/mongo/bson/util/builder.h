@@ -1,41 +1,46 @@
 /* builder.h */
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
 #include <cfloat>
+#include <cinttypes>
 #include <cstdint>
 #include <sstream>
 #include <stdio.h>
 #include <string.h>
 #include <string>
 
+#include <boost/optional.hpp>
 
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
@@ -48,6 +53,7 @@
 #include "mongo/stdx/type_traits.h"
 #include "mongo/util/allocator.h"
 #include "mongo/util/assert_util.h"
+#include "mongo/util/itoa.h"
 #include "mongo/util/shared_buffer.h"
 
 namespace mongo {
@@ -78,6 +84,14 @@ class SharedBufferAllocator {
 
 public:
     SharedBufferAllocator() = default;
+    SharedBufferAllocator(SharedBuffer buf) : _buf(std::move(buf)) {
+        invariant(!_buf.isShared());
+    }
+
+    // Allow moving but not copying. It would be an error for two SharedBufferAllocators to use the
+    // same underlying buffer.
+    SharedBufferAllocator(SharedBufferAllocator&&) = default;
+    SharedBufferAllocator& operator=(SharedBufferAllocator&&) = default;
 
     void malloc(size_t sz) {
         _buf = SharedBuffer::allocate(sz);
@@ -105,6 +119,9 @@ class StackAllocator {
 
 public:
     StackAllocator() = default;
+    ~StackAllocator() {
+        free();
+    }
 
     enum { SZ = 512 };
     void malloc(size_t sz) {
@@ -141,8 +158,6 @@ private:
 
 template <class BufferAllocator>
 class _BufBuilder {
-    MONGO_DISALLOW_COPYING(_BufBuilder);
-
 public:
     _BufBuilder(int initsize = 512) : size(initsize) {
         if (size > 0) {
@@ -150,9 +165,6 @@ public:
         }
         l = 0;
         reservedBytes = 0;
-    }
-    ~_BufBuilder() {
-        kill();
     }
 
     void kill() {
@@ -309,6 +321,18 @@ public:
         reservedBytes -= bytes;
     }
 
+    /**
+     * Replaces the buffer backing this BufBuilder with the passed in SharedBuffer.
+     * Only legal to call when this builder is empty and when the SharedBuffer isn't shared.
+     */
+    void useSharedBuffer(SharedBuffer buf) {
+        MONGO_STATIC_ASSERT(std::is_same<BufferAllocator, SharedBufferAllocator>());
+        invariant(l == 0);  // Can only do this while empty.
+        invariant(reservedBytes == 0);
+        size = buf.capacity();
+        _buf = SharedBufferAllocator(std::move(buf));
+    }
+
 private:
     template <typename T>
     void appendNumImpl(T t) {
@@ -343,6 +367,7 @@ private:
 };
 
 typedef _BufBuilder<SharedBufferAllocator> BufBuilder;
+MONGO_STATIC_ASSERT(std::is_move_constructible<BufBuilder>::value);
 
 /** The StackBufBuilder builds smaller datasets on the stack instead of using malloc.
       this can be significantly faster for small bufs.  However, you can not release() the
@@ -356,6 +381,7 @@ public:
     StackBufBuilder() : _BufBuilder<StackAllocator>(StackAllocator::SZ) {}
     void release() = delete;  // not allowed. not implemented.
 };
+MONGO_STATIC_ASSERT(!std::is_move_constructible<StackBufBuilder>::value);
 
 /** std::stringstream deals with locale so this is a lot faster than std::stringstream for UTF8 */
 template <typename Allocator>
@@ -376,25 +402,25 @@ public:
         return SBNUM(x, MONGO_DBL_SIZE, "%g");
     }
     StringBuilderImpl& operator<<(int x) {
-        return SBNUM(x, MONGO_S32_SIZE, "%d");
+        return appendIntegral(x, MONGO_S32_SIZE);
     }
     StringBuilderImpl& operator<<(unsigned x) {
-        return SBNUM(x, MONGO_U32_SIZE, "%u");
+        return appendIntegral(x, MONGO_U32_SIZE);
     }
     StringBuilderImpl& operator<<(long x) {
-        return SBNUM(x, MONGO_S64_SIZE, "%ld");
+        return appendIntegral(x, MONGO_S64_SIZE);
     }
     StringBuilderImpl& operator<<(unsigned long x) {
-        return SBNUM(x, MONGO_U64_SIZE, "%lu");
+        return appendIntegral(x, MONGO_U64_SIZE);
     }
     StringBuilderImpl& operator<<(long long x) {
-        return SBNUM(x, MONGO_S64_SIZE, "%lld");
+        return appendIntegral(x, MONGO_S64_SIZE);
     }
     StringBuilderImpl& operator<<(unsigned long long x) {
-        return SBNUM(x, MONGO_U64_SIZE, "%llu");
+        return appendIntegral(x, MONGO_U64_SIZE);
     }
     StringBuilderImpl& operator<<(short x) {
-        return SBNUM(x, MONGO_S16_SIZE, "%hd");
+        return appendIntegral(x, MONGO_S16_SIZE);
     }
     StringBuilderImpl& operator<<(const void* x) {
         if (sizeof(x) == 8) {
@@ -422,6 +448,23 @@ public:
         append(typeName(type));
         return *this;
     }
+    StringBuilderImpl& operator<<(ErrorCodes::Error code) {
+        append(ErrorCodes::errorString(code));
+        return *this;
+    }
+
+    template <typename T>
+    StringBuilderImpl& operator<<(const boost::optional<T>& optional) {
+        return optional ? *this << *optional : *this << "(None)";
+    }
+
+    /**
+     * Fail to compile if passed an unevaluated function, rather than allow it to decay and invoke
+     * the bool overload. This catches both passing std::hex (which isn't supported by this type)
+     * and forgetting to add () when doing `stream << someFuntion`.
+     */
+    template <typename R, typename... Args>
+    StringBuilderImpl& operator<<(R (*val)(Args...)) = delete;
 
     void appendDoubleNice(double x) {
         const int prev = _buf.l;
@@ -468,10 +511,20 @@ public:
 
 private:
     _BufBuilder<Allocator> _buf;
+    template <typename T>
+    StringBuilderImpl& appendIntegral(T val, int maxSize) {
+        MONGO_STATIC_ASSERT(!std::is_same<T, char>());  // char shouldn't append as number.
+        MONGO_STATIC_ASSERT(std::is_integral<T>());
 
-    // non-copyable, non-assignable
-    StringBuilderImpl(const StringBuilderImpl&);
-    StringBuilderImpl& operator=(const StringBuilderImpl&);
+        if (val < 0) {
+            *this << '-';
+            append(StringData(ItoA(0 - uint64_t(val))));  // Send the magnitude to ItoA.
+        } else {
+            append(StringData(ItoA(uint64_t(val))));
+        }
+
+        return *this;
+    }
 
     template <typename T>
     StringBuilderImpl& SBNUM(T val, int maxSize, const char* macro) {

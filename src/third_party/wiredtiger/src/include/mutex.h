@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -49,9 +49,41 @@ struct __wt_rwlock {			/* Read/write lock */
 		} s;
 	} u;
 
+	int16_t stat_read_count_off;	/* read acquisitions offset */
+	int16_t stat_write_count_off;	/* write acquisitions offset */
+	int16_t stat_app_usecs_off;	/* waiting application threads offset */
+	int16_t stat_int_usecs_off;	/* waiting server threads offset */
+	int16_t stat_session_usecs_off;	/* waiting session offset */
+
 	WT_CONDVAR *cond_readers;	/* Blocking readers */
 	WT_CONDVAR *cond_writers;	/* Blocking writers */
 };
+
+/*
+ * WT_RWLOCK_INIT_TRACKED --
+ *	Read write lock initialization, with tracking.
+ *
+ * Implemented as a macro so we can pass in a statistics field and convert
+ * it into a statistics structure array offset.
+ */
+#define	WT_RWLOCK_INIT_TRACKED(session, l, name) do {			\
+	WT_RET(__wt_rwlock_init(session, l));				\
+	(l)->stat_read_count_off = (int16_t)WT_STATS_FIELD_TO_OFFSET(	\
+	    S2C(session)->stats, lock_##name##_read_count);		\
+	(l)->stat_write_count_off = (int16_t)WT_STATS_FIELD_TO_OFFSET(	\
+	    S2C(session)->stats, lock_##name##_write_count);		\
+	(l)->stat_app_usecs_off = (int16_t)WT_STATS_FIELD_TO_OFFSET(	\
+	    S2C(session)->stats, lock_##name##_wait_application);	\
+	(l)->stat_int_usecs_off = (int16_t)WT_STATS_FIELD_TO_OFFSET(	\
+	    S2C(session)->stats, lock_##name##_wait_internal);		\
+} while (0)
+
+#define	WT_RWLOCK_INIT_SESSION_TRACKED(session, l, name) do {		\
+	WT_RWLOCK_INIT_TRACKED(session, l, name);			\
+	(l)->stat_session_usecs_off =					\
+	    (int16_t)WT_SESSION_STATS_FIELD_TO_OFFSET(			\
+	    &(session)->stats, lock_##name##_wait);			\
+} while (0)
 
 /*
  * Spin locks:
@@ -69,8 +101,8 @@ struct __wt_spinlock {
 #if SPINLOCK_TYPE == SPINLOCK_GCC
 	WT_CACHE_LINE_PAD_BEGIN
 	volatile int lock;
-#elif SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||\
-	SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE ||\
+#elif SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX ||			\
+	SPINLOCK_TYPE == SPINLOCK_PTHREAD_MUTEX_ADAPTIVE ||		\
 	SPINLOCK_TYPE == SPINLOCK_MSVC
 	wt_mutex_t lock;
 #else
@@ -88,6 +120,7 @@ struct __wt_spinlock {
 	int16_t stat_count_off;		/* acquisitions offset */
 	int16_t stat_app_usecs_off;	/* waiting application threads offset */
 	int16_t stat_int_usecs_off;	/* waiting server threads offset */
+	int16_t stat_session_usecs_off;	/* waiting session offset */
 
 	int8_t initialized;		/* Lock initialized, for cleanup */
 

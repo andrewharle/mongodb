@@ -2,15 +2,12 @@
 
 var st = new ShardingTest({shards: 2, mongos: 2});
 
-// Don't balance since we're manually moving chunks
-st.stopBalancer();
-
 var coll = st.s.getCollection(jsTestName() + ".coll");
 
 for (var i = -10; i < 10; i++)
     coll.insert({_id: i});
 
-st.shardColl(coll, {_id: 1}, {_id: 0});
+st.shardColl(coll, {_id: 1}, {_id: 0}, {_id: 0}, null, /* waitForDelete */ true);
 
 jsTestLog("Sharded setup complete");
 
@@ -29,15 +26,8 @@ var fullShard = st.getShard(coll, {_id: 1});
 var emptyShard = st.getShard(coll, {_id: -1});
 
 var admin = st.s.getDB("admin");
-assert.soon(
-    function() {
-        var result = admin.runCommand(
-            {moveChunk: "" + coll, find: {_id: -1}, to: fullShard.shardName, _waitForDelete: true});
-        jsTestLog('moveChunk result = ' + tojson(result));
-        return result.ok;
-    },
-    "Setup FAILURE:  Unable to move chunk from " + emptyShard.shardName + " to " +
-        fullShard.shardName);
+assert.commandWorked(st.s0.adminCommand(
+    {moveChunk: "" + coll, find: {_id: -1}, to: fullShard.shardName, _waitForDelete: true}));
 
 jsTestLog("Resetting shard version via first mongos...");
 

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -51,7 +53,8 @@ namespace parsed_aggregation_projection {
  */
 class ParsedAddFields : public ParsedAggregationProjection {
 public:
-    ParsedAddFields() : ParsedAggregationProjection(), _root(new InclusionNode()) {}
+    ParsedAddFields(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ParsedAggregationProjection(expCtx), _root(new InclusionNode()) {}
 
     /**
      * Creates the data needed to perform an AddFields.
@@ -61,21 +64,16 @@ public:
     static std::unique_ptr<ParsedAddFields> create(
         const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONObj& spec);
 
-    ProjectionType getType() const final {
-        return ProjectionType::kComputed;
+    TransformerType getType() const final {
+        return TransformerType::kComputedProjection;
     }
 
     /**
      * Parses the addFields specification given by 'spec', populating internal data structures.
      */
-    void parse(const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONObj& spec) final {
-        VariablesIdGenerator idGenerator;
-        VariablesParseState variablesParseState(&idGenerator);
-        parse(expCtx, spec, variablesParseState);
-        _variables = stdx::make_unique<Variables>(idGenerator.getIdCount());
-    }
+    void parse(const BSONObj& spec) final;
 
-    Document serialize(bool explain = false) const final {
+    Document serializeStageOptions(boost::optional<ExplainOptions::Verbosity> explain) const final {
         MutableDocument output;
         _root->serialize(&output, explain);
         return output.freeze();
@@ -94,8 +92,12 @@ public:
     }
 
     DocumentSource::GetModPathsReturn getModifiedPaths() const final {
-        // TODO SERVER-25510 Only report added paths as modified.
-        return {DocumentSource::GetModPathsReturn::Type::kAllPaths, std::set<std::string>{}};
+        std::set<std::string> computedPaths;
+        StringMap<std::string> renamedPaths;
+        _root->addComputedPaths(&computedPaths, &renamedPaths);
+        return {DocumentSource::GetModPathsReturn::Type::kFiniteSet,
+                std::move(computedPaths),
+                std::move(renamedPaths)};
     }
 
     /**
@@ -110,21 +112,9 @@ public:
      * in the array "a". If there is an element in "a" that is not an object, it will be replaced
      * with {"0": "hello"}. See SERVER-25200 for more details.
      */
-    Document applyProjection(Document inputDoc) const final {
-        _variables->setRoot(inputDoc);
-        return applyProjection(inputDoc, _variables.get());
-    }
-
-    Document applyProjection(Document inputDoc, Variables* vars) const;
+    Document applyProjection(const Document& inputDoc) const final;
 
 private:
-    /**
-     * Parses 'spec' to determine which fields to add.
-     */
-    void parse(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-               const BSONObj& spec,
-               const VariablesParseState& variablesParseState);
-
     /**
      * Attempts to parse 'objSpec' as an expression like {$add: [...]}. Adds a computed field to
      * '_root' and returns true if it was successfully parsed as an expression. Returns false if it
@@ -133,8 +123,7 @@ private:
      * Throws an error if it was determined to be an expression specification, but failed to parse
      * as a valid expression.
      */
-    bool parseObjectAsExpression(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                 StringData pathToObject,
+    bool parseObjectAsExpression(StringData pathToObject,
                                  const BSONObj& objSpec,
                                  const VariablesParseState& variablesParseState);
 
@@ -142,17 +131,12 @@ private:
      * Traverses 'subObj' and parses each field. Adds any computed fields at this level
      * to 'node'.
      */
-    void parseSubObject(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                        const BSONObj& subObj,
+    void parseSubObject(const BSONObj& subObj,
                         const VariablesParseState& variablesParseState,
                         InclusionNode* node);
 
     // The InclusionNode tree does most of the execution work once constructed.
     std::unique_ptr<InclusionNode> _root;
-
-    // This is needed to give the expressions knowledge about the context in which they are being
-    // executed.
-    std::unique_ptr<Variables> _variables;
 };
 }  // namespace parsed_aggregation_projection
 }  // namespace mongo

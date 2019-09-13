@@ -10,7 +10,7 @@ conn.getDB('admin').createUser({user: "root", pwd: "pass", roles: ["root"]});
 conn.getDB('admin').auth("root", "pass");
 var cmdOut = conn.getDB('admin').runCommand({getParameter: 1, authenticationMechanisms: 1});
 if (cmdOut.ok) {
-    TestData.authMechanism = "MONGODB-X509";  // SERVER-10353
+    TestData.authMechanism = "MONGODB-X509,SCRAM-SHA-1";  // SERVER-10353
 }
 conn.getDB('admin').dropAllUsers();
 conn.getDB('admin').logout();
@@ -45,7 +45,8 @@ function authAndTest(mongo) {
         user: CLIENT_USER,
         roles: [
             {'role': 'userAdminAnyDatabase', 'db': 'admin'},
-            {'role': 'readWriteAnyDatabase', 'db': 'admin'}
+            {'role': 'readWriteAnyDatabase', 'db': 'admin'},
+            {'role': 'clusterMonitor', 'db': 'admin'},
         ]
     });
 
@@ -71,6 +72,14 @@ function authAndTest(mongo) {
     assert(external.runCommand({authenticate: 1, mechanism: 'MONGODB-X509'}).ok,
            "runCommand authentication with valid client cert and no user field failed");
 
+    // Check that there's a "Successfully authenticated" message that includes the client IP
+    const log =
+        assert.commandWorked(external.getSiblingDB("admin").runCommand({getLog: "global"})).log;
+    const successRegex = new RegExp(`Successfully authenticated as principal ${CLIENT_USER} on ` +
+                                    `\\$external from client (?:\\d{1,3}\\.){3}\\d{1,3}:\\d+`);
+
+    assert(log.some((line) => successRegex.test(line)));
+
     // Check that we can add a user and read data
     test.createUser(
         {user: "test", pwd: "test", roles: [{'role': 'readWriteAnyDatabase', 'db': 'admin'}]});
@@ -88,10 +97,11 @@ var x509_options = {sslMode: "requireSSL", sslPEMKeyFile: SERVER_CERT, sslCAFile
 var mongo = MongoRunner.runMongod(Object.merge(x509_options, {auth: ""}));
 
 authAndTest(mongo);
-MongoRunner.stopMongod(mongo.port);
+MongoRunner.stopMongod(mongo);
 
 print("2. Testing x.509 auth to mongos");
 
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
 var st = new ShardingTest({
     shards: 1,
     mongos: 1,
@@ -101,7 +111,9 @@ var st = new ShardingTest({
         mongosOptions: x509_options,
         shardOptions: x509_options,
         useHostname: false,
+        shardAsReplicaSet: false
     }
 });
 
 authAndTest(new Mongo("localhost:" + st.s0.port));
+st.stop();

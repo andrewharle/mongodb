@@ -1,14 +1,16 @@
 (function() {
 
+    "use strict";
+
     var s = new ShardingTest({name: "features2", shards: 2, mongos: 1});
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
 
-    a = s._connections[0].getDB("test");
-    b = s._connections[1].getDB("test");
+    let a = s._connections[0].getDB("test");
+    let b = s._connections[1].getDB("test");
 
-    db = s.getDB("test");
+    let db = s.getDB("test");
 
     // ---- distinct ----
 
@@ -75,13 +77,13 @@
     db.mr.save({x: 4, tags: ["b", "c"]});
     db.mr.ensureIndex({x: 1});
 
-    m = function() {
+    let m = function() {
         this.tags.forEach(function(z) {
             emit(z, {count: 1});
         });
     };
 
-    r = function(key, values) {
+    let r = function(key, values) {
         var total = 0;
         for (var i = 0; i < values.length; i++) {
             total += values[i].count;
@@ -89,7 +91,7 @@
         return {count: total};
     };
 
-    doMR = function(n) {
+    let doMR = function(n) {
         print(n);
 
         // on-disk
@@ -144,10 +146,10 @@
 
     doMR("after extra split");
 
-    cmd = {mapreduce: "mr", map: "emit( ", reduce: "fooz + ", out: "broken1"};
+    let cmd = {mapreduce: "mr", map: "emit( ", reduce: "fooz + ", out: "broken1"};
 
-    x = db.runCommand(cmd);
-    y = s._connections[0].getDB("test").runCommand(cmd);
+    let x = db.runCommand(cmd);
+    let y = s._connections[0].getDB("test").runCommand(cmd);
 
     printjson(x);
     printjson(y);
@@ -160,42 +162,24 @@
     assert.eq(3, db.countaa.count(), "counta1");
     assert.eq(3, db.countaa.find().itcount(), "counta1");
 
-    x = null;
-    y = null;
-    try {
-        x = db.runCommand("forceerror");
-    } catch (e) {
-        x = e;
-    }
-    try {
-        y = s._connections[0].getDB("test").runCommand("forceerror");
-    } catch (e) {
-        y = e;
-    }
-
-    // As the forceerror command is written, it doesnt set a code in the reply.
-    // OP_COMMAND changes will add a code of 121 (CommandFailed) if a failing command
-    // does not set one, so this comparison fails as "undefined" != 121.
-    //
-    // TODO: Uncomment this line when OP_COMMAND is implemented in mongos (SERVER-18292)
-    // as then MongoS should set code 121 as well.
-    //
-    // assert.eq( x.code , y.code , "assert format" )
-    assert.eq(x.errmsg, y.errmsg, "assert format");
-    assert.eq(x.ok, y.ok, "assert format");
-
     // isMaster and query-wrapped-command
-    isMaster = db.runCommand({isMaster: 1});
+    let isMaster = db.runCommand({isMaster: 1});
     assert(isMaster.ismaster);
     assert.eq('isdbgrid', isMaster.msg);
     delete isMaster.localTime;
+    delete isMaster.$clusterTime;
+    delete isMaster.operationTime;
 
-    im2 = db.runCommand({query: {isMaster: 1}});
+    let im2 = db.runCommand({query: {isMaster: 1}});
     delete im2.localTime;
+    delete im2.$clusterTime;
+    delete im2.operationTime;
     assert.eq(isMaster, im2);
 
     im2 = db.runCommand({$query: {isMaster: 1}});
     delete im2.localTime;
+    delete im2.$clusterTime;
+    delete im2.operationTime;
     assert.eq(isMaster, im2);
 
     s.stop();

@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -65,7 +65,7 @@ main(int argc, char *argv[])
 	runs = 1;
 
 	while ((ch = __wt_getopt(
-	    progname, argc, argv, "c:C:h:k:l:n:r:t:T:W:")) != EOF)
+	    progname, argc, argv, "C:c:h:k:l:n:r:T:t:W:")) != EOF)
 		switch (ch) {
 		case 'c':
 			g.checkpoint_name = __wt_optarg;
@@ -150,20 +150,14 @@ main(int argc, char *argv[])
 			break;
 		}
 
-		if ((ret = start_checkpoints()) != 0) {
-			(void)log_print_err("Start checkpoints failed", ret, 1);
-			break;
-		}
+		start_checkpoints();
 		if ((ret = start_workers(ttype)) != 0) {
 			(void)log_print_err("Start workers failed", ret, 1);
 			break;
 		}
 
 		g.running = 0;
-		if ((ret = end_checkpoints()) != 0) {
-			(void)log_print_err("Start workers failed", ret, 1);
-			break;
-		}
+		end_checkpoints();
 
 		free(g.cookies);
 		g.cookies = NULL;
@@ -328,16 +322,19 @@ usage(void)
 {
 	fprintf(stderr,
 	    "usage: %s "
-	    "[-S] [-C wiredtiger-config] [-k keys] [-l log]\n\t"
-	    "[-n ops] [-c checkpoint] [-r runs] [-t f|r|v] [-W workers]\n",
+	    "[-C wiredtiger-config] [-c checkpoint] [-h home] [-k keys]\n\t"
+	    "[-l log] [-n ops] [-r runs] [-T table-config] [-t f|r|v]\n\t"
+	    "[-W workers]\n",
 	    progname);
 	fprintf(stderr, "%s",
 	    "\t-C specify wiredtiger_open configuration arguments\n"
 	    "\t-c checkpoint name to used named checkpoints\n"
+	    "\t-h set a database home directory\n"
 	    "\t-k set number of keys to load\n"
 	    "\t-l specify a log file\n"
 	    "\t-n set number of operations each thread does\n"
 	    "\t-r set number of runs (0 for continuous)\n"
+	    "\t-T specify a table configuration\n"
 	    "\t-t set a file type ( col | mix | row | lsm )\n"
 	    "\t-W set number of worker threads\n");
 	return (EXIT_FAILURE);

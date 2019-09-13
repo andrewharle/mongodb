@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kReplication
 
@@ -59,20 +61,15 @@ const Seconds syncSourceFeedbackNetworkTimeoutSecs(30);
  * Calculates the keep alive interval based on the given ReplSetConfig.
  */
 Milliseconds calculateKeepAliveInterval(const ReplSetConfig& rsConfig) {
-    return rsConfig.getElectionTimeoutPeriod() / 2;
+    return std::min((rsConfig.getElectionTimeoutPeriod() / 2), maximumKeepAliveIntervalMS);
 }
 
 /**
  * Returns function to prepare update command
  */
 Reporter::PrepareReplSetUpdatePositionCommandFn makePrepareReplSetUpdatePositionCommandFn(
-    ReplicationCoordinator* replCoord,
-    stdx::mutex& mtx,
-    const HostAndPort& syncTarget,
-    BackgroundSync* bgsync) {
-    return [&mtx, syncTarget, replCoord, bgsync](
-               ReplicationCoordinator::ReplSetUpdatePositionCommandStyle
-                   commandStyle) -> StatusWith<BSONObj> {
+    ReplicationCoordinator* replCoord, const HostAndPort& syncTarget, BackgroundSync* bgsync) {
+    return [syncTarget, replCoord, bgsync]() -> StatusWith<BSONObj> {
         auto currentSyncTarget = bgsync->getSyncTarget();
         if (currentSyncTarget != syncTarget) {
             if (currentSyncTarget.empty()) {
@@ -94,7 +91,7 @@ Reporter::PrepareReplSetUpdatePositionCommandFn makePrepareReplSetUpdatePosition
                           "Currently primary - no one to send updates to");
         }
 
-        return replCoord->prepareReplSetUpdatePositionCommand(commandStyle);
+        return replCoord->prepareReplSetUpdatePositionCommand();
     };
 }
 
@@ -115,9 +112,7 @@ void SyncSourceFeedback::forwardSlaveProgress() {
     }
 }
 
-Status SyncSourceFeedback::_updateUpstream(ReplicationCoordinator* replCoord,
-                                           BackgroundSync* bgsync,
-                                           Reporter* reporter) {
+Status SyncSourceFeedback::_updateUpstream(Reporter* reporter) {
     auto syncTarget = reporter->getTarget();
 
     auto triggerStatus = reporter->trigger();
@@ -131,23 +126,9 @@ Status SyncSourceFeedback::_updateUpstream(ReplicationCoordinator* replCoord,
 
     if (!status.isOK()) {
         log() << "SyncSourceFeedback error sending update to " << syncTarget << ": " << status;
-
-        // Some errors should not cause result in blacklisting the sync source.
-        if (status != ErrorCodes::InvalidSyncSource) {
-            // The command could not be created because the node is now primary.
-        } else if (status != ErrorCodes::NodeNotFound) {
-            // The command could not be created, likely because this node was removed from the set.
-        } else {
-            // Blacklist sync target for .5 seconds and find a new one.
-            stdx::lock_guard<stdx::mutex> lock(_mtx);
-            const auto blacklistDuration = Milliseconds{500};
-            const auto until = Date_t::now() + blacklistDuration;
-            log() << "Blacklisting " << syncTarget << " due to error: '" << status << "' for "
-                  << blacklistDuration << " until: " << until;
-            replCoord->blacklistSyncSource(syncTarget, until);
-            bgsync->clearSyncTarget();
-        }
     }
+
+    // Sync source blacklisting will be done in BackgroundSync and SyncSourceResolver.
 
     return status;
 }
@@ -234,12 +215,11 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor,
             }
         }
 
-        Reporter reporter(
-            executor,
-            makePrepareReplSetUpdatePositionCommandFn(replCoord, _mtx, syncTarget, bgsync),
-            syncTarget,
-            keepAliveInterval,
-            syncSourceFeedbackNetworkTimeoutSecs);
+        Reporter reporter(executor,
+                          makePrepareReplSetUpdatePositionCommandFn(replCoord, syncTarget, bgsync),
+                          syncTarget,
+                          keepAliveInterval,
+                          syncSourceFeedbackNetworkTimeoutSecs);
         {
             stdx::lock_guard<stdx::mutex> lock(_mtx);
             if (_shutdownSignaled) {
@@ -252,7 +232,7 @@ void SyncSourceFeedback::run(executor::TaskExecutor* executor,
             _reporter = nullptr;
         });
 
-        auto status = _updateUpstream(replCoord, bgsync, &reporter);
+        auto status = _updateUpstream(&reporter);
         if (!status.isOK()) {
             LOG(1) << "The replication progress command (replSetUpdatePosition) failed and will be "
                       "retried: "

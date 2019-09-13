@@ -5,20 +5,25 @@
 //   # failpoint. The former operations may be routed to a secondary in the replica set, whereas the
 //   # latter must be routed to the primary.
 //   assumes_read_preference_unchanged,
-//   requires_collmod_command,
+//   requires_fastcount,
+//   requires_getmore,
+//   # Uses $where operator
+//   requires_scripting,
+//   uses_testing_only_commands,
 // ]
 
 var t = db.max_time_ms;
-var exceededTimeLimit = 50;  // ErrorCodes::ExceededTimeLimit
 var cursor;
 var res;
+var error;
 
 //
-// Simple positive test for query: a ~300ms query with a 100ms time limit should be aborted.
+// Simple positive test for query: a ~100 second query with a 100ms time limit should be aborted.
 //
 
 t.drop();
-t.insert([{}, {}, {}]);
+assert.commandWorked(t.insert(Array.from({length: 1000}, _ => ({}))));
+
 cursor = t.find({
     $where: function() {
         sleep(100);
@@ -26,9 +31,15 @@ cursor = t.find({
     }
 });
 cursor.maxTimeMS(100);
-assert.throws(function() {
+error = assert.throws(function() {
     cursor.itcount();
 }, [], "expected query to abort due to time limit");
+// TODO SERVER-32565: The error should always be MaxTimeMSExpired, but there are rare cases where
+// interrupting javascript execution on the server with a stepdown or timeout results in an error
+// code of InternalError or Interrupted instead, so we also accept those here.
+assert.contains(error.code,
+                [ErrorCodes.MaxTimeMSExpired, ErrorCodes.Interrupted, ErrorCodes.InternalError],
+                "Failed with error: " + tojson(error));
 
 //
 // Simple negative test for query: a ~300ms query with a 10s time limit should not hit the time
@@ -73,11 +84,17 @@ assert.doesNotThrow(function() {
     cursor.next();
     cursor.next();
 }, [], "expected batch 1 (query) to not hit the time limit");
-assert.throws(function() {
+error = assert.throws(function() {
     cursor.next();
     cursor.next();
     cursor.next();
 }, [], "expected batch 2 (getmore) to abort due to time limit");
+// TODO SERVER-32565: The error should always be MaxTimeMSExpired, but there are rare cases where
+// interrupting javascript execution on the server with a stepdown or timeout results in an error
+// code of InternalError or Interrupted instead, so we also accept those here.
+assert.contains(error.code,
+                [ErrorCodes.MaxTimeMSExpired, ErrorCodes.Interrupted, ErrorCodes.InternalError],
+                "Failed with error: " + tojson(error));
 
 //
 // Simple negative test for getmore:
@@ -130,9 +147,15 @@ cursor = t.find({
           }).sort({_id: 1});
 cursor.batchSize(3);
 cursor.maxTimeMS(6 * 1000);
-assert.throws(function() {
+error = assert.throws(function() {
     cursor.itcount();
 }, [], "expected find() to abort due to time limit");
+// TODO SERVER-32565: The error should always be MaxTimeMSExpired, but there are rare cases where
+// interrupting javascript execution on the server with a stepdown or timeout results in an error
+// code of InternalError or Interrupted instead, so we also accept those here.
+assert.contains(error.code,
+                [ErrorCodes.MaxTimeMSExpired, ErrorCodes.Interrupted, ErrorCodes.InternalError],
+                "Failed with error: " + tojson(error));
 
 //
 // Many-batch negative test for getmore:
@@ -155,7 +178,11 @@ cursor = t.find({
 cursor.batchSize(3);
 cursor.maxTimeMS(20 * 1000);
 assert.doesNotThrow(function() {
+    // SERVER-40305: Add some additional logging here in case this fails to help us track down why
+    // it failed.
+    assert.commandWorked(db.adminCommand({setParameter: 1, traceExceptions: 1}));
     cursor.itcount();
+    assert.commandWorked(db.adminCommand({setParameter: 1, traceExceptions: 0}));
 }, [], "expected find() to not hit the time limit");
 
 //
@@ -164,7 +191,7 @@ assert.doesNotThrow(function() {
 
 t.drop();
 res = t.getDB().adminCommand({sleep: 1, millis: 300, maxTimeMS: 100});
-assert(res.ok == 0 && res.code == exceededTimeLimit,
+assert(res.ok == 0 && res.code == ErrorCodes.MaxTimeMSExpired,
        "expected sleep command to abort due to time limit, ok=" + res.ok + ", code=" + res.code);
 
 //
@@ -279,15 +306,9 @@ cursor._ensureSpecial();
 assert.eq(0, cursor.next().ok);
 
 // Verify that the $maxTimeMS query option can't be sent with $query-wrapped commands.
-// the shell will throw here as it will validate itself when sending the command.
-// The server uses the same logic.
-// TODO: rewrite to use runCommandWithMetadata when we have a shell helper so that
-// we can test server side validation.
-assert.throws(function() {
-    cursor = t.getDB().$cmd.find({ping: 1}).limit(-1).maxTimeMS(0);
-    cursor._ensureSpecial();
-    cursor.next();
-});
+cursor = t.getDB().$cmd.find({ping: 1}).limit(-1).maxTimeMS(0);
+cursor._ensureSpecial();
+assert.commandFailed(cursor.next());
 
 //
 // Tests for fail points maxTimeAlwaysTimeOut and maxTimeNeverTimeOut.
@@ -298,7 +319,7 @@ t.drop();
 assert.eq(
     1, t.getDB().adminCommand({configureFailPoint: "maxTimeAlwaysTimeOut", mode: "alwaysOn"}).ok);
 res = t.getDB().runCommand({ping: 1, maxTimeMS: 10 * 1000});
-assert(res.ok == 0 && res.code == exceededTimeLimit,
+assert(res.ok == 0 && res.code == ErrorCodes.MaxTimeMSExpired,
        "expected command to trigger maxTimeAlwaysTimeOut fail point, ok=" + res.ok + ", code=" +
            res.code);
 assert.eq(1, t.getDB().adminCommand({configureFailPoint: "maxTimeAlwaysTimeOut", mode: "off"}).ok);
@@ -387,7 +408,7 @@ assert.eq(1, t.getDB().adminCommand({configureFailPoint: "maxTimeNeverTimeOut", 
 //
 
 // "aggregate" command.
-res = t.runCommand("aggregate", {pipeline: [], maxTimeMS: 60 * 1000});
+res = t.runCommand("aggregate", {pipeline: [], cursor: {}, maxTimeMS: 60 * 1000});
 assert(res.ok == 1,
        "expected aggregate with maxtime to succeed, ok=" + res.ok + ", code=" + res.code);
 
@@ -405,12 +426,13 @@ assert.commandWorked(
 //
 res = t.runCommand({parallelCollectionScan: t.getName(), numCursors: 1, maxTimeMS: 60 * 1000});
 assert.commandWorked(res);
-var cursor = new DBCommandCursor(t.getDB().getMongo(), res.cursors[0], 5);
+var cursor = new DBCommandCursor(t.getDB(), res.cursors[0], 5);
 assert.commandWorked(
     t.getDB().adminCommand({configureFailPoint: "maxTimeAlwaysTimeOut", mode: "alwaysOn"}));
-assert.throws(function() {
+error = assert.throws(function() {
     cursor.itcount();
 }, [], "expected query to abort due to time limit");
+assert.eq(ErrorCodes.MaxTimeMSExpired, error.code);
 assert.commandWorked(
     t.getDB().adminCommand({configureFailPoint: "maxTimeAlwaysTimeOut", mode: "off"}));
 

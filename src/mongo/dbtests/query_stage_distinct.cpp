@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -31,12 +33,14 @@
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/index_catalog.h"
 #include "mongo/db/client.h"
 #include "mongo/db/db_raii.h"
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/exec/distinct_scan.h"
 #include "mongo/db/exec/plan_stage.h"
 #include "mongo/db/json.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/dbtests/dbtests.h"
@@ -47,20 +51,22 @@
 
 namespace QueryStageDistinct {
 
+static const NamespaceString nss{"unittests.QueryStageDistinct"};
+
 class DistinctBase {
 public:
-    DistinctBase() : _client(&_txn) {}
+    DistinctBase() : _client(&_opCtx) {}
 
     virtual ~DistinctBase() {
-        _client.dropCollection(ns());
+        _client.dropCollection(nss.ns());
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_txn, ns(), obj));
+        ASSERT_OK(dbtests::createIndex(&_opCtx, nss.ns(), obj));
     }
 
     void insert(const BSONObj& obj) {
-        _client.insert(ns(), obj);
+        _client.insert(nss.ns(), obj);
     }
 
     /**
@@ -90,13 +96,9 @@ public:
         return keyElt.numberInt();
     }
 
-    static const char* ns() {
-        return "unittests.QueryStageDistinct";
-    }
-
 protected:
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContext& _opCtx = *_txnPtr;
 
 private:
     DBDirectClient _client;
@@ -122,12 +124,12 @@ public:
         // Make an index on a:1
         addIndex(BSON("a" << 1));
 
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
         Collection* coll = ctx.getCollection();
 
         // Set up the distinct stage.
         std::vector<IndexDescriptor*> indexes;
-        coll->getIndexCatalog()->findIndexesByKeyPattern(&_txn, BSON("a" << 1), false, &indexes);
+        coll->getIndexCatalog()->findIndexesByKeyPattern(&_opCtx, BSON("a" << 1), false, &indexes);
         ASSERT_EQ(indexes.size(), 1U);
 
         DistinctParams params;
@@ -142,7 +144,7 @@ public:
         params.bounds.fields.push_back(oil);
 
         WorkingSet ws;
-        DistinctScan distinct(&_txn, params, &ws);
+        DistinctScan distinct(&_opCtx, params, &ws);
 
         WorkingSetID wsid;
         // Get our first result.
@@ -189,17 +191,17 @@ public:
         // Make an index on a:1
         addIndex(BSON("a" << 1));
 
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
         Collection* coll = ctx.getCollection();
 
         // Set up the distinct stage.
         std::vector<IndexDescriptor*> indexes;
-        coll->getIndexCatalog()->findIndexesByKeyPattern(&_txn, BSON("a" << 1), false, &indexes);
+        coll->getIndexCatalog()->findIndexesByKeyPattern(&_opCtx, BSON("a" << 1), false, &indexes);
         verify(indexes.size() == 1);
 
         DistinctParams params;
         params.descriptor = indexes[0];
-        ASSERT_TRUE(params.descriptor->isMultikey(&_txn));
+        ASSERT_TRUE(params.descriptor->isMultikey(&_opCtx));
 
         verify(params.descriptor);
         params.direction = 1;
@@ -212,7 +214,7 @@ public:
         params.bounds.fields.push_back(oil);
 
         WorkingSet ws;
-        DistinctScan distinct(&_txn, params, &ws);
+        DistinctScan distinct(&_opCtx, params, &ws);
 
         // We should see each number in the range [1, 6] exactly once.
         std::set<int> seen;
@@ -258,12 +260,12 @@ public:
 
         addIndex(BSON("a" << 1 << "b" << 1));
 
-        AutoGetCollectionForRead ctx(&_txn, ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
         Collection* coll = ctx.getCollection();
 
         std::vector<IndexDescriptor*> indices;
         coll->getIndexCatalog()->findIndexesByKeyPattern(
-            &_txn, BSON("a" << 1 << "b" << 1), false, &indices);
+            &_opCtx, BSON("a" << 1 << "b" << 1), false, &indices);
         ASSERT_EQ(1U, indices.size());
 
         DistinctParams params;
@@ -283,7 +285,7 @@ public:
         params.bounds.fields.push_back(bOil);
 
         WorkingSet ws;
-        DistinctScan distinct(&_txn, params, &ws);
+        DistinctScan distinct(&_opCtx, params, &ws);
 
         WorkingSetID wsid;
         PlanStage::StageState state;

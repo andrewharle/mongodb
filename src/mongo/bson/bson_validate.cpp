@@ -1,30 +1,33 @@
 // bson_validate.cpp
 
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include <cstring>
@@ -46,13 +49,23 @@ namespace {
 /**
  * Creates a status with InvalidBSON code and adds information about _id if available.
  * WARNING: only pass in a non-EOO idElem if it has been fully validated already!
+ * 'elemName' should be the known, validated field name of the element containing the error, if it
+ * exists. Otherwise, it should be empty.
  */
-Status NOINLINE_DECL makeError(StringData baseMsg, BSONElement idElem) {
-    std::string msg = baseMsg.toString();
+Status NOINLINE_DECL makeError(StringData baseMsg, BSONElement idElem, StringData elemName) {
+    str::stream msg;
+    msg << baseMsg;
+
+    if (!elemName.empty()) {
+        msg << " in element with field name '";
+        msg << elemName.toString();
+        msg << "'";
+    }
+
     if (idElem.eoo()) {
-        msg += " in object with unknown _id";
+        msg << " in object with unknown _id";
     } else {
-        msg += " in object with " + idElem.toString(/*field name=*/true, /*full=*/true);
+        msg << " in object with " + idElem.toString(/*field name=*/true, /*full=*/true);
     }
     return Status(ErrorCodes::InvalidBSON, msg);
 }
@@ -73,10 +86,15 @@ public:
         return true;
     }
 
-    Status readCString(StringData* out) {
+    /* Attempts to read a c-string starting at the next position in the buffer, and writes the
+     * string into 'out', if non-null.
+     * 'elemName' should be the known, validated field name of the BSONElement in which we are
+     * reading, if it exists. Otherwise, it should be empty.
+     */
+    Status readCString(StringData elemName, StringData* out) {
         const void* x = memchr(_buffer + _position, 0, _maxLength - _position);
         if (!x)
-            return makeError("no end of c-string", _idElem);
+            return makeError("no end of c-string", _idElem, elemName);
         uint64_t len = static_cast<uint64_t>(static_cast<const char*>(x) - (_buffer + _position));
 
         StringData data(_buffer + _position, len);
@@ -88,14 +106,19 @@ public:
         return Status::OK();
     }
 
-    Status readUTF8String(StringData* out) {
+    /* Attempts to read a UTF8 string starting at the next position in the buffer, and writes the
+     * string into 'out', if non-null.
+     * 'elemName' should be the known, validated field name of the BSONElement in which we are
+     * reading, if it exists. Otherwise, it should be empty.
+     */
+    Status readUTF8String(StringData elemName, StringData* out) {
         int sz;
         if (!readNumber<int>(&sz))
-            return makeError("invalid bson", _idElem);
+            return makeError("invalid bson", _idElem, elemName);
 
         if (sz <= 0) {
             // must have NULL at the very least
-            return makeError("invalid bson", _idElem);
+            return makeError("invalid bson", _idElem, elemName);
         }
 
         if (out) {
@@ -103,14 +126,14 @@ public:
         }
 
         if (!skip(sz - 1))
-            return makeError("invalid bson", _idElem);
+            return makeError("invalid bson", _idElem, elemName);
 
         char c;
         if (!readNumber<char>(&c))
-            return makeError("invalid bson", _idElem);
+            return makeError("invalid bson", _idElem, elemName);
 
         if (c != 0)
-            return makeError("not null terminated string", _idElem);
+            return makeError("not null terminated string", _idElem, elemName);
 
         return Status::OK();
     }
@@ -188,14 +211,14 @@ Status validateElementInfo(Buffer* buffer,
 
     signed char type;
     if (!buffer->readNumber<signed char>(&type))
-        return makeError("invalid bson", idElem);
+        return makeError("invalid bson", idElem, StringData());
 
     if (type == EOO) {
         *nextState = ValidationState::EndObj;
         return Status::OK();
     }
 
-    status = buffer->readCString(elemName);
+    status = buffer->readCString(StringData(), elemName);
     if (!status.isOK())
         return status;
 
@@ -208,20 +231,20 @@ Status validateElementInfo(Buffer* buffer,
 
         case jstOID:
             if (!buffer->skip(OID::kOIDSize))
-                return makeError("invalid bson", idElem);
+                return makeError("invalid bson", idElem, *elemName);
             return Status::OK();
 
         case NumberInt:
             if (!buffer->skip(sizeof(int32_t)))
-                return makeError("invalid bson", idElem);
+                return makeError("invalid bson", idElem, *elemName);
             return Status::OK();
 
         case Bool:
             uint8_t val;
             if (!buffer->readNumber(&val))
-                return makeError("invalid bson", idElem);
+                return makeError("invalid bson", idElem, *elemName);
             if ((val != 0) && (val != 1))
-                return makeError("invalid boolean value", idElem);
+                return makeError("invalid boolean value", idElem, *elemName);
             return Status::OK();
 
         case NumberDouble:
@@ -229,35 +252,28 @@ Status validateElementInfo(Buffer* buffer,
         case bsonTimestamp:
         case Date:
             if (!buffer->skip(sizeof(int64_t)))
-                return makeError("invalid bson", idElem);
+                return makeError("invalid bson", idElem, *elemName);
             return Status::OK();
 
         case NumberDecimal:
-            if (buffer->version() != BSONVersion::kV1_0) {
-                if (!buffer->skip(sizeof(Decimal128::Value)))
-                    return makeError("Invalid bson", idElem);
-                return Status::OK();
-            } else {
-                return Status(ErrorCodes::InvalidBSON,
-                              "Cannot use decimal BSON type when the featureCompatibilityVersion "
-                              "is 3.2. See "
-                              "http://dochub.mongodb.org/core/3.4-feature-compatibility.");
-            }
+            if (!buffer->skip(sizeof(Decimal128::Value)))
+                return makeError("Invalid bson", idElem, *elemName);
+            return Status::OK();
 
         case DBRef:
-            status = buffer->readUTF8String(NULL);
+            status = buffer->readUTF8String(*elemName, nullptr);
             if (!status.isOK())
                 return status;
             if (!buffer->skip(OID::kOIDSize)) {
-                return makeError("invalid bson length", idElem);
+                return makeError("invalid bson length", idElem, *elemName);
             }
             return Status::OK();
 
         case RegEx:
-            status = buffer->readCString(NULL);
+            status = buffer->readCString(*elemName, nullptr);
             if (!status.isOK())
                 return status;
-            status = buffer->readCString(NULL);
+            status = buffer->readCString(*elemName, nullptr);
             if (!status.isOK())
                 return status;
 
@@ -266,7 +282,7 @@ Status validateElementInfo(Buffer* buffer,
         case Code:
         case Symbol:
         case String:
-            status = buffer->readUTF8String(NULL);
+            status = buffer->readUTF8String(*elemName, nullptr);
             if (!status.isOK())
                 return status;
             return Status::OK();
@@ -274,11 +290,11 @@ Status validateElementInfo(Buffer* buffer,
         case BinData: {
             int sz;
             if (!buffer->readNumber<int>(&sz))
-                return makeError("invalid bson", idElem);
+                return makeError("invalid bson", idElem, *elemName);
             if (sz < 0 || sz == std::numeric_limits<int>::max())
-                return makeError("invalid size in bson", idElem);
+                return makeError("invalid size in bson", idElem, *elemName);
             if (!buffer->skip(1 + sz))
-                return makeError("invalid bson", idElem);
+                return makeError("invalid bson", idElem, *elemName);
             return Status::OK();
         }
         case CodeWScope:
@@ -290,7 +306,7 @@ Status validateElementInfo(Buffer* buffer,
             return Status::OK();
 
         default:
-            return makeError("invalid bson type", idElem);
+            return makeError("invalid bson type", idElem, *elemName);
     }
 }
 
@@ -317,7 +333,7 @@ Status validateBSONIterative(Buffer* buffer) {
                 curr->setStartPosition(buffer->position());
                 curr->setIsCodeWithScope(false);
                 if (!buffer->readNumber<int>(&curr->expectedSize)) {
-                    return makeError("bson size is larger than buffer size", idElem);
+                    return makeError("bson size is larger than buffer size", idElem, StringData());
                 }
                 state = ValidationState::WithinObj;
             // fall through
@@ -351,7 +367,8 @@ Status validateBSONIterative(Buffer* buffer) {
             case ValidationState::EndObj: {
                 int actualLength = buffer->position() - curr->startPosition();
                 if (actualLength != curr->expectedSize) {
-                    return makeError("bson length doesn't match what we found", idElem);
+                    return makeError(
+                        "bson length doesn't match what we found", idElem, StringData());
                 }
                 frames.pop_back();
                 if (frames.empty()) {
@@ -371,8 +388,8 @@ Status validateBSONIterative(Buffer* buffer) {
                 curr->setStartPosition(buffer->position());
                 curr->setIsCodeWithScope(true);
                 if (!buffer->readNumber<int>(&curr->expectedSize))
-                    return makeError("invalid bson CodeWScope size", idElem);
-                Status status = buffer->readUTF8String(NULL);
+                    return makeError("invalid bson CodeWScope size", idElem, StringData());
+                Status status = buffer->readUTF8String(StringData(), nullptr);
                 if (!status.isOK())
                     return status;
                 state = ValidationState::BeginObj;
@@ -382,11 +399,12 @@ Status validateBSONIterative(Buffer* buffer) {
                 int actualLength = buffer->position() - curr->startPosition();
                 if (actualLength != curr->expectedSize) {
                     return makeError("bson length for CodeWScope doesn't match what we found",
-                                     idElem);
+                                     idElem,
+                                     StringData());
                 }
                 frames.pop_back();
                 if (frames.empty())
-                    return makeError("unnested CodeWScope", idElem);
+                    return makeError("unnested CodeWScope", idElem, StringData());
                 curr = &frames.back();
                 state = ValidationState::WithinObj;
                 break;

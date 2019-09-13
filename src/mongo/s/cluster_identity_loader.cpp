@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -60,7 +62,7 @@ OID ClusterIdentityLoader::getClusterId() {
     return _lastLoadResult.getValue();
 }
 
-Status ClusterIdentityLoader::loadClusterId(OperationContext* txn,
+Status ClusterIdentityLoader::loadClusterId(OperationContext* opCtx,
                                             const repl::ReadConcernLevel& readConcernLevel) {
     stdx::unique_lock<stdx::mutex> lk(_mutex);
     if (_initializationState == InitializationState::kInitialized) {
@@ -79,7 +81,7 @@ Status ClusterIdentityLoader::loadClusterId(OperationContext* txn,
     _initializationState = InitializationState::kLoading;
 
     lk.unlock();
-    auto loadStatus = _fetchClusterIdFromConfig(txn, readConcernLevel);
+    auto loadStatus = _fetchClusterIdFromConfig(opCtx, readConcernLevel);
     lk.lock();
 
     invariant(_initializationState == InitializationState::kLoading);
@@ -94,13 +96,11 @@ Status ClusterIdentityLoader::loadClusterId(OperationContext* txn,
 }
 
 StatusWith<OID> ClusterIdentityLoader::_fetchClusterIdFromConfig(
-    OperationContext* txn, const repl::ReadConcernLevel& readConcernLevel) {
-    auto catalogClient = Grid::get(txn)->catalogClient(txn);
-    auto loadResult = catalogClient->getConfigVersion(txn, readConcernLevel);
+    OperationContext* opCtx, const repl::ReadConcernLevel& readConcernLevel) {
+    auto catalogClient = Grid::get(opCtx)->catalogClient();
+    auto loadResult = catalogClient->getConfigVersion(opCtx, readConcernLevel);
     if (!loadResult.isOK()) {
-        return Status(loadResult.getStatus().code(),
-                      str::stream() << "Error loading clusterID"
-                                    << causedBy(loadResult.getStatus().reason()));
+        return loadResult.getStatus().withContext("Error loading clusterID");
     }
     return loadResult.getValue().getClusterId();
 }

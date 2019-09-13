@@ -54,6 +54,7 @@ build_posix/wt
 tags
 
 # Documentation
+/dist/plantuml.jar
 /docs/
 /src/docs/changelog.md
 /src/docs/doxygen.log
@@ -61,6 +62,11 @@ tags
 # Tests
 WT_HOME/
 WT_TEST/
+
+# Bench/workgen
+/bench/workgen/_workgen.so
+/bench/workgen/workgen/workgen.py
+/bench/workgen/workgen_wrap.cxx
 
 # Python
 /lang/python/_wiredtiger.so
@@ -90,28 +96,42 @@ _wiredtiger.pyd
 **/examples/c/ex_pack
 **/examples/c/ex_process
 **/examples/c/ex_schema
+**/examples/c/ex_smoke
 **/examples/c/ex_stat
 **/examples/c/ex_sync
 **/examples/c/ex_thread
 **/test/bloom/t
 **/test/checkpoint/t
-**/test_scope
-**/test_wt1965_col_efficiency
-**/test_wt2246_col_append
-**/test_wt2323_join_visibility
-**/test_wt2403_lsm_workload
-**/test_wt2447_join_main_table
-**/test_wt2535_insert_race
-**/test_wt2592_join_schema
-**/test_wt2695_checksum
-**/test_wt2719_reconfig
-**/test_wt2834_join_bloom_fix
-**/test_wt2853_perf
-**/test_wt2909_checkpoint_integrity
-**/test_wt2999_join_extractor
-**/test_wt3120_filesys
-**/test_wt3135_search_near_collator
-**/test_wt3184_dup_index_collator
+**/test/csuite/test_random_abort
+**/test/csuite/test_random_directio
+**/test/csuite/test_rwlock
+**/test/csuite/test_schema_abort
+**/test/csuite/test_scope
+**/test/csuite/test_timestamp_abort
+**/test/csuite/test_truncated_log
+**/test/csuite/test_wt1965_col_efficiency
+**/test/csuite/test_wt2246_col_append
+**/test/csuite/test_wt2323_join_visibility
+**/test/csuite/test_wt2403_lsm_workload
+**/test/csuite/test_wt2447_join_main_table
+**/test/csuite/test_wt2535_insert_race
+**/test/csuite/test_wt2592_join_schema
+**/test/csuite/test_wt2695_checksum
+**/test/csuite/test_wt2719_reconfig
+**/test/csuite/test_wt2834_join_bloom_fix
+**/test/csuite/test_wt2853_perf
+**/test/csuite/test_wt2909_checkpoint_integrity
+**/test/csuite/test_wt2999_join_extractor
+**/test/csuite/test_wt3120_filesys
+**/test/csuite/test_wt3135_search_near_collator
+**/test/csuite/test_wt3184_dup_index_collator
+**/test/csuite/test_wt3338_partial_update
+**/test/csuite/test_wt3363_checkpoint_op_races
+**/test/csuite/test_wt3874_pad_byte_collator
+**/test/csuite/test_wt4105_large_doc_small_upd
+**/test/csuite/test_wt4117_checksum
+**/test/csuite/test_wt4156_metadata_salvage
+**/test/csuite/test_wt4333_handle_locks
 **/test/cursor_order/cursor_order
 **/test/fops/t
 **/test/format/s_dumpcmp
@@ -123,8 +143,6 @@ _wiredtiger.pyd
 **/test/packing/intpack-test3
 **/test/packing/packing-test
 **/test/readonly/t
-**/test/recovery/random-abort
-**/test/recovery/truncated-log
 **/test/salvage/t
 **/test/syscall/test_wt2336_base
 **/test/thread/t

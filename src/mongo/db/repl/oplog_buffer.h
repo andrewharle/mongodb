@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -70,7 +72,7 @@ public:
      * create backing storage, etc). This method may be called at most once for the lifetime of an
      * oplog buffer.
      */
-    virtual void startup(OperationContext* txn) = 0;
+    virtual void startup(OperationContext* opCtx) = 0;
 
     /**
      * Signals to the oplog buffer that it should shut down. This method may block. After
@@ -79,7 +81,7 @@ public:
      * It is legal to call this method multiple times, but it should only be called after startup
      * has been called.
      */
-    virtual void shutdown(OperationContext* txn) = 0;
+    virtual void shutdown(OperationContext* opCtx) = 0;
 
     /**
      * Pushes operation into oplog buffer, ignoring any size constraints. Does not block.
@@ -87,26 +89,26 @@ public:
      * the limit returned by getMaxSize() but should not otherwise adversely affect normal
      * functionality such as pushing and popping operations from the oplog buffer.
      */
-    virtual void pushEvenIfFull(OperationContext* txn, const Value& value) = 0;
+    virtual void pushEvenIfFull(OperationContext* opCtx, const Value& value) = 0;
 
     /**
      * Pushes operation into oplog buffer.
      * If there are size constraints on the oplog buffer, this may block until sufficient space
      * is made available (by popping) to complete this operation.
      */
-    virtual void push(OperationContext* txn, const Value& value) = 0;
+    virtual void push(OperationContext* opCtx, const Value& value) = 0;
 
     /**
      * Pushes operations in the iterator range [begin, end) into the oplog buffer without blocking.
      */
-    virtual void pushAllNonBlocking(OperationContext* txn,
+    virtual void pushAllNonBlocking(OperationContext* opCtx,
                                     Batch::const_iterator begin,
                                     Batch::const_iterator end) = 0;
 
     /**
      * Returns when enough space is available.
      */
-    virtual void waitForSpace(OperationContext* txn, std::size_t size) = 0;
+    virtual void waitForSpace(OperationContext* opCtx, std::size_t size) = 0;
 
     /**
      * Returns true if oplog buffer is empty.
@@ -135,13 +137,13 @@ public:
     /**
      * Clears oplog buffer.
      */
-    virtual void clear(OperationContext* txn) = 0;
+    virtual void clear(OperationContext* opCtx) = 0;
 
     /**
      * Returns false if oplog buffer is empty. "value" is left unchanged.
      * Otherwise, removes last item (saves in "value") from the oplog buffer and returns true.
      */
-    virtual bool tryPop(OperationContext* txn, Value* value) = 0;
+    virtual bool tryPop(OperationContext* opCtx, Value* value) = 0;
 
     /**
      * Waits "waitDuration" for an operation to be pushed into the oplog buffer.
@@ -154,12 +156,12 @@ public:
      * Returns false if oplog buffer is empty.
      * Otherwise, returns true and sets "value" to last item in oplog buffer.
      */
-    virtual bool peek(OperationContext* txn, Value* value) = 0;
+    virtual bool peek(OperationContext* opCtx, Value* value) = 0;
 
     /**
      * Returns the item most recently added to the oplog buffer or nothing if the buffer is empty.
      */
-    virtual boost::optional<Value> lastObjectPushed(OperationContext* txn) const = 0;
+    virtual boost::optional<Value> lastObjectPushed(OperationContext* opCtx) const = 0;
 };
 
 }  // namespace repl

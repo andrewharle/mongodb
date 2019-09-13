@@ -1,32 +1,34 @@
 // data_file.cpp
 
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
@@ -104,14 +106,14 @@ int DataFile::_defaultSize() const {
 }
 
 /** @return true if found and opened. if uninitialized (prealloc only) does not open. */
-Status DataFile::openExisting(const char* filename) {
+Status DataFile::openExisting(OperationContext* opCtx, const char* filename) {
     invariant(_mb == 0);
 
     if (!boost::filesystem::exists(filename)) {
         return Status(ErrorCodes::InvalidPath, "DataFile::openExisting - file does not exist");
     }
 
-    if (!mmf.open(filename)) {
+    if (!mmf.open(opCtx, filename)) {
         return Status(ErrorCodes::InternalError, "DataFile::openExisting - mmf.open failed");
     }
 
@@ -138,7 +140,7 @@ Status DataFile::openExisting(const char* filename) {
     return Status::OK();
 }
 
-void DataFile::open(OperationContext* txn,
+void DataFile::open(OperationContext* opCtx,
                     const char* filename,
                     int minSize,
                     bool preallocateOnly) {
@@ -170,7 +172,7 @@ void DataFile::open(OperationContext* txn,
     {
         invariant(_mb == 0);
         unsigned long long sz = size;
-        if (mmf.create(filename, sz)) {
+        if (mmf.create(opCtx, filename, sz)) {
             _mb = mmf.getView();
         }
 
@@ -179,14 +181,14 @@ void DataFile::open(OperationContext* txn,
     }
 
     data_file_check(_mb);
-    header()->init(txn, _fileNo, size, filename);
+    header()->init(opCtx, _fileNo, size, filename);
 }
 
 void DataFile::flush(bool sync) {
     mmf.flush(sync);
 }
 
-DiskLoc DataFile::allocExtentArea(OperationContext* txn, int size) {
+DiskLoc DataFile::allocExtentArea(OperationContext* opCtx, int size) {
     // The header would be NULL if file open failed. However, if file open failed we should
     // never be entering here.
     invariant(header());
@@ -195,15 +197,18 @@ DiskLoc DataFile::allocExtentArea(OperationContext* txn, int size) {
     int offset = header()->unused.getOfs();
 
     DataFileHeader* h = header();
-    *txn->recoveryUnit()->writing(&h->unused) = DiskLoc(_fileNo, offset + size);
-    txn->recoveryUnit()->writingInt(h->unusedLength) = h->unusedLength - size;
+    *opCtx->recoveryUnit()->writing(&h->unused) = DiskLoc(_fileNo, offset + size);
+    opCtx->recoveryUnit()->writingInt(h->unusedLength) = h->unusedLength - size;
 
     return DiskLoc(_fileNo, offset);
 }
 
 // -------------------------------------------------------------------------------
 
-void DataFileHeader::init(OperationContext* txn, int fileno, int filelength, const char* filename) {
+void DataFileHeader::init(OperationContext* opCtx,
+                          int fileno,
+                          int filelength,
+                          const char* filename) {
     if (uninitialized()) {
         DEV log() << "datafileheader::init initializing " << filename << " n:" << fileno << endl;
 
@@ -233,17 +238,17 @@ void DataFileHeader::init(OperationContext* txn, int fileno, int filelength, con
         freeListStart.Null();
         freeListEnd.Null();
     } else {
-        checkUpgrade(txn);
+        checkUpgrade(opCtx);
     }
 }
 
-void DataFileHeader::checkUpgrade(OperationContext* txn) {
+void DataFileHeader::checkUpgrade(OperationContext* opCtx) {
     if (freeListStart == DiskLoc(0, 0)) {
         // we are upgrading from 2.4 to 2.6
         invariant(freeListEnd == DiskLoc(0, 0));  // both start and end should be (0,0) or real
-        WriteUnitOfWork wunit(txn);
-        *txn->recoveryUnit()->writing(&freeListStart) = DiskLoc();
-        *txn->recoveryUnit()->writing(&freeListEnd) = DiskLoc();
+        WriteUnitOfWork wunit(opCtx);
+        *opCtx->recoveryUnit()->writing(&freeListStart) = DiskLoc();
+        *opCtx->recoveryUnit()->writing(&freeListEnd) = DiskLoc();
         wunit.commit();
     }
 }

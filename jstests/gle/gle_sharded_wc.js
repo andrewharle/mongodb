@@ -5,8 +5,21 @@
 // so cannot be run on the ephemeralForTest storage engine, as it accepts all journaled writes.
 // @tags: [SERVER-21420]
 
+// Checking UUID consistency involves talking to the shard primaries, but by the end of this test,
+// one shard does not have a primary.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+TestData.skipCheckDBHashes = true;
+
 (function() {
-    'use strict';
+    "use strict";
+
+    // Skip this test if running with the "wiredTiger" storage engine, since it requires
+    // using 'nojournal' in a replica set, which is not supported when using WT.
+    if (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger") {
+        // WT is currently the default engine so it is used when 'storageEngine' is not set.
+        jsTest.log("Skipping test because it is not applicable for the wiredTiger storage engine");
+        return;
+    }
 
     // Options for a cluster with two replica set shards, the first with two nodes the second with
     // one
@@ -71,7 +84,7 @@
 
     //
     // Successful remove on one shard, write concern timeout on the other
-    var s0Id = st.rs0.getNodeId(st.rs0.liveNodes.slaves[0]);
+    var s0Id = st.rs0.getNodeId(st.rs0._slaves[0]);
     st.rs0.stop(s0Id);
     coll.remove({});
     st.rs1.awaitReplication();  // To ensure the first shard won't timeout
@@ -85,7 +98,7 @@
     //
     // Successful remove on two hosts, write concern timeout on both
     // We don't aggregate two timeouts together
-    var s1Id = st.rs1.getNodeId(st.rs1.liveNodes.slaves[0]);
+    var s1Id = st.rs1.getNodeId(st.rs1._slaves[0]);
     st.rs1.stop(s1Id);
     // new writes to both shards to ensure that remove will do something on both of them
     coll.insert({_id: -1});
@@ -132,5 +145,4 @@
     assert.eq(coll.count({_id: 1}), 1);
 
     st.stop();
-
 })();

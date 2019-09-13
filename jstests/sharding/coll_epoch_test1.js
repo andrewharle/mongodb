@@ -3,7 +3,7 @@
 (function() {
     'use strict';
 
-    var st = new ShardingTest({shards: 3, mongos: 3});
+    var st = new ShardingTest({shards: 3, mongos: 3, causallyConsistent: true});
 
     var config = st.s0.getDB("config");
     var admin = st.s0.getDB("admin");
@@ -38,6 +38,7 @@
     assert.eq(100, staleMongos.getCollection(coll + "").find({test: "a"}).itcount());
 
     assert(coll.drop());
+    st.configRS.awaitLastOpCommitted();
 
     //
     // Test that inserts and queries go to the correct shard even when the collection has been
@@ -49,6 +50,7 @@
     st.ensurePrimaryShard(coll.getDB().getName(), st.shard1.shardName);
     assert.commandWorked(coll.ensureIndex({notId: 1}));
     assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {notId: 1}}));
+    st.configRS.awaitLastOpCommitted();
 
     bulk = insertMongos.getCollection(coll + "").initializeUnorderedBulkOp();
     for (var i = 0; i < 100; i++) {
@@ -59,6 +61,7 @@
     assert.eq(0, staleMongos.getCollection(coll + "").find({test: {$in: ["a"]}}).itcount());
 
     assert(coll.drop());
+    st.configRS.awaitLastOpCommitted();
 
     //
     // Test that inserts and queries go to the correct shard even when the collection has been
@@ -75,40 +78,6 @@
 
     assert.eq(100, staleMongos.getCollection(coll + "").find({test: "c"}).itcount());
     assert.eq(0, staleMongos.getCollection(coll + "").find({test: {$in: ["a", "b"]}}).itcount());
-
-    assert(coll.drop());
-
-    //
-    // Test that inserts and queries go to correct shard even when the collection has been unsharded
-    // and resharded from another mongos on a different primary
-    //
-
-    jsTest.log("Re-creating sharded collection with different primary...");
-
-    var getOtherShard = function(shardId) {
-        for (var i = 0; i < shards.length; ++i) {
-            if (shards[i].shardName != shardId)
-                return shards[i].shardName;
-        }
-    };
-
-    assert.commandWorked(admin.runCommand({
-        movePrimary: coll.getDB() + "",
-        to: getOtherShard(config.databases.findOne({_id: coll.getDB() + ""}).primary)
-    }));
-    assert.commandWorked(admin.runCommand({shardCollection: coll + "", key: {_id: 1}}));
-
-    bulk = insertMongos.getCollection(coll + "").initializeUnorderedBulkOp();
-    for (var i = 0; i < 100; i++) {
-        bulk.insert({test: "d"});
-    }
-    assert.writeOK(bulk.execute());
-
-    assert.eq(100, staleMongos.getCollection(coll + "").find({test: "d"}).itcount());
-    assert.eq(0,
-              staleMongos.getCollection(coll + "").find({test: {$in: ["a", "b", "c"]}}).itcount());
-
-    assert(coll.drop());
 
     st.stop();
 })();

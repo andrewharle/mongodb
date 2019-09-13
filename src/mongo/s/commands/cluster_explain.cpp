@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -29,7 +31,9 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/bson/bsonmisc.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
+#include "mongo/db/command_generic_argument.h"
+#include "mongo/db/commands.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/commands/cluster_explain.h"
 #include "mongo/s/grid.h"
@@ -100,28 +104,49 @@ bool appendElementsIfRoom(BSONObjBuilder* bob, const BSONObj& toAppend) {
 }  // namespace
 
 // static
-void ClusterExplain::wrapAsExplain(const BSONObj& cmdObj,
-                                   ExplainCommon::Verbosity verbosity,
-                                   const rpc::ServerSelectionMetadata& serverSelectionMetadata,
-                                   BSONObjBuilder* out,
-                                   int* optionsOut) {
-    BSONObjBuilder explainBuilder;
-    explainBuilder.append("explain", cmdObj);
-    explainBuilder.append("verbosity", ExplainCommon::verbosityString(verbosity));
+std::vector<Strategy::CommandResult> ClusterExplain::downconvert(
+    OperationContext* opCtx, const std::vector<AsyncRequestsSender::Response>& responses) {
+    std::vector<Strategy::CommandResult> results;
+    for (auto& response : responses) {
+        Status status = Status::OK();
+        if (response.swResponse.isOK()) {
+            auto& result = response.swResponse.getValue().data;
+            status = getStatusFromCommandResult(result);
+            if (status.isOK()) {
+                invariant(response.shardHostAndPort);
+                results.emplace_back(
+                    response.shardId, ConnectionString(*response.shardHostAndPort), result);
+                continue;
+            }
+        }
+        // Convert the error status back into the format of a command result.
+        BSONObjBuilder statusObjBob;
+        CommandHelpers::appendCommandStatusNoThrow(statusObjBob, status);
 
-    // Propagate readConcern
-    if (auto readConcern = cmdObj["readConcern"]) {
-        explainBuilder.append(readConcern);
+        // Get the Shard object in order to get the ConnectionString.
+        auto shard =
+            uassertStatusOK(Grid::get(opCtx)->shardRegistry()->getShard(opCtx, response.shardId));
+        results.emplace_back(response.shardId, shard->getConnString(), statusObjBob.obj());
+    }
+    return results;
+}
+
+// static
+BSONObj ClusterExplain::wrapAsExplain(const BSONObj& cmdObj, ExplainOptions::Verbosity verbosity) {
+    auto filtered = CommandHelpers::filterCommandRequestForPassthrough(cmdObj);
+    BSONObjBuilder out;
+    out.append("explain", filtered);
+    out.append("verbosity", ExplainOptions::verbosityString(verbosity));
+
+    // Propagate all generic arguments out of the inner command since the shards will only process
+    // them at the top level.
+    for (auto elem : filtered) {
+        if (isGenericArgument(elem.fieldNameStringData())) {
+            out.append(elem);
+        }
     }
 
-    const BSONObj explainCmdObj = explainBuilder.done();
-
-    // Attach metadata to the explain command in legacy format.
-    BSONObjBuilder metadataBuilder;
-    serverSelectionMetadata.writeToMetadata(&metadataBuilder);
-    const BSONObj metadataObj = metadataBuilder.done();
-    uassertStatusOK(
-        serverSelectionMetadata.downconvert(explainCmdObj, metadataObj, out, optionsOut));
+    return out.obj();
 }
 
 // static
@@ -139,18 +164,11 @@ Status ClusterExplain::validateShardResults(const vector<Strategy::CommandResult
     // Check that the result from each shard has a true value for "ok" and has
     // the expected "queryPlanner" field.
     for (size_t i = 0; i < shardResults.size(); i++) {
-        if (!shardResults[i].result["ok"].trueValue()) {
-            // Try to pass up the error code from the shard.
-            ErrorCodes::Error error = ErrorCodes::OperationFailed;
-            if (shardResults[i].result["code"].isNumber()) {
-                error = ErrorCodes::fromInt(shardResults[i].result["code"].numberInt());
-            }
-
-            return Status(error,
-                          str::stream() << "Explain command on shard "
-                                        << shardResults[i].target.toString()
-                                        << " failed, caused by: "
-                                        << shardResults[i].result);
+        auto status = getStatusFromCommandResult(shardResults[i].result);
+        if (!status.isOK()) {
+            return status.withContext(str::stream() << "Explain command on shard "
+                                                    << shardResults[i].target.toString()
+                                                    << " failed");
         }
 
         if (Object != shardResults[i].result["queryPlanner"].type()) {
@@ -189,9 +207,8 @@ Status ClusterExplain::validateShardResults(const vector<Strategy::CommandResult
 }
 
 // static
-const char* ClusterExplain::getStageNameForReadOp(
-    const vector<Strategy::CommandResult>& shardResults, const BSONObj& explainObj) {
-    if (shardResults.size() == 1) {
+const char* ClusterExplain::getStageNameForReadOp(size_t numShards, const BSONObj& explainObj) {
+    if (numShards == 1) {
         return kSingleShard;
     } else if (explainObj.hasField("sort")) {
         return kMergeSortFromShards;
@@ -201,7 +218,7 @@ const char* ClusterExplain::getStageNameForReadOp(
 }
 
 // static
-void ClusterExplain::buildPlannerInfo(OperationContext* txn,
+void ClusterExplain::buildPlannerInfo(OperationContext* opCtx,
                                       const vector<Strategy::CommandResult>& shardResults,
                                       const char* mongosStageName,
                                       BSONObjBuilder* out) {
@@ -220,8 +237,8 @@ void ClusterExplain::buildPlannerInfo(OperationContext* txn,
 
         singleShardBob.append("shardName", shardResults[i].shardTargetId.toString());
         {
-            const auto shard =
-                uassertStatusOK(grid.shardRegistry()->getShard(txn, shardResults[i].shardTargetId));
+            const auto shard = uassertStatusOK(
+                Grid::get(opCtx)->shardRegistry()->getShard(opCtx, shardResults[i].shardTargetId));
             singleShardBob.append("connectionString", shard->getConnString().toString());
         }
         appendIfRoom(&singleShardBob, serverInfo, "serverInfo");
@@ -343,7 +360,7 @@ void ClusterExplain::buildExecStats(const vector<Strategy::CommandResult>& shard
 }
 
 // static
-Status ClusterExplain::buildExplainResult(OperationContext* txn,
+Status ClusterExplain::buildExplainResult(OperationContext* opCtx,
                                           const vector<Strategy::CommandResult>& shardResults,
                                           const char* mongosStageName,
                                           long long millisElapsed,
@@ -354,10 +371,11 @@ Status ClusterExplain::buildExplainResult(OperationContext* txn,
         return validateStatus;
     }
 
-    buildPlannerInfo(txn, shardResults, mongosStageName, out);
+    buildPlannerInfo(opCtx, shardResults, mongosStageName, out);
     buildExecStats(shardResults, mongosStageName, millisElapsed, out);
 
     return Status::OK();
 }
+
 
 }  // namespace mongo

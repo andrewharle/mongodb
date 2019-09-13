@@ -1,4 +1,5 @@
 // SERVER-16262: Write-conflict during map-reduce operations
+
 (function() {
     "use strict";
 

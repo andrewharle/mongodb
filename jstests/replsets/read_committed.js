@@ -56,6 +56,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
 
     if (!startSetIfSupportsReadMajority(replTest)) {
         jsTest.log("skipping test since storage engine doesn't support committed reads");
+        replTest.stopSet();
         return;
     }
 
@@ -73,7 +74,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
 
     // Get connections and collection.
     var primary = replTest.getPrimary();
-    var secondary = replTest.liveNodes.slaves[0];
+    var secondary = replTest._slaves[0];
     var coll = primary.getDB(name)[name];
     var secondaryColl = secondary.getDB(name)[name];
 
@@ -84,7 +85,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
     function doRead(coll, readConcern) {
         readConcern.maxTimeMS = 3000;
         var res = assert.commandWorked(coll.runCommand('find', readConcern));
-        return new DBCommandCursor(coll.getMongo(), res).toArray();
+        return new DBCommandCursor(coll.getDB(), res).toArray();
     }
 
     function doDirtyRead(coll) {
@@ -110,7 +111,7 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
             limit: 1,
         });
         assert.commandWorked(res);
-        return new DBCommandCursor(coll.getMongo(), res).toArray()[0];
+        return new DBCommandCursor(coll.getDB(), res).toArray()[0];
     }
 
     for (var testName in testCases) {
@@ -172,4 +173,5 @@ load("jstests/replsets/rslib.js");  // For startSetIfSupportsReadMajority.
             assert.eq(doCommittedRead(secondaryColl), test.expectedAfter);
         }
     }
+    replTest.stopSet();
 }());

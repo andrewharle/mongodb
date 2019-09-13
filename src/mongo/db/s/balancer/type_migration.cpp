@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -40,7 +42,7 @@ const StringData kChunkVersion = "chunkVersion"_sd;
 
 }  // namespace
 
-const std::string MigrationType::ConfigNS = "config.migrations";
+const NamespaceString MigrationType::ConfigNS("config.migrations");
 
 const BSONField<std::string> MigrationType::name("_id");
 const BSONField<std::string> MigrationType::ns("ns");
@@ -53,7 +55,7 @@ const BSONField<bool> MigrationType::waitForDelete("waitForDelete");
 MigrationType::MigrationType() = default;
 
 MigrationType::MigrationType(MigrateInfo info, bool waitForDelete)
-    : _nss(NamespaceString(info.ns)),
+    : _nss(info.nss),
       _min(info.minKey),
       _max(info.maxKey),
       _fromShard(info.from),
@@ -99,8 +101,7 @@ StatusWith<MigrationType> MigrationType::fromBSON(const BSONObj& source) {
     }
 
     {
-        auto chunkVersionStatus =
-            ChunkVersion::parseFromBSONWithFieldForCommands(source, kChunkVersion);
+        auto chunkVersionStatus = ChunkVersion::parseWithField(source, kChunkVersion);
         if (!chunkVersionStatus.isOK())
             return chunkVersionStatus.getStatus();
         migrationType._chunkVersion = chunkVersionStatus.getValue();
@@ -130,7 +131,7 @@ BSONObj MigrationType::toBSON() const {
     builder.append(fromShard.name(), _fromShard.toString());
     builder.append(toShard.name(), _toShard.toString());
 
-    _chunkVersion.appendWithFieldForCommands(&builder, kChunkVersion);
+    _chunkVersion.appendWithField(&builder, kChunkVersion);
 
     builder.append(waitForDelete.name(), _waitForDelete);
     return builder.obj();
@@ -138,7 +139,7 @@ BSONObj MigrationType::toBSON() const {
 
 MigrateInfo MigrationType::toMigrateInfo() const {
     ChunkType chunk;
-    chunk.setNS(_nss.ns());
+    chunk.setNS(_nss);
     chunk.setShard(_fromShard);
     chunk.setMin(_min);
     chunk.setMax(_max);
@@ -148,7 +149,7 @@ MigrateInfo MigrationType::toMigrateInfo() const {
 }
 
 std::string MigrationType::getName() const {
-    return ChunkType::genID(_nss.ns(), _min);
+    return ChunkType::genID(_nss, _min);
 }
 
 }  // namespace mongo

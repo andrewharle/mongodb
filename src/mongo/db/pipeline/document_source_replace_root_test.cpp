@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -68,7 +70,7 @@ protected:
 TEST_F(ReplaceRootBasics, FieldPathAsNewRootPromotesSubdocument) {
     auto replaceRoot = createReplaceRoot(BSON("newRoot"
                                               << "$a"));
-    Document subdoc = Document{{"b", 1}, {"c", "hello"}, {"d", Document{{"e", 2}}}};
+    Document subdoc = Document{{"b", 1}, {"c", "hello"_sd}, {"d", Document{{"e", 2}}}};
     auto mock = DocumentSourceMock::create(Document{{"a", subdoc}});
     replaceRoot->setSource(mock.get());
 
@@ -211,20 +213,20 @@ TEST_F(ReplaceRootBasics, ErrorsWhenNewRootDoesNotEvaluateToAnObject) {
                                               << "$a"));
 
     // A string is not an object.
-    auto mock = DocumentSourceMock::create(Document{{"a", "hello"}});
+    auto mock = DocumentSourceMock::create(Document{{"a", "hello"_sd}});
     replaceRoot->setSource(mock.get());
-    ASSERT_THROWS_CODE(replaceRoot->getNext(), UserException, 40228);
+    ASSERT_THROWS_CODE(replaceRoot->getNext(), AssertionException, 40228);
 
     // An integer is not an object.
     mock = DocumentSourceMock::create(Document{{"a", 5}});
     replaceRoot->setSource(mock.get());
-    ASSERT_THROWS_CODE(replaceRoot->getNext(), UserException, 40228);
+    ASSERT_THROWS_CODE(replaceRoot->getNext(), AssertionException, 40228);
 
     // Literals are not objects.
     replaceRoot = createReplaceRoot(BSON("newRoot" << BSON("$literal" << 1)));
     mock = DocumentSourceMock::create(Document());
     replaceRoot->setSource(mock.get());
-    ASSERT_THROWS_CODE(replaceRoot->getNext(), UserException, 40228);
+    ASSERT_THROWS_CODE(replaceRoot->getNext(), AssertionException, 40228);
     assertExhausted(replaceRoot);
 
     // Most operator expressions do not resolve to objects.
@@ -232,7 +234,7 @@ TEST_F(ReplaceRootBasics, ErrorsWhenNewRootDoesNotEvaluateToAnObject) {
                                                            << "$a")));
     mock = DocumentSourceMock::create(Document{{"a", true}});
     replaceRoot->setSource(mock.get());
-    ASSERT_THROWS_CODE(replaceRoot->getNext(), UserException, 40228);
+    ASSERT_THROWS_CODE(replaceRoot->getNext(), AssertionException, 40228);
     assertExhausted(replaceRoot);
 }
 
@@ -244,12 +246,12 @@ TEST_F(ReplaceRootBasics, ErrorsIfNewRootFieldPathDoesNotExist) {
 
     auto mock = DocumentSourceMock::create(Document());
     replaceRoot->setSource(mock.get());
-    ASSERT_THROWS_CODE(replaceRoot->getNext(), UserException, 40228);
+    ASSERT_THROWS_CODE(replaceRoot->getNext(), AssertionException, 40228);
     assertExhausted(replaceRoot);
 
     mock = DocumentSourceMock::create(Document{{"e", Document{{"b", Document{{"c", 3}}}}}});
     replaceRoot->setSource(mock.get());
-    ASSERT_THROWS_CODE(replaceRoot->getNext(), UserException, 40228);
+    ASSERT_THROWS_CODE(replaceRoot->getNext(), AssertionException, 40228);
     assertExhausted(replaceRoot);
 }
 
@@ -279,6 +281,16 @@ TEST_F(ReplaceRootBasics, ReplaceRootModifiesAllFields) {
     ASSERT_EQUALS(0U, modifiedPaths.paths.size());
 }
 
+TEST_F(ReplaceRootBasics, ReplaceRootWithRemoveSystemVariableThrows) {
+    auto replaceRoot = createReplaceRoot(BSON("newRoot"
+                                              << "$$REMOVE"));
+    Document inputDoc = Document{{"b", 2}};
+    auto mock = DocumentSourceMock::create({inputDoc});
+    replaceRoot->setSource(mock.get());
+
+    ASSERT_THROWS_CODE(replaceRoot->getNext(), AssertionException, 40228);
+}
+
 /**
  * Fixture to test error cases of initializing the $replaceRoot stage.
  */
@@ -300,10 +312,10 @@ public:
 
 // Verify that the creation of a $replaceRoot stage requires an object specification
 TEST_F(ReplaceRootSpec, CreationRequiresObjectSpecification) {
-    ASSERT_THROWS_CODE(createReplaceRoot(BSON("$replaceRoot" << 1)), UserException, 40229);
+    ASSERT_THROWS_CODE(createReplaceRoot(BSON("$replaceRoot" << 1)), AssertionException, 40229);
     ASSERT_THROWS_CODE(createReplaceRoot(BSON("$replaceRoot"
                                               << "string")),
-                       UserException,
+                       AssertionException,
                        40229);
 }
 
@@ -313,30 +325,31 @@ TEST_F(ReplaceRootSpec, OnlyValidOptionInObjectSpecIsNewRoot) {
                                                          << "$a"
                                                          << "root"
                                                          << 2))),
-                       UserException,
+                       AssertionException,
                        40230);
     ASSERT_THROWS_CODE(createReplaceRoot(createSpec(BSON("newRoot"
                                                          << "$a"
                                                          << "path"
                                                          << 2))),
-                       UserException,
+                       AssertionException,
                        40230);
     ASSERT_THROWS_CODE(createReplaceRoot(createSpec(BSON("path"
                                                          << "$a"))),
-                       UserException,
+                       AssertionException,
                        40230);
 }
 
 // Verify that $replaceRoot requires a valid expression as input to the newRoot option.
 TEST_F(ReplaceRootSpec, RequiresExpressionForNewRootOption) {
-    ASSERT_THROWS_CODE(createReplaceRoot(createSpec(BSONObj())), UserException, 40231);
+    ASSERT_THROWS_CODE(createReplaceRoot(createSpec(BSONObj())), AssertionException, 40231);
     ASSERT_THROWS(createReplaceRoot(createSpec(BSON("newRoot"
                                                     << "$$$a"))),
-                  UserException);
+                  AssertionException);
     ASSERT_THROWS(createReplaceRoot(createSpec(BSON("newRoot"
                                                     << "$$a"))),
-                  UserException);
-    ASSERT_THROWS(createReplaceRoot(createFullSpec(BSON("$map" << BSON("a" << 1)))), UserException);
+                  AssertionException);
+    ASSERT_THROWS(createReplaceRoot(createFullSpec(BSON("$map" << BSON("a" << 1)))),
+                  AssertionException);
 }
 
 // Verify that newRoot accepts all types of expressions.

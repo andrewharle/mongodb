@@ -1,6 +1,6 @@
+// @tags: [requires_non_retryable_commands, requires_fastcount]
+
 // SERVER-27996/SERVER-28022 Missing invalidation for system.namespaces writes
-//
-// @tags: [requires_collmod_command]
 (function() {
     'use strict';
     let dbInvalidName = 'system_namespaces_invalidations';
@@ -27,7 +27,7 @@
         printjson(res);
 
         // Ensure the cursor has data, invalidate the namespace, and exhaust the cursor.
-        let cursor = new DBCommandCursor(dbInvalid.getMongo(), res);
+        let cursor = new DBCommandCursor(dbInvalid, res);
         let errMsg =
             'expected more data from command ' + tojson(cmd) + ', with result ' + tojson(res);
         assert(cursor.hasNext(), errMsg);

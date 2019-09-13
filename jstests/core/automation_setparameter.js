@@ -1,3 +1,8 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   does_not_support_stepdowns,
+// ]
+
 // Tests that using setParameter to update the parameter 'automationServiceDescriptor' causes a
 // field with that name to be echoed back in isMaster. See SERVER-18399 for more details.
 

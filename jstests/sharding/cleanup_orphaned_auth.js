@@ -5,11 +5,15 @@
 (function() {
     'use strict';
 
+    // TODO SERVER-35447: Multiple users cannot be authenticated on one connection within a session.
+    TestData.disableImplicitSessions = true;
+
     function assertUnauthorized(res, msg) {
         if (assert._debug && msg)
             print("in assert for: " + msg);
 
-        if (res.ok == 0 && res.errmsg.startsWith('not authorized'))
+        if (res.ok == 0 && (res.errmsg.startsWith('not authorized') ||
+                            res.errmsg.match(/requires authentication/)))
             return;
 
         var finalMsg = "command worked when it should have been unauthorized: " + tojson(res);
@@ -19,8 +23,11 @@
         doassert(finalMsg);
     }
 
-    var st =
-        new ShardingTest({auth: true, other: {keyFile: 'jstests/libs/key1', useHostname: false}});
+    // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+    var st = new ShardingTest({
+        auth: true,
+        other: {keyFile: 'jstests/libs/key1', useHostname: false, shardAsReplicaSet: false}
+    });
 
     var shardAdmin = st.shard0.getDB('admin');
     shardAdmin.createUser(

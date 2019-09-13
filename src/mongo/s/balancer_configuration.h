@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,7 +36,7 @@
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/platform/atomic_word.h"
-#include "mongo/s/migration_secondary_throttle_options.h"
+#include "mongo/s/request_types/migration_secondary_throttle_options.h"
 #include "mongo/stdx/mutex.h"
 
 namespace mongo {
@@ -214,7 +216,7 @@ public:
     /**
      * Synchronous method, which writes the balancer mode to the configuration data.
      */
-    Status setBalancerMode(OperationContext* txn, BalancerSettingsType::BalancerMode mode);
+    Status setBalancerMode(OperationContext* opCtx, BalancerSettingsType::BalancerMode mode);
 
     /**
      * Returns whether balancing is allowed based on both the enabled state of the balancer and the
@@ -254,27 +256,27 @@ public:
      * This method is thread-safe but it doesn't make sense to be called from more than one thread
      * at a time.
      */
-    Status refreshAndCheck(OperationContext* txn);
+    Status refreshAndCheck(OperationContext* opCtx);
 
 private:
     /**
      * Reloads the balancer configuration from the settings document. Fails if the settings document
      * cannot be read, in which case the values will remain unchanged.
      */
-    Status _refreshBalancerSettings(OperationContext* txn);
+    Status _refreshBalancerSettings(OperationContext* opCtx);
 
     /**
      * Reloads the chunk sizes configuration from the settings document. Fails if the settings
      * document cannot be read or if any setting contains invalid value, in which case the offending
      * value will remain unchanged.
      */
-    Status _refreshChunkSizeSettings(OperationContext* txn);
+    Status _refreshChunkSizeSettings(OperationContext* opCtx);
 
     /**
      * Reloads the autosplit configuration from the settings document. Fails if the settings
      * document cannot be read.
      */
-    Status _refreshAutoSplitSettings(OperationContext* txn);
+    Status _refreshAutoSplitSettings(OperationContext* opCtx);
 
     // The latest read balancer settings and a mutex to protect its swaps
     mutable stdx::mutex _balancerSettingsMutex;

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -53,7 +53,7 @@ static int __json_pack_size(WT_SESSION_IMPL *, const char *, WT_CONFIG_ITEM *,
 		(pv).type = 'K';					\
 		break;							\
 	/* User format strings have already been validated. */		\
-	WT_ILLEGAL_VALUE(session);					\
+	WT_ILLEGAL_VALUE(session, (pv).type);				\
 	}								\
 } while (0)
 
@@ -66,8 +66,8 @@ __json_unpack_put(WT_SESSION_IMPL *session, void *voidpv,
     u_char *buf, size_t bufsz, WT_CONFIG_ITEM *name, size_t *retsizep)
 {
 	WT_PACK_VALUE *pv;
-	const u_char *p, *end;
 	size_t s, n;
+	const u_char *p, *end;
 
 	pv = (WT_PACK_VALUE *)voidpv;
 
@@ -185,8 +185,8 @@ __json_struct_size(WT_SESSION_IMPL *session, const void *buffer,
 	WT_PACK pack;
 	WT_PACK_NAME packname;
 	size_t result;
-	bool needcr;
 	const uint8_t *p, *end;
+	bool needcr;
 
 	p = buffer;
 	end = p + size;
@@ -204,14 +204,13 @@ __json_struct_size(WT_SESSION_IMPL *session, const void *buffer,
 		WT_RET(
 		    __json_unpack_put(session, &pv, NULL, 0, &name, &result));
 	}
-	if (ret == WT_NOTFOUND)
-		ret = 0;
+	WT_RET_NOTFOUND_OK(ret);
 
 	/* Be paranoid - __pack_write should never overflow. */
 	WT_ASSERT(session, p <= end);
 
 	*presult = result;
-	return (ret);
+	return (0);
 }
 
 /*
@@ -229,8 +228,8 @@ __json_struct_unpackv(WT_SESSION_IMPL *session,
 	WT_PACK pack;
 	WT_PACK_NAME packname;
 	size_t jsize;
-	bool needcr;
 	const uint8_t *p, *end;
+	bool needcr;
 
 	p = buffer;
 	end = p + size;
@@ -258,15 +257,14 @@ __json_struct_unpackv(WT_SESSION_IMPL *session,
 		jbuf += jsize;
 		jbufsize -= jsize;
 	}
-	if (ret == WT_NOTFOUND)
-		ret = 0;
+	WT_RET_NOTFOUND_OK(ret);
 
 	/* Be paranoid - __unpack_read should never overflow. */
 	WT_ASSERT(session, p <= end);
 
 	WT_ASSERT(session, jbufsize == 1);
 
-	return (ret);
+	return (0);
 }
 
 /*
@@ -380,8 +378,8 @@ __wt_json_column_init(WT_CURSOR *cursor, const char *uri, const char *keyformat,
     const WT_CONFIG_ITEM *idxconf, const WT_CONFIG_ITEM *colconf)
 {
 	WT_CURSOR_JSON *json;
-	const char *beginkey, *end, *lparen, *p;
 	uint32_t keycnt, nkeys;
+	const char *beginkey, *end, *lparen, *p;
 
 	json = (WT_CURSOR_JSON *)cursor->json_private;
 	beginkey = colconf->str;
@@ -471,9 +469,9 @@ __wt_json_token(WT_SESSION *wt_session, const char *src, int *toktype,
 {
 	WT_SESSION_IMPL *session;
 	int result;
-	bool backslash, isalph, isfloat;
 	const char *bad;
 	char ch;
+	bool backslash, isalph, isfloat;
 
 	result = -1;
 	session = (WT_SESSION_IMPL *)wt_session;
@@ -648,10 +646,10 @@ json_string_arg(WT_SESSION_IMPL *session, const char **jstr, WT_ITEM *item)
 static int
 json_int_arg(WT_SESSION_IMPL *session, const char **jstr, int64_t *ip)
 {
-	char *end;
-	const char *tokstart;
 	size_t toksize;
 	int tok;
+	char *end;
+	const char *tokstart;
 
 	WT_RET(__wt_json_token((WT_SESSION *)session, *jstr, &tok, &tokstart,
 		&toksize));
@@ -678,8 +676,8 @@ json_uint_arg(WT_SESSION_IMPL *session, const char **jstr, uint64_t *up)
 {
 	size_t toksize;
 	int tok;
-	const char *tokstart;
 	char *end;
+	const char *tokstart;
 
 	WT_RET(__wt_json_token((WT_SESSION *)session, *jstr, &tok, &tokstart,
 		&toksize));
@@ -726,9 +724,9 @@ __json_pack_struct(WT_SESSION_IMPL *session, void *buffer, size_t size,
 	WT_DECL_RET;
 	WT_PACK pack;
 	size_t toksize;
-	bool multi;
 	uint8_t *p, *end;
 	const char *tokstart;
+	bool multi;
 
 	p = buffer;
 	end = p + size;
@@ -754,12 +752,10 @@ __json_pack_struct(WT_SESSION_IMPL *session, void *buffer, size_t size,
 		WT_RET(__pack_write(session, &pv, &p, (size_t)(end - p)));
 		multi = true;
 	}
+	WT_RET_NOTFOUND_OK(ret);
 
 	/* Be paranoid - __pack_write should never overflow. */
 	WT_ASSERT(session, p <= end);
-
-	if (ret != WT_NOTFOUND)
-		return (ret);
 
 	return (0);
 }
@@ -778,16 +774,17 @@ __json_pack_size(
 {
 	WT_CONFIG_ITEM name;
 	WT_DECL_PACK_VALUE(pv);
+	WT_DECL_RET;
 	WT_PACK pack;
 	WT_PACK_NAME packname;
-	size_t toksize, total;
-	bool multi;
+	size_t toksize, v;
 	const char *tokstart;
+	bool multi;
 
 	__pack_name_init(session, names, iskey, &packname);
 	multi = false;
 	WT_RET(__pack_init(session, &pack, fmt));
-	for (total = 0; __pack_next(&pack, &pv) == 0;) {
+	for (*sizep = 0; (ret = __pack_next(&pack, &pv)) == 0;) {
 		if (multi)
 			JSON_EXPECT_TOKEN(session, jstr, ',');
 		JSON_EXPECT_TOKEN_GET(session, jstr, 's', tokstart, toksize);
@@ -799,13 +796,15 @@ __json_pack_size(
 			    iskey ? "key" : "value", (int)name.len, name.str);
 		JSON_EXPECT_TOKEN(session, jstr, ':');
 		WT_PACK_JSON_GET(session, pv, jstr);
-		total += __pack_size(session, &pv);
+		WT_RET(__pack_size(session, &pv, &v));
+		*sizep += v;
 		multi = true;
 	}
+	WT_RET_NOTFOUND_OK(ret);
+
 	/* check end of string */
 	JSON_EXPECT_TOKEN(session, jstr, 0);
 
-	*sizep = total;
 	return (0);
 }
 
@@ -837,9 +836,9 @@ ssize_t
 __wt_json_strlen(const char *src, size_t srclen)
     WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
-	const char *srcend;
 	size_t dstlen;
 	u_char hi, lo;
+	const char *srcend;
 
 	dstlen = 0;
 	srcend = src + srclen;
@@ -881,9 +880,9 @@ __wt_json_strncpy(WT_SESSION *wt_session,
     WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
 	WT_SESSION_IMPL *session;
+	u_char hi, lo;
 	char ch, *dst;
 	const char *dstend, *srcend;
-	u_char hi, lo;
 
 	session = (WT_SESSION_IMPL *)wt_session;
 
@@ -923,7 +922,7 @@ __wt_json_strncpy(WT_SESSION *wt_session,
 			case '\\':
 				*dst++ = ch;
 				break;
-			WT_ILLEGAL_VALUE(session);
+			WT_ILLEGAL_VALUE(session, ch);
 			}
 		else
 			*dst++ = ch;

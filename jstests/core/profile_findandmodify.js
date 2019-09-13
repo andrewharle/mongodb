@@ -1,4 +1,5 @@
 // Confirms that profiled findAndModify execution contains all expected metrics with proper values.
+// @tags: [requires_profiling]
 
 (function() {
     "use strict";
@@ -16,22 +17,25 @@
     //
     coll.drop();
     for (var i = 0; i < 3; i++) {
-        assert.writeOK(coll.insert({_id: i, a: i, b: i}));
+        assert.writeOK(coll.insert({_id: i, a: i, b: [0]}));
     }
     assert.commandWorked(coll.createIndex({b: 1}));
 
-    assert.eq(
-        {_id: 2, a: 2, b: 2},
-        coll.findAndModify({query: {a: 2}, update: {$inc: {b: 1}}, collation: {locale: "fr"}}));
+    assert.eq({_id: 2, a: 2, b: [0]}, coll.findAndModify({
+        query: {a: 2},
+        update: {$inc: {"b.$[i]": 1}},
+        collation: {locale: "fr"},
+        arrayFilters: [{i: 0}]
+    }));
 
     var profileObj = getLatestProfilerEntry(testDB);
 
     assert.eq(profileObj.op, "command", tojson(profileObj));
     assert.eq(profileObj.ns, coll.getFullName(), tojson(profileObj));
     assert.eq(profileObj.command.query, {a: 2}, tojson(profileObj));
-    assert.eq(profileObj.command.update, {$inc: {b: 1}}, tojson(profileObj));
+    assert.eq(profileObj.command.update, {$inc: {"b.$[i]": 1}}, tojson(profileObj));
     assert.eq(profileObj.command.collation, {locale: "fr"}, tojson(profileObj));
-    assert.eq(profileObj.updateobj, {$inc: {b: 1}}, tojson(profileObj));
+    assert.eq(profileObj.command.arrayFilters, [{i: 0}], tojson(profileObj));
     assert.eq(profileObj.keysExamined, 0, tojson(profileObj));
     assert.eq(profileObj.docsExamined, 3, tojson(profileObj));
     assert.eq(profileObj.nMatched, 1, tojson(profileObj));
@@ -58,7 +62,6 @@
     assert.eq(profileObj.ns, coll.getFullName(), tojson(profileObj));
     assert.eq(profileObj.command.query, {a: 2}, tojson(profileObj));
     assert.eq(profileObj.command.remove, true, tojson(profileObj));
-    assert(!profileObj.hasOwnProperty("updateobj"), tojson(profileObj));
     assert.eq(profileObj.keysExamined, 0, tojson(profileObj));
     assert.eq(profileObj.docsExamined, 3, tojson(profileObj));
     assert.eq(profileObj.ndeleted, 1, tojson(profileObj));
@@ -85,7 +88,6 @@
     assert.eq(profileObj.command.update, {$inc: {a: 1}}, tojson(profileObj));
     assert.eq(profileObj.command.upsert, true, tojson(profileObj));
     assert.eq(profileObj.command.new, true, tojson(profileObj));
-    assert.eq(profileObj.updateobj, {$inc: {a: 1}}, tojson(profileObj));
     assert.eq(profileObj.keysExamined, 0, tojson(profileObj));
     assert.eq(profileObj.docsExamined, 0, tojson(profileObj));
     assert.eq(profileObj.nMatched, 0, tojson(profileObj));
@@ -127,7 +129,6 @@
     assert.eq(profileObj.command.query, {a: 2}, tojson(profileObj));
     assert.eq(profileObj.command.update, {$inc: {b: 1}}, tojson(profileObj));
     assert.eq(profileObj.command.fields, {_id: 0, a: 1}, tojson(profileObj));
-    assert.eq(profileObj.updateobj, {$inc: {b: 1}}, tojson(profileObj));
     assert.eq(profileObj.keysExamined, 0, tojson(profileObj));
     assert.eq(profileObj.docsExamined, 3, tojson(profileObj));
     assert.eq(profileObj.nMatched, 1, tojson(profileObj));
@@ -149,7 +150,6 @@
     assert.eq(profileObj.command.query, {a: 2}, tojson(profileObj));
     assert.eq(profileObj.command.remove, true, tojson(profileObj));
     assert.eq(profileObj.command.fields, {_id: 0, a: 1}, tojson(profileObj));
-    assert(!profileObj.hasOwnProperty("updateobj"), tojson(profileObj));
     assert.eq(profileObj.ndeleted, 1, tojson(profileObj));
     assert.eq(profileObj.appName, "MongoDB Shell", tojson(profileObj));
 

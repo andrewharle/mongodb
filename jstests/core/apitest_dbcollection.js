@@ -1,5 +1,11 @@
 /**
- *   Tests for the db collection
+ * Tests for the db collection
+ *
+ * @tags: [
+ *  requires_fastcount,
+ *  requires_collstats,
+ *  requires_capped,
+ * ]
  */
 
 /*
@@ -77,7 +83,7 @@ for (i = 0; i < 100; i++) {
               validateResult.ns,
               'incorrect namespace in db.collection.validate() result: ' + tojson(validateResult));
     assert(validateResult.valid, 'collection validation failed');
-    assert.eq(100, validateResult.nrecords, 11);
+    assert.eq(100, validateResult.nrecords, "11");
 }());
 
 /*

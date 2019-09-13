@@ -1,32 +1,34 @@
 // fts_index_format.cpp
 
+
 /**
-*    Copyright (C) 2012 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -101,6 +103,30 @@ int guessTermSize(const std::string& term, TextIndexVersion textIndexVersion) {
         return termKeyLengthV3;
     }
 }
+
+/**
+ * Given an object being indexed, 'obj', and a path through 'obj', returns the corresponding BSON
+ * element, according to the indexing rules for the non-text fields of an FTS index key pattern.
+ *
+ * Specifically, throws a user assertion if an array is encountered while traversing the 'path'. It
+ * is not legal for there to be an array along the path of the non-text prefix or suffix fields of a
+ * text index, unless a particular array index is specified, as in "a.3".
+ */
+BSONElement extractNonFTSKeyElement(const BSONObj& obj, StringData path) {
+    BSONElementSet indexedElements;
+    const bool expandArrayOnTrailingField = true;
+    std::set<size_t> arrayComponents;
+    dps::extractAllElementsAlongPath(
+        obj, path, indexedElements, expandArrayOnTrailingField, &arrayComponents);
+    uassert(ErrorCodes::CannotBuildIndexKeys,
+            str::stream() << "Field '" << path << "' of text index contains an array in document: "
+                          << obj,
+            arrayComponents.empty());
+
+    // Since there aren't any arrays, there cannot be more than one extracted element on 'path'.
+    invariant(indexedElements.size() <= 1U);
+    return indexedElements.empty() ? nullElt : *indexedElements.begin();
+}
 }  // namespace
 
 MONGO_INITIALIZER(FTSIndexFormat)(InitializerContext* context) {
@@ -116,23 +142,19 @@ void FTSIndexFormat::getKeys(const FTSSpec& spec, const BSONObj& obj, BSONObjSet
     vector<BSONElement> extrasBefore;
     vector<BSONElement> extrasAfter;
 
-    // compute the non FTS key elements
+    // Compute the non FTS key elements for the prefix.
     for (unsigned i = 0; i < spec.numExtraBefore(); i++) {
-        BSONElement e = dps::extractElementAtPath(obj, spec.extraBefore(i));
-        if (e.eoo())
-            e = nullElt;
-        uassert(16675, "cannot have a multi-key as a prefix to a text index", e.type() != Array);
-        extrasBefore.push_back(e);
-        extraSize += e.size();
-    }
-    for (unsigned i = 0; i < spec.numExtraAfter(); i++) {
-        BSONElement e = dps::extractElementAtPath(obj, spec.extraAfter(i));
-        if (e.eoo())
-            e = nullElt;
-        extrasAfter.push_back(e);
-        extraSize += e.size();
+        auto indexedElement = extractNonFTSKeyElement(obj, spec.extraBefore(i));
+        extrasBefore.push_back(indexedElement);
+        extraSize += indexedElement.size();
     }
 
+    // Compute the non FTS key elements for the suffix.
+    for (unsigned i = 0; i < spec.numExtraAfter(); i++) {
+        auto indexedElement = extractNonFTSKeyElement(obj, spec.extraAfter(i));
+        extrasAfter.push_back(indexedElement);
+        extraSize += indexedElement.size();
+    }
 
     TermFrequencyMap term_freqs;
     spec.scoreDocument(obj, &term_freqs);

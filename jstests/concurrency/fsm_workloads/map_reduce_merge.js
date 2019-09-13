@@ -12,6 +12,8 @@
  * of the output collection.
  *
  * Writes the results of each thread to the same collection.
+ *
+ * @tags: [SERVER-35473]
  */
 load('jstests/concurrency/fsm_libs/extend_workload.js');         // for extendWorkload
 load('jstests/concurrency/fsm_workloads/map_reduce_inline.js');  // for $config
@@ -46,13 +48,6 @@ var $config = extendWorkload($config, function($config, $super) {
 
         var outDB = db.getSiblingDB(db.getName() + uniqueDBName);
         assertAlways.commandWorked(outDB.createCollection(collName));
-    };
-
-    $config.teardown = function teardown(db, collName, cluster) {
-        var outDB = db.getSiblingDB(db.getName() + uniqueDBName);
-        var res = outDB.dropDatabase();
-        assertAlways.commandWorked(res);
-        assertAlways.eq(db.getName() + uniqueDBName, res.dropped);
     };
 
     return $config;

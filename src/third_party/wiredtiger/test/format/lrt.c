@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -32,7 +32,7 @@
  * lrt --
  *	Start a long-running transaction.
  */
-void *
+WT_THREAD_RET
 lrt(void *arg)
 {
 	WT_CONNECTION *conn;
@@ -41,17 +41,17 @@ lrt(void *arg)
 	WT_SESSION *session;
 	size_t buf_len, buf_size;
 	uint64_t keyno, saved_keyno;
+	uint8_t bitfield;
 	u_int period;
 	int pinned, ret;
-	uint8_t bitfield;
 	void *buf;
 
 	(void)(arg);			/* Unused parameter */
 
 	saved_keyno = 0;		/* [-Werror=maybe-uninitialized] */
 
-	key_gen_setup(&key);
-	val_gen_setup(NULL, &value);
+	key_gen_init(&key);
+	val_gen_init(&value);
 
 	buf = NULL;
 	buf_len = buf_size = 0;
@@ -59,18 +59,24 @@ lrt(void *arg)
 	/* Open a session and cursor. */
 	conn = g.wts_conn;
 	testutil_check(conn->open_session(conn, NULL, NULL, &session));
-	testutil_check(session->open_cursor(
-	    session, g.uri, NULL, NULL, &cursor));
+	/*
+	 * open_cursor can return EBUSY if concurrent with a metadata
+	 * operation, retry in that case.
+	 */
+	while ((ret = session->open_cursor(
+	    session, g.uri, NULL, NULL, &cursor)) == EBUSY)
+		__wt_yield();
+	testutil_check(ret);
 
 	for (pinned = 0;;) {
 		if (pinned) {
 			/* Re-read the record at the end of the table. */
-			while ((ret = read_row(
-			    cursor, &key, &value, saved_keyno)) == WT_ROLLBACK)
+			while ((ret = read_row_worker(cursor,
+			    saved_keyno, &key, &value, false)) == WT_ROLLBACK)
 				;
 			if (ret != 0)
 				testutil_die(ret,
-				    "read_row %" PRIu64, saved_keyno);
+				    "read_row_worker %" PRIu64, saved_keyno);
 
 			/* Compare the previous value with the current one. */
 			if (g.type == FIX) {
@@ -103,9 +109,16 @@ lrt(void *arg)
 			 * most of the named snapshot logic under load.
 			 */
 			testutil_check(session->snapshot(session, "name=test"));
-			sleep(1);
-			testutil_check(session->begin_transaction(
-			    session, "snapshot=test"));
+			__wt_sleep(1, 0);
+			/*
+			 * Keep trying to start a new transaction if it's
+			 * timing out - we know there aren't any resources
+			 * pinned so it should succeed eventually.
+			 */
+			while ((ret = session->begin_transaction(
+			    session, "snapshot=test")) == WT_CACHE_FULL)
+				;
+			testutil_check(ret);
 			testutil_check(session->snapshot(
 			    session, "drop=(all)"));
 			testutil_check(session->commit_transaction(
@@ -117,21 +130,24 @@ lrt(void *arg)
 			 * positioned. As soon as the cursor loses its position
 			 * a new snapshot will be allocated.
 			 */
-			testutil_check(session->begin_transaction(
-			    session, "isolation=snapshot"));
+			while ((ret = session->begin_transaction(
+			    session, "snapshot=snapshot")) == WT_CACHE_FULL)
+				;
+			testutil_check(ret);
 
 			/* Read a record at the end of the table. */
 			do {
 				saved_keyno = mmrand(NULL,
 				    (u_int)(g.key_cnt - g.key_cnt / 10),
 				    (u_int)g.key_cnt);
-				while ((ret = read_row(cursor,
-				    &key, &value, saved_keyno)) == WT_ROLLBACK)
+				while ((ret = read_row_worker(cursor,
+				    saved_keyno,
+				    &key, &value, false)) == WT_ROLLBACK)
 					;
 			} while (ret == WT_NOTFOUND);
 			if (ret != 0)
 				testutil_die(ret,
-				    "read_row %" PRIu64, saved_keyno);
+				    "read_row_worker %" PRIu64, saved_keyno);
 
 			/* Copy the cursor's value. */
 			if (g.type == FIX) {
@@ -154,12 +170,13 @@ lrt(void *arg)
 			 */
 			do {
 				keyno = mmrand(NULL, 1, (u_int)g.key_cnt / 5);
-				while ((ret = read_row(cursor,
-				    &key, &value, keyno)) == WT_ROLLBACK)
+				while ((ret = read_row_worker(cursor,
+				    keyno, &key, &value, false)) == WT_ROLLBACK)
 					;
 			} while (ret == WT_NOTFOUND);
 			if (ret != 0)
-				testutil_die(ret, "read_row %" PRIu64, keyno);
+				testutil_die(ret,
+				    "read_row_worker %" PRIu64, keyno);
 
 			pinned = 1;
 		}
@@ -170,7 +187,7 @@ lrt(void *arg)
 		/* Sleep for short periods so we don't make the run wait. */
 		while (period > 0 && !g.workers_finished) {
 			--period;
-			sleep(1);
+			__wt_sleep(1, 0);
 		}
 		if (g.workers_finished)
 			break;
@@ -178,9 +195,9 @@ lrt(void *arg)
 
 	testutil_check(session->close(session, NULL));
 
-	free(key.mem);
-	free(value.mem);
+	key_gen_teardown(&key);
+	val_gen_teardown(&value);
 	free(buf);
 
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }

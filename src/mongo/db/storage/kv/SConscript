@@ -1,5 +1,18 @@
+# -*- mode: python; -*-
+
 Import("env")
 
+env = env.Clone()
+
+env.Library(
+    target='kv_prefix',
+    source=['kv_prefix.cpp'],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/storage/storage_options',
+    ],
+)
+
+# Should not be referenced outside this SConscript file.
 env.Library(
     target='kv_engine_core',
     source=[
@@ -13,26 +26,19 @@ env.Library(
         '$BUILD_DIR/mongo/db/index_names',
         '$BUILD_DIR/mongo/db/namespace_string',
         '$BUILD_DIR/mongo/db/storage/bson_collection_catalog_entry',
+        '$BUILD_DIR/mongo/db/catalog/uuid_catalog',
+        'kv_prefix',
         ],
-    LIBDEPS_TAGS=[
-        # Depends on KVDatabaseCatalogEntry::getIndex, which does not have
-        # a unique definition.
-        'incomplete',
-    ],
     )
 
 # Should not be referenced outside this SConscript file.
 env.Library(
     target='kv_database_catalog_entry_core',
-    source=['kv_database_catalog_entry.cpp'],
+    source=['kv_database_catalog_entry_base.cpp'],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/storage/bson_collection_catalog_entry',
         '$BUILD_DIR/mongo/db/storage/kv/kv_engine_core',
-    ],
-    LIBDEPS_TAGS=[
-        # Depends on KVDatabaseCatalogEntry::getIndex, which is not uniquely defined
-        'incomplete',
     ],
 )
 
@@ -42,16 +48,21 @@ env.Library(
     source=['kv_storage_engine.cpp'],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/catalog/catalog_impl',
         '$BUILD_DIR/mongo/db/storage/kv/kv_engine_core',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         'kv_database_catalog_entry_core',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/logical_clock',
+        '$BUILD_DIR/mongo/db/storage/storage_repair_observer',
     ],
 )
 
 env.Library(
     target='kv_engine',
     source=[
-        'kv_database_catalog_entry_get_index.cpp',
+        'kv_database_catalog_entry.cpp',
         ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/index/index_access_methods',
@@ -66,9 +77,10 @@ env.Library(
 env.Library(
     target='kv_engine_mock',
     source=[
-        'kv_database_catalog_entry_get_index_mock.cpp'
+        'kv_database_catalog_entry_mock.cpp'
         ],
     LIBDEPS=[
+        '$BUILD_DIR/mongo/db/s/sharding_runtime_d',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         'kv_database_catalog_entry_core',
         'kv_engine_core',
@@ -81,35 +93,36 @@ env.Library(
     source=[
         'kv_catalog_feature_tracker_test.cpp',
         'kv_engine_test_harness.cpp',
-        'kv_engine_test_snapshots.cpp',
+        'kv_engine_test_timestamps.cpp',
         ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/service_context',
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/unittest/unittest',
         '$BUILD_DIR/mongo/util/clock_source_mock',
-        'kv_engine_core',
+        'kv_engine_mock',
+        'kv_prefix',
         ],
-    LIBDEPS_TAGS=[
-        # Depends on KVHarnessHelper::create which does not have a unique definition
-        'incomplete',
-    ],
-
     )
 
 env.CppUnitTest(
     target='kv_database_catalog_entry_test',
     source=[
         'kv_database_catalog_entry_test.cpp',
-        ],
+    ],
     LIBDEPS=[
         'kv_engine_mock',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
         '$BUILD_DIR/mongo/db/storage/devnull/storage_devnull_core',
         '$BUILD_DIR/mongo/db/storage/ephemeral_for_test/ephemeral_for_test_record_store',
-        ]
-    )
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/authmocks'
+    ],
+)
 
 env.CppUnitTest(
     target='kv_collection_catalog_entry_test',
@@ -120,7 +133,31 @@ env.CppUnitTest(
         'kv_engine_mock',
         '$BUILD_DIR/mongo/db/catalog/collection_options',
         '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
         '$BUILD_DIR/mongo/db/storage/devnull/storage_devnull_core',
         '$BUILD_DIR/mongo/db/storage/ephemeral_for_test/ephemeral_for_test_record_store',
-        ]
-    )
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/authmocks'
+    ],
+)
+
+env.CppUnitTest(
+    target='kv_storage_engine_test',
+    source=[
+        'kv_storage_engine_test.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/catalog/collection_options',
+        '$BUILD_DIR/mongo/db/namespace_string',
+        '$BUILD_DIR/mongo/db/repair_database',
+        '$BUILD_DIR/mongo/db/repl/replmocks',
+        '$BUILD_DIR/mongo/db/serveronly',
+        '$BUILD_DIR/mongo/db/service_context_d_test_fixture',
+        '$BUILD_DIR/mongo/db/storage/ephemeral_for_test/storage_ephemeral_for_test_core',
+        '$BUILD_DIR/mongo/db/storage/storage_repair_observer',
+        'kv_engine',
+        'kv_engine_mock',
+    ],
+)

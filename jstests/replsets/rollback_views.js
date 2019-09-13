@@ -119,7 +119,7 @@ load("jstests/replsets/rslib.js");
     nodeB.reconnect(arbiter);
     nodeA.reconnect(nodeB);
 
-    awaitOpTime(b1.getMongo(), getLatestOp(nodeA).ts);
+    awaitOpTime(nodeB, nodeA);
 
     // Await steady state and ensure the two nodes have the same contents.
     replTest.awaitSecondaryNodes();
@@ -130,6 +130,10 @@ load("jstests/replsets/rslib.js");
     printjson(checkFinalResults([a1, b1], ["coll", "x"], []));
     printjson(checkFinalResults([a2, b2], ["coll", "system.views"], ["y"]));
     printjson(checkFinalResults([a3, b3], ["coll", "system.views"], ["z"]));
+
+    // Verify data consistency between nodes.
+    replTest.checkReplicatedDataHashes();
+    replTest.checkOplogs();
 
     replTest.stopSet();
 }());

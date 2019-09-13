@@ -1,3 +1,5 @@
+// @tags: [requires_non_retryable_commands, requires_fastcount, requires_capped]
+
 admin = db.getMongo().getDB("admin");
 
 a = db.jstests_rename_a;

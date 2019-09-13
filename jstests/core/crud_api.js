@@ -1,7 +1,17 @@
-// @tags: [assumes_write_concern_unchanged]
+// Cannot implicitly shard accessed collections because of following errmsg: A single
+// update/delete on a sharded collection must contain an exact match on _id or contain the shard
+// key.
+//
+// @tags: [
+//   assumes_unsharded_collection,
+//   assumes_write_concern_unchanged,
+//   requires_fastcount,
+// ]
 
 (function() {
     "use strict";
+
+    load("jstests/aggregation/extras/utils.js");  // For arrayEq.
 
     var crudAPISpecTests = function crudAPISpecTests() {
         "use strict";
@@ -56,7 +66,8 @@
         var updateManyExecutor = createTestExecutor(coll, 'updateMany', checkResultObject);
         var updateOneExecutor = createTestExecutor(coll, 'updateOne', checkResultObject);
         var countExecutor = createTestExecutor(coll, 'count', assert.eq);
-        var distinctExecutor = createTestExecutor(coll, 'distinct', assert.eq);
+        var distinctExecutor =
+            createTestExecutor(coll, 'distinct', (a, b) => assert(arrayEq(a, b)));
 
         //
         // BulkWrite

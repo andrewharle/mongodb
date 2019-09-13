@@ -8,7 +8,7 @@ var nodes = rt.startSet();
 rt.initiate();
 var m = rt.getPrimary();
 rt.awaitSecondaryNodes();
-var slaves = rt.liveNodes.slaves;
+var slaves = rt._slaves;
 s = slaves[0];
 s.setSlaveOk();
 admin = m.getDB("admin");
@@ -53,9 +53,16 @@ assert.commandWorked(admin.runCommand({
     renameCollection: "jstests_replsets_replset6_first.one",
     to: "jstests_replsets_replset6_second.two"
 }));
-assert.soon(function() {
-    return -1 != s.getDBNames().indexOf(second) &&
-        -1 != s.getDB(second).getCollectionNames().indexOf("two") &&
-        s.getDB(second).two.findOne() && 1 == s.getDB(second).two.findOne().a;
-});
+
+// Wait for the command to replicate to the secondary.
+rt.awaitReplication();
+
+// Make sure the destination collection exists.
+assert.neq(-1, s.getDBNames().indexOf(second));
+assert.neq(-1, s.getDB(second).getCollectionNames().indexOf("two"));
+assert(s.getDB(second).two.findOne());
+assert.eq(1, s.getDB(second).two.findOne().a);
+
+// Make sure the source collection no longer exists.
 assert.eq(-1, s.getDB(first).getCollectionNames().indexOf("one"));
+rt.stopSet();

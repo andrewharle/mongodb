@@ -1,38 +1,43 @@
+test_kind: js_test
+
 selector:
-  js_test:
-    roots:
-    - jstestfuzz/out/*.js
+  roots:
+  - jstestfuzz/out/*.js
 
 executor:
-  js_test:
-    archive:
-      hooks:
-        - CheckReplDBHash
-        - ValidateCollections
-    config:
-      shell_options:
-        readMode: commands
+  archive:
     hooks:
-    - class: CheckReplDBHash
-      shell_options:
-        global_vars:
-          TestData:
-            skipValidationOnInvalidViewDefinitions: true
-    - class: ValidateCollections
-      shell_options:
-        global_vars:
-          TestData:
-            skipValidationOnInvalidViewDefinitions: true
-            forceValidationWithFeatureCompatibilityVersion: "3.4"
-    fixture:
-      class: ShardedClusterFixture
-      mongos_options:
-        set_parameters:
-          enableTestCommands: 1
-        verbose: ''
-      mongod_options:
-        set_parameters:
-          enableTestCommands: 1
-          numInitialSyncAttempts: 1
-        verbose: ''
-      num_shards: 2
+      - CheckReplDBHash
+      - ValidateCollections
+  config:
+    shell_options:
+      global_vars:
+        TestData:
+          # Other fuzzers test commands against sharded clusters with logical session ids.
+          disableImplicitSessions: true
+      readMode: commands
+  hooks:
+  - class: CheckReplDBHash
+    shell_options:
+      global_vars:
+        TestData:
+          skipValidationOnInvalidViewDefinitions: true
+  - class: ValidateCollections
+    shell_options:
+      global_vars:
+        TestData:
+          skipValidationOnInvalidViewDefinitions: true
+  fixture:
+    class: ShardedClusterFixture
+    mongos_options:
+      set_parameters:
+        enableTestCommands: 1
+      verbose: ''
+    mongod_options:
+      set_parameters:
+        disableLogicalSessionCacheRefresh: false
+        enableTestCommands: 1
+        numInitialSyncAttempts: 1
+        writePeriodicNoops: 1
+      verbose: ''
+    num_shards: 2

@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
@@ -44,11 +46,9 @@
 #include "mongo/db/s/balancer/balancer_chunk_selection_policy_impl.h"
 #include "mongo/db/s/balancer/cluster_statistics_impl.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_registry.h"
-#include "mongo/s/cluster_identity_loader.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/shard_util.h"
 #include "mongo/stdx/memory.h"
@@ -168,15 +168,6 @@ Balancer::~Balancer() {
 void Balancer::create(ServiceContext* serviceContext) {
     invariant(!getBalancer(serviceContext));
     getBalancer(serviceContext) = stdx::make_unique<Balancer>(serviceContext);
-
-    // Register a shutdown task to terminate the balancer thread so that it doesn't leak memory.
-    registerShutdownTask([serviceContext] {
-        auto balancer = Balancer::get(serviceContext);
-        // Make sure that the balancer thread has been interrupted.
-        balancer->interruptBalancer();
-        // Make sure the balancer thread has terminated.
-        balancer->waitForBalancerToStop();
-    });
 }
 
 Balancer* Balancer::get(ServiceContext* serviceContext) {
@@ -291,7 +282,7 @@ Status Balancer::moveSingleChunk(OperationContext* opCtx,
 
 void Balancer::report(OperationContext* opCtx, BSONObjBuilder* builder) {
     auto balancerConfig = Grid::get(opCtx)->getBalancerConfiguration();
-    balancerConfig->refreshAndCheck(opCtx);
+    balancerConfig->refreshAndCheck(opCtx).transitional_ignore();
 
     const auto mode = balancerConfig->getBalancerMode();
 
@@ -314,22 +305,6 @@ void Balancer::_mainThread() {
     }
 
     const Seconds kInitBackoffInterval(10);
-
-    // Take the balancer distributed lock and hold it permanently. Do the attempts with single
-    // attempts in order to not block the thread and be able to check for interrupt more frequently.
-    while (!_stopRequested()) {
-        auto status = _migrationManager.tryTakeBalancerLock(opCtx.get(), "CSRS Balancer");
-        if (!status.isOK()) {
-            log() << "Balancer distributed lock could not be acquired and will be retried in "
-                  << durationCount<Seconds>(kInitBackoffInterval) << " seconds"
-                  << causedBy(redact(status));
-
-            _sleepFor(opCtx.get(), kInitBackoffInterval);
-            continue;
-        }
-
-        break;
-    }
 
     auto balancerConfig = shardingContext->getBalancerConfiguration();
     while (!_stopRequested()) {
@@ -406,8 +381,9 @@ void Balancer::_mainThread() {
                     roundDetails.setSucceeded(static_cast<int>(candidateChunks.size()),
                                               _balancedLastTime);
 
-                    shardingContext->catalogClient(opCtx.get())
-                        ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON());
+                    shardingContext->catalogClient()
+                        ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
+                        .ignore();
                 }
 
                 LOG(1) << "*** End of balancing round";
@@ -425,8 +401,9 @@ void Balancer::_mainThread() {
             // This round failed, tell the world!
             roundDetails.setFailed(e.what());
 
-            shardingContext->catalogClient(opCtx.get())
-                ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON());
+            shardingContext->catalogClient()
+                ->logAction(opCtx.get(), "balancer.round", "", roundDetails.toBSON())
+                .transitional_ignore();
 
             // Sleep a fair amount before retrying because of the error
             _endRound(opCtx.get(), kBalanceRoundDefaultInterval);
@@ -483,7 +460,7 @@ bool Balancer::_checkOIDs(OperationContext* opCtx) {
     auto shardingContext = Grid::get(opCtx);
 
     vector<ShardId> all;
-    shardingContext->shardRegistry()->getAllShardIds(&all);
+    shardingContext->shardRegistry()->getAllShardIdsNoReload(&all);
 
     // map of OID machine ID => shardId
     map<int, ShardId> oids;
@@ -620,7 +597,7 @@ int Balancer::_moveChunks(OperationContext* opCtx,
             log() << "Performing a split because migration " << redact(requestIt->toString())
                   << " failed for size reasons" << causedBy(redact(status));
 
-            _splitOrMarkJumbo(opCtx, NamespaceString(requestIt->ns), requestIt->minKey);
+            _splitOrMarkJumbo(opCtx, requestIt->nss, requestIt->minKey);
             continue;
         }
 
@@ -643,10 +620,10 @@ void Balancer::_splitOrMarkJumbo(OperationContext* opCtx,
     try {
         const auto splitPoints = uassertStatusOK(shardutil::selectChunkSplitPoints(
             opCtx,
-            chunk->getShardId(),
+            chunk.getShardId(),
             nss,
             cm->getShardKeyPattern(),
-            ChunkRange(chunk->getMin(), chunk->getMax()),
+            ChunkRange(chunk.getMin(), chunk.getMax()),
             Grid::get(opCtx)->getBalancerConfiguration()->getMaxChunkSizeBytes(),
             boost::none));
 
@@ -654,20 +631,20 @@ void Balancer::_splitOrMarkJumbo(OperationContext* opCtx,
 
         uassertStatusOK(
             shardutil::splitChunkAtMultiplePoints(opCtx,
-                                                  chunk->getShardId(),
+                                                  chunk.getShardId(),
                                                   nss,
                                                   cm->getShardKeyPattern(),
                                                   cm->getVersion(),
-                                                  ChunkRange(chunk->getMin(), chunk->getMax()),
+                                                  ChunkRange(chunk.getMin(), chunk.getMax()),
                                                   splitPoints));
-    } catch (const DBException& ex) {
-        log() << "Marking chunk " << redact(chunk->toString()) << " as jumbo.";
+    } catch (const DBException&) {
+        log() << "Marking chunk " << redact(chunk.toString()) << " as jumbo.";
 
-        chunk->markAsJumbo();
+        chunk.markAsJumbo();
 
-        const std::string chunkName = ChunkType::genID(nss.ns(), chunk->getMin());
+        const std::string chunkName = ChunkType::genID(nss, chunk.getMin());
 
-        auto status = Grid::get(opCtx)->catalogClient(opCtx)->updateConfigDocument(
+        auto status = Grid::get(opCtx)->catalogClient()->updateConfigDocument(
             opCtx,
             ChunkType::ConfigNS,
             BSON(ChunkType::name(chunkName)),

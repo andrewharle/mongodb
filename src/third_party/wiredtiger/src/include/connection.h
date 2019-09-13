@@ -1,16 +1,10 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
  * See the file LICENSE for redistribution information.
  */
-
-/*
- * Default hash table size; use a prime number of buckets rather than assuming
- * a good hash (Reference Sedgewick, Algorithms in C, "Hash Functions").
- */
-#define	WT_HASH_ARRAY_SIZE	509
 
 /*******************************************
  * Global per-process structure.
@@ -25,8 +19,11 @@ struct __wt_process {
 					/* Locked: connection queue */
 	TAILQ_HEAD(__wt_connection_impl_qh, __wt_connection_impl) connqh;
 	WT_CACHE_POOL *cache_pool;
+#define	WT_TSC_DEFAULT_RATIO	1.0
+	double	 tsc_nsec_ratio;	/* rdtsc ticks to nanoseconds */
+	bool use_epochtime;		/* use expensive time */
 
-					/* Checksum function */
+					/* Checksum functions */
 #define	__wt_checksum(chunk, len)	__wt_process.checksum(chunk, len)
 	uint32_t (*checksum)(const void *, size_t);
 };
@@ -104,12 +101,6 @@ struct __wt_named_extractor {
 };
 
 /*
- * Allocate some additional slots for internal sessions so the user cannot
- * configure too few sessions for us to run.
- */
-#define	WT_EXTRA_INTERNAL_SESSIONS	20
-
-/*
  * WT_CONN_CHECK_PANIC --
  *	Check if we've panicked and return the appropriate error.
  */
@@ -184,20 +175,32 @@ struct __wt_connection_impl {
 	const char *error_prefix;	/* Database error prefix */
 	int is_new;			/* Connection created database */
 
+	uint16_t compat_major;		/* Compatibility major version */
+	uint16_t compat_minor;		/* Compatibility minor version */
+#define	WT_CONN_COMPAT_NONE	UINT16_MAX
+	uint16_t req_max_major;		/* Compatibility maximum major */
+	uint16_t req_max_minor;		/* Compatibility maximum minor */
+	uint16_t req_min_major;		/* Compatibility minimum major */
+	uint16_t req_min_minor;		/* Compatibility minimum minor */
+
 	WT_EXTENSION_API extension_api;	/* Extension API */
 
 					/* Configuration */
 	const WT_CONFIG_ENTRY **config_entries;
+
+	const char *optrack_path;	/* Directory for operation logs */
+	WT_FH *optrack_map_fh;		/* Name to id translation file. */
+	WT_SPINLOCK optrack_map_spinlock; /* Translation file spinlock. */
+	uintmax_t optrack_pid;		/* Cache the process ID. */
+
+	WT_LSN		*debug_ckpt;	/* Debug mode checkpoint LSNs. */
+	uint32_t	 debug_ckpt_cnt;/* Checkpoint retention number */
 
 	void  **foc;			/* Free-on-close array */
 	size_t  foc_cnt;		/* Array entries */
 	size_t  foc_size;		/* Array size */
 
 	WT_FH *lock_fh;			/* Lock file handle */
-
-	volatile uint64_t  split_gen;	/* Generation number for splits */
-	uint64_t split_stashed_bytes;	/* Atomic: split statistics */
-	uint64_t split_stashed_objects;
 
 	/*
 	 * The connection keeps a cache of data handles. The set of handles
@@ -269,6 +272,15 @@ struct __wt_connection_impl {
 	uint64_t  ckpt_time_recent;	/* Checkpoint time recent/total */
 	uint64_t  ckpt_time_total;
 
+	/* Checkpoint stats and verbosity timers */
+	struct timespec ckpt_timer_start;
+	struct timespec ckpt_timer_scrub_end;
+
+	/* Checkpoint progress message data */
+	uint64_t ckpt_progress_msg_count;
+	uint64_t ckpt_write_bytes;
+	uint64_t ckpt_write_pages;
+
 	uint32_t stat_flags;		/* Options declared in flags.py */
 
 					/* Connection statistics */
@@ -280,6 +292,12 @@ struct __wt_connection_impl {
 	uint32_t	 async_size;	/* Async op array size */
 	uint32_t	 async_workers;	/* Number of async workers */
 
+	WT_CAPACITY	 capacity;	/* Capacity structure */
+	WT_SESSION_IMPL *capacity_session;	/* Capacity thread session */
+	wt_thread_t	 capacity_tid;	/* Capacity thread */
+	bool		 capacity_tid_set;	/* Capacity thread set */
+	WT_CONDVAR	*capacity_cond;	/* Capacity wait mutex */
+
 	WT_LSM_MANAGER	lsm_manager;	/* LSM worker thread information */
 
 	WT_KEYED_ENCRYPTOR *kencryptor;	/* Encryptor for metadata and log */
@@ -290,15 +308,6 @@ struct __wt_connection_impl {
 	uint32_t	 evict_threads_max;/* Max eviction threads */
 	uint32_t	 evict_threads_min;/* Min eviction threads */
 
-	uint32_t         evict_tune_datapts_needed;/* Data needed to tune */
-	struct timespec  evict_tune_last_action_time;/* Time of last action */
-	struct timespec  evict_tune_last_time;	/* Time of last check */
-	uint32_t         evict_tune_num_points;	/* Number of values tried */
-	uint64_t	 evict_tune_pgs_last;	/* Number of pages evicted */
-	uint64_t	 evict_tune_pg_sec_max;	/* Max throughput encountered */
-	bool             evict_tune_stable;	/* Are we stable? */
-	uint32_t	 evict_tune_workers_best;/* Best performing value */
-
 #define	WT_STATLOG_FILENAME	"WiredTigerStat.%d.%H"
 	WT_SESSION_IMPL *stat_session;	/* Statistics log session */
 	wt_thread_t	 stat_tid;	/* Statistics log thread */
@@ -306,18 +315,26 @@ struct __wt_connection_impl {
 	WT_CONDVAR	*stat_cond;	/* Statistics log wait mutex */
 	const char	*stat_format;	/* Statistics log timestamp format */
 	WT_FSTREAM	*stat_fs;	/* Statistics log stream */
+	/* Statistics log json table printing state flag */
+	bool		 stat_json_tables;
 	char		*stat_path;	/* Statistics log path format */
 	char	       **stat_sources;	/* Statistics log list of objects */
 	const char	*stat_stamp;	/* Statistics log entry timestamp */
 	uint64_t	 stat_usecs;	/* Statistics log period */
 
-#define	WT_CONN_LOG_ARCHIVE		0x01	/* Archive is enabled */
-#define	WT_CONN_LOG_ENABLED		0x02	/* Logging is enabled */
-#define	WT_CONN_LOG_EXISTED		0x04	/* Log files found */
-#define	WT_CONN_LOG_RECOVER_DIRTY	0x08	/* Recovering unclean */
-#define	WT_CONN_LOG_RECOVER_DONE	0x10	/* Recovery completed */
-#define	WT_CONN_LOG_RECOVER_ERR		0x20	/* Error if recovery required */
-#define	WT_CONN_LOG_ZERO_FILL		0x40	/* Manually zero files */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CONN_LOG_ARCHIVE		0x001u	/* Archive is enabled */
+#define	WT_CONN_LOG_DEBUG_MODE		0x002u	/* Debug-mode logging enabled */
+#define	WT_CONN_LOG_DOWNGRADED		0x004u	/* Running older version */
+#define	WT_CONN_LOG_ENABLED		0x008u	/* Logging is enabled */
+#define	WT_CONN_LOG_EXISTED		0x010u	/* Log files found */
+#define	WT_CONN_LOG_FORCE_DOWNGRADE	0x020u	/* Force downgrade */
+#define	WT_CONN_LOG_RECOVER_DIRTY	0x040u	/* Recovering unclean */
+#define	WT_CONN_LOG_RECOVER_DONE	0x080u	/* Recovery completed */
+#define	WT_CONN_LOG_RECOVER_ERR		0x100u	/* Error if recovery required */
+#define	WT_CONN_LOG_RECOVER_FAILED	0x200u	/* Recovery failed */
+#define	WT_CONN_LOG_ZERO_FILL		0x400u	/* Manually zero files */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint32_t	 log_flags;	/* Global logging configuration */
 	WT_CONDVAR	*log_cond;	/* Log server wait mutex */
 	WT_SESSION_IMPL *log_session;	/* Log server session */
@@ -333,9 +350,13 @@ struct __wt_connection_impl {
 	bool		 log_wrlsn_tid_set;/* Log write lsn thread set */
 	WT_LOG		*log;		/* Logging structure */
 	WT_COMPRESSOR	*log_compressor;/* Logging compressor */
+	uint32_t	 log_cursors;	/* Log cursor count */
+	wt_off_t	 log_dirty_max;	/* Log dirty system cache max size */
 	wt_off_t	 log_file_max;	/* Log file max size */
 	const char	*log_path;	/* Logging path format */
 	uint32_t	 log_prealloc;	/* Log file pre-allocation */
+	uint16_t	 log_req_max;	/* Max required log version */
+	uint16_t	 log_req_min;	/* Min required log version */
 	uint32_t	 txn_logsync;	/* Log sync configuration */
 
 	WT_SESSION_IMPL *meta_ckpt_session;/* Metadata checkpoint session */
@@ -354,17 +375,9 @@ struct __wt_connection_impl {
 	uint64_t         sweep_interval;   /* Handle sweep interval */
 	uint64_t         sweep_handles_min;/* Handle sweep minimum open */
 
-	/*
-	 * Shared lookaside lock, session and cursor, used by threads accessing
-	 * the lookaside table (other than eviction server and worker threads
-	 * and the sweep thread, all of which have their own lookaside cursors).
-	 */
-	WT_SPINLOCK	 las_lock;	/* Lookaside table spinlock */
-	WT_SESSION_IMPL *las_session;	/* Lookaside table session */
-	bool		 las_written;	/* Lookaside table has been written */
-
-	WT_ITEM		 las_sweep_key;	/* Sweep server's saved key */
-	int64_t		 las_record_cnt;/* Count of lookaside records */
+	/* Set of btree IDs not being rolled back */
+	uint8_t *stable_rollback_bitstring;
+	uint32_t stable_rollback_maxfile;
 
 					/* Locked: collator list */
 	TAILQ_HEAD(__wt_coll_qh, __wt_named_collator) collqh;
@@ -387,21 +400,80 @@ struct __wt_connection_impl {
 	/* If non-zero, all buffers used for I/O will be aligned to this. */
 	size_t buffer_alignment;
 
-	uint32_t schema_gen;		/* Schema generation number */
+	uint64_t stashed_bytes;		/* Atomic: stashed memory statistics */
+	uint64_t stashed_objects;
+					/* Generations manager */
+	volatile uint64_t generations[WT_GENERATIONS];
 
 	wt_off_t data_extend_len;	/* file_extend data length */
 	wt_off_t log_extend_len;	/* file_extend log length */
 
-#define	WT_DIRECT_IO_CHECKPOINT	0x01	/* Checkpoints */
-#define	WT_DIRECT_IO_DATA	0x02	/* Data files */
-#define	WT_DIRECT_IO_LOG	0x04	/* Log files */
-	uint32_t direct_io;		/* O_DIRECT, FILE_FLAG_NO_BUFFERING */
-
-	uint32_t write_through;		/* FILE_FLAG_WRITE_THROUGH */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_DIRECT_IO_CHECKPOINT	0x1u	/* Checkpoints */
+#define	WT_DIRECT_IO_DATA	0x2u	/* Data files */
+#define	WT_DIRECT_IO_LOG	0x4u	/* Log files */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
+	uint64_t direct_io;		/* O_DIRECT, FILE_FLAG_NO_BUFFERING */
+	uint64_t write_through;		/* FILE_FLAG_WRITE_THROUGH */
 
 	bool	 mmap;			/* mmap configuration */
 	int page_size;			/* OS page size for mmap alignment */
-	uint32_t verbose;
+
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_VERB_API			0x000000001u
+#define	WT_VERB_BLOCK			0x000000002u
+#define	WT_VERB_CHECKPOINT		0x000000004u
+#define	WT_VERB_CHECKPOINT_PROGRESS	0x000000008u
+#define	WT_VERB_COMPACT			0x000000010u
+#define	WT_VERB_ERROR_RETURNS		0x000000020u
+#define	WT_VERB_EVICT			0x000000040u
+#define	WT_VERB_EVICTSERVER		0x000000080u
+#define	WT_VERB_EVICT_STUCK		0x000000100u
+#define	WT_VERB_FILEOPS			0x000000200u
+#define	WT_VERB_HANDLEOPS		0x000000400u
+#define	WT_VERB_LOG			0x000000800u
+#define	WT_VERB_LOOKASIDE		0x000001000u
+#define	WT_VERB_LOOKASIDE_ACTIVITY	0x000002000u
+#define	WT_VERB_LSM			0x000004000u
+#define	WT_VERB_LSM_MANAGER		0x000008000u
+#define	WT_VERB_METADATA		0x000010000u
+#define	WT_VERB_MUTEX			0x000020000u
+#define	WT_VERB_OVERFLOW		0x000040000u
+#define	WT_VERB_READ			0x000080000u
+#define	WT_VERB_REBALANCE		0x000100000u
+#define	WT_VERB_RECONCILE		0x000200000u
+#define	WT_VERB_RECOVERY		0x000400000u
+#define	WT_VERB_RECOVERY_PROGRESS	0x000800000u
+#define	WT_VERB_SALVAGE			0x001000000u
+#define	WT_VERB_SHARED_CACHE		0x002000000u
+#define	WT_VERB_SPLIT			0x004000000u
+#define	WT_VERB_TEMPORARY		0x008000000u
+#define	WT_VERB_THREAD_GROUP		0x010000000u
+#define	WT_VERB_TIMESTAMP		0x020000000u
+#define	WT_VERB_TRANSACTION		0x040000000u
+#define	WT_VERB_VERIFY			0x080000000u
+#define	WT_VERB_VERSION			0x100000000u
+#define	WT_VERB_WRITE			0x200000000u
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
+	uint64_t verbose;
+
+	/*
+	 * Variable with flags for which subsystems the diagnostic stress timing
+	 * delays have been requested.
+	 */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_TIMING_STRESS_CHECKPOINT_SLOW	0x001u
+#define	WT_TIMING_STRESS_LOOKASIDE_SWEEP	0x002u
+#define	WT_TIMING_STRESS_SPLIT_1		0x004u
+#define	WT_TIMING_STRESS_SPLIT_2		0x008u
+#define	WT_TIMING_STRESS_SPLIT_3		0x010u
+#define	WT_TIMING_STRESS_SPLIT_4		0x020u
+#define	WT_TIMING_STRESS_SPLIT_5		0x040u
+#define	WT_TIMING_STRESS_SPLIT_6		0x080u
+#define	WT_TIMING_STRESS_SPLIT_7		0x100u
+#define	WT_TIMING_STRESS_SPLIT_8		0x200u
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
+	uint64_t timing_stress_flags;
 
 #define	WT_STDERR(s)	(&S2C(s)->wt_stderr)
 #define	WT_STDOUT(s)	(&S2C(s)->wt_stdout)
@@ -413,5 +485,34 @@ struct __wt_connection_impl {
 	 */
 	WT_FILE_SYSTEM *file_system;
 
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CONN_CACHE_CURSORS		0x0000001u
+#define	WT_CONN_CACHE_POOL		0x0000002u
+#define	WT_CONN_CKPT_SYNC		0x0000004u
+#define	WT_CONN_CLOSING			0x0000008u
+#define	WT_CONN_CLOSING_NO_MORE_OPENS	0x0000010u
+#define	WT_CONN_CLOSING_TIMESTAMP	0x0000020u
+#define	WT_CONN_COMPATIBILITY		0x0000040u
+#define	WT_CONN_DATA_CORRUPTION		0x0000080u
+#define	WT_CONN_EVICTION_NO_LOOKASIDE	0x0000100u
+#define	WT_CONN_EVICTION_RUN		0x0000200u
+#define	WT_CONN_IN_MEMORY		0x0000400u
+#define	WT_CONN_LEAK_MEMORY		0x0000800u
+#define	WT_CONN_LOOKASIDE_OPEN		0x0001000u
+#define	WT_CONN_LSM_MERGE		0x0002000u
+#define	WT_CONN_OPTRACK			0x0004000u
+#define	WT_CONN_PANIC			0x0008000u
+#define	WT_CONN_READONLY		0x0010000u
+#define	WT_CONN_RECOVERING		0x0020000u
+#define	WT_CONN_SALVAGE			0x0040000u
+#define	WT_CONN_SERVER_ASYNC		0x0080000u
+#define	WT_CONN_SERVER_CAPACITY		0x0100000u
+#define	WT_CONN_SERVER_CHECKPOINT	0x0200000u
+#define	WT_CONN_SERVER_LOG		0x0400000u
+#define	WT_CONN_SERVER_LSM		0x0800000u
+#define	WT_CONN_SERVER_STATISTICS	0x1000000u
+#define	WT_CONN_SERVER_SWEEP		0x2000000u
+#define	WT_CONN_WAS_BACKUP		0x4000000u
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint32_t flags;
 };

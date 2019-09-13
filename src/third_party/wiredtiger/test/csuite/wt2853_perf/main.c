@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -82,9 +82,6 @@ main(int argc, char *argv[])
 	int i, nfail;
 	const char *tablename;
 
-	if (!testutil_enable_long_tests())	/* Ignore unless requested */
-		return (EXIT_SUCCESS);
-
 	opts = &_opts;
 	sharedopts = &_sharedopts;
 	memset(opts, 0, sizeof(*opts));
@@ -96,12 +93,15 @@ main(int argc, char *argv[])
 	sharedopts->bloom = BLOOM;
 	testutil_check(testutil_parse_opts(argc, argv, opts));
 	testutil_make_work_dir(opts->home);
+	testutil_progress(opts, "start");
 
 	testutil_check(wiredtiger_open(opts->home, NULL,
 	    "create,cache_size=1G", &opts->conn));
+	testutil_progress(opts, "wiredtiger_open");
 
 	testutil_check(
 	    opts->conn->open_session(opts->conn, NULL, NULL, &session));
+	testutil_progress(opts, "sessions opened");
 
 	/*
 	 * Note: id is repeated as id2.  This makes it easier to
@@ -142,14 +142,15 @@ main(int argc, char *argv[])
 	testutil_check(maincur->insert(maincur));
 	testutil_check(maincur->close(maincur));
 	testutil_check(session->close(session, NULL));
+	testutil_progress(opts, "setup complete");
 
 	for (i = 0; i < N_INSERT_THREAD; ++i) {
 		insert_args[i].threadnum = i;
 		insert_args[i].nthread = N_INSERT_THREAD;
 		insert_args[i].testopts = opts;
 		insert_args[i].sharedopts = sharedopts;
-		testutil_check(pthread_create(&insert_tid[i], NULL,
-		    thread_insert, (void *)&insert_args[i]));
+		testutil_check(pthread_create(
+		    &insert_tid[i], NULL, thread_insert, &insert_args[i]));
 	}
 
 	for (i = 0; i < N_GET_THREAD; ++i) {
@@ -157,9 +158,10 @@ main(int argc, char *argv[])
 		get_args[i].nthread = N_GET_THREAD;
 		get_args[i].testopts = opts;
 		get_args[i].sharedopts = sharedopts;
-		testutil_check(pthread_create(&get_tid[i], NULL,
-		    thread_get, (void *)&get_args[i]));
+		testutil_check(pthread_create(
+		    &get_tid[i], NULL, thread_get, &get_args[i]));
 	}
+	testutil_progress(opts, "threads started");
 
 	/*
 	 * Wait for insert threads to finish.  When they
@@ -174,6 +176,7 @@ main(int argc, char *argv[])
 	for (i = 0; i < N_GET_THREAD; ++i)
 		testutil_check(pthread_join(get_tid[i], NULL));
 
+	testutil_progress(opts, "threads joined");
 	fprintf(stderr, "\n");
 	for (i = 0; i < N_GET_THREAD; ++i) {
 		fprintf(stderr, "  thread %d did %d joins (%d fails)\n", i,
@@ -182,7 +185,10 @@ main(int argc, char *argv[])
 	}
 
 	testutil_assert(nfail == 0);
+	testutil_progress(opts, "cleanup starting");
+#if 0
 	testutil_cleanup(opts);
+#endif
 
 	return (0);
 }
@@ -211,6 +217,7 @@ thread_insert(void *arg)
 	testutil_check(session->open_cursor(session, opts->uri, NULL, NULL,
 	    &maincur));
 
+	testutil_progress(opts, "insert start");
 	for (i = 0; i < N_INSERT; i++) {
 		/*
 		 * Insert threads may stomp on each other's records;
@@ -241,6 +248,7 @@ thread_insert(void *arg)
 				fprintf(stderr, ".");
 			(void)time(&curtime);
 			if ((elapsed = difftime(curtime, prevtime)) > 5.0) {
+				testutil_progress(opts, "insert time gap");
 				fprintf(stderr, "\n"
 				    "GAP: %.0f secs after %d inserts\n",
 				    elapsed, i);
@@ -249,6 +257,7 @@ thread_insert(void *arg)
 			prevtime = curtime;
 		}
 	}
+	testutil_progress(opts, "insert end");
 	testutil_check(maincur->close(maincur));
 	testutil_check(session->close(session, NULL));
 	return (NULL);
@@ -264,7 +273,7 @@ thread_get(void *arg)
 	WT_SESSION *session;
 	double elapsed;
 	time_t prevtime, curtime; /* 1 second resolution is okay */
-	int bal, flag, key, key2, post, bal2, flag2, post2;
+	int bal, bal2, flag, flag2, key, key2, post, post2;
 	char *extra;
 
 	threadargs = (THREAD_ARGS *)arg;
@@ -280,6 +289,7 @@ thread_get(void *arg)
 	testutil_check(session->open_cursor(
 	    session, sharedopts->posturi, NULL, NULL, &postcur));
 
+	testutil_progress(opts, "get start");
 	for (threadargs->njoins = 0; threadargs->done == 0;
 	     threadargs->njoins++) {
 		testutil_check(session->begin_transaction(session, NULL));
@@ -289,20 +299,14 @@ thread_get(void *arg)
 			testutil_check(postcur->get_key(postcur, &post));
 			testutil_check(postcur->get_value(postcur, &post2,
 			    &bal, &extra, &flag, &key));
-			testutil_assert(post == post2);
-			if (post != 54321)
-				break;
+			testutil_assert((flag > 0 && bal < 0) ||
+			    (flag == 0 && bal >= 0));
 
 			maincur->set_key(maincur, key);
 			testutil_check(maincur->search(maincur));
 			testutil_check(maincur->get_value(maincur, &post2,
 			    &bal2, &extra, &flag2, &key2));
 			testutil_check(maincur->reset(maincur));
-			testutil_assert(key == key2);
-			testutil_assert(post == post2);
-			testutil_assert(bal == bal2);
-			testutil_assert(flag == flag2);
-
 			testutil_assert((flag2 > 0 && bal2 < 0) ||
 			    (flag2 == 0 && bal2 >= 0));
 		}
@@ -317,6 +321,7 @@ thread_get(void *arg)
 
 		(void)time(&curtime);
 		if ((elapsed = difftime(curtime, prevtime)) > 5.0) {
+			testutil_progress(opts, "get time gap");
 			fprintf(stderr, "\n"
 			    "GAP: %.0f secs after %d gets\n",
 			    elapsed, threadargs->njoins);
@@ -324,6 +329,7 @@ thread_get(void *arg)
 		}
 		prevtime = curtime;
 	}
+	testutil_progress(opts, "get end");
 	testutil_check(postcur->close(postcur));
 	testutil_check(maincur->close(maincur));
 	testutil_check(session->close(session, NULL));

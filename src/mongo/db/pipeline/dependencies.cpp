@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #include "mongo/platform/basic.h"
 
@@ -41,34 +43,40 @@ using std::vector;
 
 namespace str = mongoutils::str;
 
-BSONObj DepsTracker::toProjection() const {
-    if (fields.empty() && !needWholeDocument) {
-        if (_needTextScore) {
-            // We only need the text score, but there is no easy way to express this in the query
-            // projection language. We use $noFieldsNeeded with a textScore meta-projection since
-            // this is an inclusion projection which will exclude all existing fields but add the
-            // textScore metadata.
-            return BSON("_id" << 0 << "$noFieldsNeeded" << 1 << Document::metaFieldTextScore
-                              << BSON("$meta"
-                                      << "textScore"));
-        } else {
-            // We truly need no information (we are doing a count or something similar). In this
-            // case, the DocumentSourceCursor will know there aren't any dependencies, and we can
-            // ignore the documents returned from the query system. We pass an empty object as the
-            // projection so that we have a chance of using the COUNT_SCAN optimization.
-            return BSONObj();
-        }
+bool DepsTracker::_appendMetaProjections(BSONObjBuilder* projectionBuilder) const {
+    if (_needTextScore) {
+        projectionBuilder->append(Document::metaFieldTextScore,
+                                  BSON("$meta"
+                                       << "textScore"));
     }
+    if (_needSortKey) {
+        projectionBuilder->append(Document::metaFieldSortKey,
+                                  BSON("$meta"
+                                       << "sortKey"));
+    }
+    return (_needTextScore || _needSortKey);
+}
 
+BSONObj DepsTracker::toProjection() const {
     BSONObjBuilder bb;
 
-    if (_needTextScore)
-        bb.append(Document::metaFieldTextScore,
-                  BSON("$meta"
-                       << "textScore"));
+    const bool needsMetadata = _appendMetaProjections(&bb);
 
-    if (needWholeDocument)
+    if (needWholeDocument) {
         return bb.obj();
+    }
+
+    if (fields.empty()) {
+        if (needsMetadata) {
+            // We only need metadata, but there is no easy way to express this in the query
+            // projection language. We use $noFieldsNeeded with a meta-projection since this is an
+            // inclusion projection which will exclude all existing fields but add the metadata.
+            bb.append("_id", 0);
+            bb.append("$noFieldsNeeded", 1);
+        }
+        // We either need nothing (as we would if this was logically a count), or only the metadata.
+        return bb.obj();
+    }
 
     bool needId = false;
     string last;

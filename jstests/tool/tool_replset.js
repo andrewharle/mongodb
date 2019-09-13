@@ -8,16 +8,21 @@
  * 6. Export a collection.
  * 7. Drop the collection.
  * 8. Import the collection.
- * 9. Add data to the oplog.rs collection.
- * 10. Ensure that the document doesn't exist yet.
- * 11. Now play the mongooplog tool.
- * 12. Make sure that the oplog was played
 */
 
 (function() {
     "use strict";
 
-    var replTest = new ReplSetTest({name: 'tool_replset', nodes: 2, oplogSize: 5});
+    // Skip this test if running with --nojournal and WiredTiger.
+    if (jsTest.options().noJournal &&
+        (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger")) {
+        print("Skipping test because running WiredTiger without journaling isn't a valid" +
+              " replica set configuration");
+        return;
+    }
+
+    var replTest =
+        new ReplSetTest({name: 'tool_replset', nodes: 2, oplogSize: 5, nodeOptions: {"vvvvv": ""}});
     var nodes = replTest.startSet();
     var config = replTest.getReplSetConfig();
     config.members[0].priority = 3;
@@ -34,19 +39,20 @@
         "tool_replset/127.0.0.1:" + replTest.ports[0] + ",127.0.0.1:" + replTest.ports[1];
 
     // Test with mongodump/mongorestore
-    print("dump the db");
     var data = MongoRunner.dataDir + "/tool_replset-dump1/";
+    print("using mongodump to dump the db to " + data);
     var exitCode = MongoRunner.runMongoTool("mongodump", {
         host: replSetConnString,
         out: data,
     });
     assert.eq(0, exitCode, "mongodump failed to dump from the replica set");
 
-    print("db successfully dumped, dropping now");
-    master.getDB("foo").dropDatabase();
+    print("db successfully dumped to " + data +
+          ". dropping collection before testing the restore process");
+    assert(master.getDB("foo").bar.drop());
     replTest.awaitReplication();
 
-    print("restore the db");
+    print("using mongorestore to restore the db from " + data);
     exitCode = MongoRunner.runMongoTool("mongorestore", {
         host: replSetConnString,
         dir: data,
@@ -87,25 +93,6 @@
 
     var x = master.getDB("foo").getCollection("bar").count();
     assert.eq(x, 100, "mongoimport should have successfully imported the collection");
-    var doc = {_id: 5, x: 17};
-    var oplogEntry = {ts: new Timestamp(), "op": "i", "ns": "foo.bar", "o": doc, "v": NumberInt(2)};
-    assert.writeOK(master.getDB("local").oplog.rs.insert(oplogEntry));
-
-    assert.eq(100,
-              master.getDB("foo").getCollection("bar").count(),
-              "count before running " + "mongooplog was not 100 as expected");
-
-    exitCode = MongoRunner.runMongoTool("mongooplog", {
-        from: "127.0.0.1:" + replTest.ports[0],
-        host: replSetConnString,
-    });
-    assert.eq(0, exitCode, "mongooplog failed to replay the oplog");
-
-    print("finished running mongooplog to replay the oplog");
-
-    assert.eq(101,
-              master.getDB("foo").getCollection("bar").count(),
-              "count after running " + "mongooplog was not 101 as expected");
 
     print("all tests successful, stopping replica set");
 

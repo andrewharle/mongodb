@@ -4,8 +4,14 @@
  * rollback and refuse to choose node 1 as its sync source because it doesn't have the minValid.
  */
 
+// Rollback to a stable timestamp does not set a minValid and should be able to sync from any node.
+// @tags: [requires_mmapv1]
+
 (function() {
     'use strict';
+
+    // Skip db hash check because replset is partitioned.
+    TestData.skipCheckDBHashes = true;
 
     load("jstests/libs/check_log.js");
     load("jstests/replsets/rslib.js");
@@ -130,8 +136,8 @@
     // It should fail with a rbid error and get stuck.
     jsTestLog("Repartition to: [0,3,4] and [1,2].");
     nodes[1].reconnect(nodes[2]);
-    assert.commandWorked(
-        nodes[2].adminCommand({configureFailPoint: 'rollbackHangBeforeStart', mode: 'off'}));
+    assert.adminCommandWorkedAllowingNetworkError(
+        nodes[2], {configureFailPoint: 'rollbackHangBeforeStart', mode: 'off'});
 
     jsTestLog("Wait for node 2 exit ROLLBACK state and go into RECOVERING");
     waitForState(nodes[2], ReplSetTest.State.RECOVERING);

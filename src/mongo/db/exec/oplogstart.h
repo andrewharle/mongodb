@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,9 +32,10 @@
 
 
 #include "mongo/base/owned_pointer_vector.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/exec/collection_scan.h"
 #include "mongo/db/exec/plan_stage.h"
-#include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/record_id.h"
 #include "mongo/util/timer.h"
 
@@ -41,15 +44,15 @@ namespace mongo {
 class RecordCursor;
 
 /**
- * OplogStart walks a collection backwards to find the first object in the collection that
- * matches the query.  It's used by replication to efficiently find where the oplog should be
- * replayed from.
+ * OplogStart walks a collection backwards to find the first object in the collection that matches
+ * the timestamp.  It's used by replication to efficiently find where the oplog should be replayed
+ * from.
  *
- * The oplog is always a capped collection.  In capped collections, documents are oriented on
- * disk according to insertion order.  The oplog inserts documents with increasing timestamps.
- * Queries on the oplog look for entries that are after a certain time.  Therefore if we
- * navigate backwards, the last document we encounter that satisfies our query (over the
- * timestamp) is the first document we must scan from to answer the query.
+ * The oplog is always a capped collection.  In capped collections, documents are oriented on disk
+ * according to insertion order.  The oplog inserts documents with increasing timestamps.  Queries
+ * on the oplog look for entries that are after a certain time.  Therefore if we navigate backwards,
+ * the first document we encounter that is less than or equal to the timestamp is the first document
+ * we should scan.
  *
  * Why isn't this a normal reverse table scan, you may ask?  We could be correct if we used a
  * normal reverse collection scan.  However, that's not fast enough.  Since we know all
@@ -63,15 +66,15 @@ class RecordCursor;
 class OplogStart final : public PlanStage {
 public:
     // Does not take ownership.
-    OplogStart(OperationContext* txn,
+    OplogStart(OperationContext* opCtx,
                const Collection* collection,
-               MatchExpression* filter,
+               Timestamp timestamp,
                WorkingSet* ws);
 
     StageState doWork(WorkingSetID* out) final;
     bool isEOF() final;
 
-    void doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) final;
+    void doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) final;
     void doSaveState() final;
     void doRestoreState() final;
     void doDetachFromOperationContext() final;
@@ -137,7 +140,11 @@ private:
 
     std::string _ns;
 
-    MatchExpression* _filter;
+    // '_filter' matches documents whose "ts" field is less than or equal to 'timestamp'. Once we
+    // have found a document matching '_filter', we know that we're at or behind the starting point
+    // and can start scanning forwards again.
+    BSONObj _filterBSON;
+    LTEMatchExpression _filter;
 
     static int _backwardsScanTime;
 };

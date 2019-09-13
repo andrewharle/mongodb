@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -74,13 +77,18 @@ LogComponent LogComponent::parent() const {
             return kNumLogComponents;
             DECLARE_LOG_COMPONENT_PARENT(kJournal, kStorage);
             DECLARE_LOG_COMPONENT_PARENT(kASIO, kNetwork);
+            DECLARE_LOG_COMPONENT_PARENT(kConnectionPool, kNetwork);
             DECLARE_LOG_COMPONENT_PARENT(kBridge, kNetwork);
+            DECLARE_LOG_COMPONENT_PARENT(kReplicationHeartbeats, kReplication);
+            DECLARE_LOG_COMPONENT_PARENT(kReplicationRollback, kReplication);
+            DECLARE_LOG_COMPONENT_PARENT(kShardingCatalogRefresh, kSharding);
+            DECLARE_LOG_COMPONENT_PARENT(kStorageRecovery, kStorage);
         case kNumLogComponents:
             return kNumLogComponents;
         default:
             return kDefault;
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 StringData LogComponent::toStringData() const {
@@ -105,10 +113,18 @@ StringData LogComponent::toStringData() const {
             return "query"_sd;
         case kReplication:
             return "replication"_sd;
+        case kReplicationHeartbeats:
+            return "heartbeats"_sd;
+        case kReplicationRollback:
+            return "rollback"_sd;
         case kSharding:
             return "sharding"_sd;
+        case kShardingCatalogRefresh:
+            return "shardingCatalogRefresh"_sd;
         case kStorage:
             return "storage"_sd;
+        case kStorageRecovery:
+            return "recovery"_sd;
         case kJournal:
             return "journal"_sd;
         case kWrite:
@@ -121,11 +137,15 @@ StringData LogComponent::toStringData() const {
             return "bridge"_sd;
         case kTracking:
             return "tracking"_sd;
+        case kTransaction:
+            return "transaction"_sd;
+        case kConnectionPool:
+            return "connectionPool"_sd;
         case kNumLogComponents:
             return "total"_sd;
             // No default. Compiler should complain if there's a log component that's not handled.
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 std::string LogComponent::getShortName() const {
@@ -177,10 +197,18 @@ StringData LogComponent::getNameForLog() const {
             return "QUERY   "_sd;
         case kReplication:
             return "REPL    "_sd;
+        case kReplicationHeartbeats:
+            return "REPL_HB "_sd;
+        case kReplicationRollback:
+            return "ROLLBACK"_sd;
         case kSharding:
             return "SHARDING"_sd;
+        case kShardingCatalogRefresh:
+            return "SH_REFR "_sd;
         case kStorage:
             return "STORAGE "_sd;
+        case kStorageRecovery:
+            return "RECOVERY"_sd;
         case kJournal:
             return "JOURNAL "_sd;
         case kWrite:
@@ -193,11 +221,15 @@ StringData LogComponent::getNameForLog() const {
             return "BRIDGE  "_sd;
         case kTracking:
             return "TRACKING"_sd;
+        case kTransaction:
+            return "TXN     "_sd;
+        case kConnectionPool:
+            return "CONNPOOL"_sd;
         case kNumLogComponents:
             return "TOTAL   "_sd;
             // No default. Compiler should complain if there's a log component that's not handled.
     }
-    invariant(false);
+    MONGO_UNREACHABLE;
 }
 
 std::ostream& operator<<(std::ostream& os, LogComponent component) {

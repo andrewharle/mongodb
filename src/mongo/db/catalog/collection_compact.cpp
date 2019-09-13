@@ -1,36 +1,36 @@
-// collection_compact.cpp
 
 /**
-*    Copyright (C) 2013 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
 
-#include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_impl.h"
 
 #include "mongo/base/counter.h"
 #include "mongo/base/owned_pointer_map.h"
@@ -96,7 +96,7 @@ public:
     }
 
     virtual void inserted(const RecordData& recData, const RecordId& newLocation) {
-        _multiIndexBlock->insert(recData.toBson(), newLocation);
+        _multiIndexBlock->insert(recData.toBson(), newLocation).transitional_ignore();
     }
 
 private:
@@ -107,11 +107,11 @@ private:
 }
 
 
-StatusWith<CompactStats> Collection::compact(OperationContext* txn,
-                                             const CompactOptions* compactOptions) {
-    dassert(txn->lockState()->isCollectionLockedForMode(ns().toString(), MODE_X));
+StatusWith<CompactStats> CollectionImpl::compact(OperationContext* opCtx,
+                                                 const CompactOptions* compactOptions) {
+    dassert(opCtx->lockState()->isCollectionLockedForMode(ns().toString(), MODE_X));
 
-    DisableDocumentValidation validationDisabler(txn);
+    DisableDocumentValidation validationDisabler(opCtx);
 
     if (!_recordStore->compactSupported())
         return StatusWith<CompactStats>(ErrorCodes::CommandNotSupported,
@@ -121,18 +121,18 @@ StatusWith<CompactStats> Collection::compact(OperationContext* txn,
 
     if (_recordStore->compactsInPlace()) {
         CompactStats stats;
-        Status status = _recordStore->compact(txn, NULL, compactOptions, &stats);
+        Status status = _recordStore->compact(opCtx, NULL, compactOptions, &stats);
         if (!status.isOK())
             return StatusWith<CompactStats>(status);
 
         // Compact all indexes (not including unfinished indexes)
-        IndexCatalog::IndexIterator ii(_indexCatalog.getIndexIterator(txn, false));
+        IndexCatalog::IndexIterator ii(_indexCatalog.getIndexIterator(opCtx, false));
         while (ii.more()) {
             IndexDescriptor* descriptor = ii.next();
             IndexAccessMethod* index = _indexCatalog.getIndex(descriptor);
 
             LOG(1) << "compacting index: " << descriptor->toString();
-            Status status = index->compact(txn);
+            Status status = index->compact(opCtx);
             if (!status.isOK()) {
                 error() << "failed to compact index: " << descriptor->toString();
                 return status;
@@ -142,13 +142,13 @@ StatusWith<CompactStats> Collection::compact(OperationContext* txn,
         return StatusWith<CompactStats>(stats);
     }
 
-    if (_indexCatalog.numIndexesInProgress(txn))
+    if (_indexCatalog.numIndexesInProgress(opCtx))
         return StatusWith<CompactStats>(ErrorCodes::BadValue,
                                         "cannot compact when indexes in progress");
 
     vector<BSONObj> indexSpecs;
     {
-        IndexCatalog::IndexIterator ii(_indexCatalog.getIndexIterator(txn, false));
+        IndexCatalog::IndexIterator ii(_indexCatalog.getIndexIterator(opCtx, false));
         while (ii.more()) {
             IndexDescriptor* descriptor = ii.next();
 
@@ -170,23 +170,20 @@ StatusWith<CompactStats> Collection::compact(OperationContext* txn,
     }
 
     // Give a chance to be interrupted *before* we drop all indexes.
-    txn->checkForInterrupt();
+    opCtx->checkForInterrupt();
 
     {
         // note that the drop indexes call also invalidates all clientcursors for the namespace,
         // which is important and wanted here
-        WriteUnitOfWork wunit(txn);
+        WriteUnitOfWork wunit(opCtx);
         log() << "compact dropping indexes";
-        Status status = _indexCatalog.dropAllIndexes(txn, true);
-        if (!status.isOK()) {
-            return StatusWith<CompactStats>(status);
-        }
+        _indexCatalog.dropAllIndexes(opCtx, true);
         wunit.commit();
     }
 
     CompactStats stats;
 
-    MultiIndexBlock indexer(txn, this);
+    MultiIndexBlock indexer(opCtx, _this);
     indexer.allowInterruption();
     indexer.ignoreUniqueConstraint();  // in compact we should be doing no checking
 
@@ -194,9 +191,9 @@ StatusWith<CompactStats> Collection::compact(OperationContext* txn,
     if (!status.isOK())
         return StatusWith<CompactStats>(status);
 
-    MyCompactAdaptor adaptor(this, &indexer);
+    MyCompactAdaptor adaptor(_this, &indexer);
 
-    status = _recordStore->compact(txn, &adaptor, compactOptions, &stats);
+    status = _recordStore->compact(opCtx, &adaptor, compactOptions, &stats);
     if (!status.isOK())
         return StatusWith<CompactStats>(status);
 
@@ -206,7 +203,7 @@ StatusWith<CompactStats> Collection::compact(OperationContext* txn,
         return StatusWith<CompactStats>(status);
 
     {
-        WriteUnitOfWork wunit(txn);
+        WriteUnitOfWork wunit(opCtx);
         indexer.commit();
         wunit.commit();
     }

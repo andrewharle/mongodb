@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -48,11 +50,6 @@
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
-
-// Crutch.
-bool isMongos() {
-    return false;
-}
 
 namespace {
 
@@ -100,26 +97,26 @@ private:
 TEST_F(DocumentSourceSortTest, RejectsNonObjectSpec) {
     BSONObj spec = BSON("$sort" << 1);
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, RejectsEmptyObjectSpec) {
     BSONObj spec = BSON("$sort" << BSONObj());
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, RejectsSpecWithNonNumericValues) {
     BSONObj spec = BSON("$sort" << BSON("a"
                                         << "b"));
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, RejectsSpecWithZeroAsValue) {
     BSONObj spec = BSON("$sort" << BSON("a" << 0));
     BSONElement specElement = spec.firstElement();
-    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), UserException);
+    ASSERT_THROWS(DocumentSourceSort::createFromBson(specElement, getExpCtx()), AssertionException);
 }
 
 TEST_F(DocumentSourceSortTest, SortWithLimit) {
@@ -136,7 +133,7 @@ TEST_F(DocumentSourceSortTest, SortWithLimit) {
         ASSERT_BSONOBJ_EQ(arr[0].getDocument().toBson(), BSON("$sort" << BSON("a" << 1)));
 
         ASSERT(sort()->getShardSource() != nullptr);
-        ASSERT(sort()->getMergeSource() != nullptr);
+        ASSERT(!sort()->getMergeSources().empty());
     }
 
     container.push_back(DocumentSourceLimit::create(expCtx, 10));
@@ -163,7 +160,7 @@ TEST_F(DocumentSourceSortTest, SortWithLimit) {
         DOC_ARRAY(DOC("$sort" << DOC("a" << 1)) << DOC("$limit" << sort()->getLimit())));
 
     ASSERT(sort()->getShardSource() != nullptr);
-    ASSERT(sort()->getMergeSource() != nullptr);
+    ASSERT(!sort()->getMergeSources().empty());
 }
 
 TEST_F(DocumentSourceSortTest, Dependencies) {
@@ -287,7 +284,7 @@ TEST_F(DocumentSourceSortExecutionTest, CompoundSortSpecAlternateOrderSecondFiel
 
 /** Sorting different types is not supported. */
 TEST_F(DocumentSourceSortExecutionTest, InconsistentTypeSort) {
-    checkResults({Document{{"_id", 0}, {"a", 1}}, Document{{"_id", 1}, {"a", "foo"}}},
+    checkResults({Document{{"_id", 0}, {"a", 1}}, Document{{"_id", 1}, {"a", "foo"_sd}}},
                  BSON("a" << 1),
                  "[{_id:0,a:1},{_id:1,a:\"foo\"}]");
 }
@@ -353,9 +350,9 @@ TEST_F(DocumentSourceSortExecutionTest, MissingObjectWithinArray) {
 /** Compare nested values from within an array. */
 TEST_F(DocumentSourceSortExecutionTest, ExtractArrayValues) {
     checkResults({Document{{"_id", 0}, {"a", DOC_ARRAY(DOC("b" << 1) << DOC("b" << 2))}},
-                  Document{{"_id", 1}, {"a", DOC_ARRAY(DOC("b" << 1) << DOC("b" << 1))}}},
+                  Document{{"_id", 1}, {"a", DOC_ARRAY(DOC("b" << 1) << DOC("b" << 0))}}},
                  BSON("a.b" << 1),
-                 "[{_id:1,a:[{b:1},{b:1}]},{_id:0,a:[{b:1},{b:2}]}]");
+                 "[{_id:1,a:[{b:1},{b:0}]},{_id:0,a:[{b:1},{b:2}]}]");
 }
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldPauseWhenAskedTo) {
@@ -407,7 +404,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToPauseLoadingWhileSpilled) 
     // Allow the $sort stage to spill to disk.
     unittest::TempDir tempDir("DocumentSourceSortTest");
     expCtx->tempDir = tempDir.path();
-    expCtx->extSortAllowed = true;
+    expCtx->allowDiskUse = true;
     const size_t maxMemoryUsageBytes = 1000;
 
     auto sort = DocumentSourceSort::create(expCtx, BSON("_id" << -1), -1, maxMemoryUsageBytes);
@@ -441,7 +438,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldBeAbleToPauseLoadingWhileSpilled) 
 TEST_F(DocumentSourceSortExecutionTest,
        ShouldErrorIfNotAllowedToSpillToDiskAndResultSetIsTooLarge) {
     auto expCtx = getExpCtx();
-    expCtx->extSortAllowed = false;
+    expCtx->allowDiskUse = false;
     const size_t maxMemoryUsageBytes = 1000;
 
     auto sort = DocumentSourceSort::create(expCtx, BSON("_id" << -1), -1, maxMemoryUsageBytes);
@@ -451,12 +448,12 @@ TEST_F(DocumentSourceSortExecutionTest,
                                             Document{{"_id", 1}, {"largeStr", largeStr}}});
     sort->setSource(mock.get());
 
-    ASSERT_THROWS_CODE(sort->getNext(), UserException, 16819);
+    ASSERT_THROWS_CODE(sort->getNext(), AssertionException, 16819);
 }
 
 TEST_F(DocumentSourceSortExecutionTest, ShouldCorrectlyTrackMemoryUsageBetweenPauses) {
     auto expCtx = getExpCtx();
-    expCtx->extSortAllowed = false;
+    expCtx->allowDiskUse = false;
     const size_t maxMemoryUsageBytes = 1000;
 
     auto sort = DocumentSourceSort::create(expCtx, BSON("_id" << -1), -1, maxMemoryUsageBytes);
@@ -472,7 +469,7 @@ TEST_F(DocumentSourceSortExecutionTest, ShouldCorrectlyTrackMemoryUsageBetweenPa
     ASSERT_TRUE(sort->getNext().isPaused());
 
     // The next should realize it's used too much memory.
-    ASSERT_THROWS_CODE(sort->getNext(), UserException, 16819);
+    ASSERT_THROWS_CODE(sort->getNext(), AssertionException, 16819);
 }
 
 }  // namespace

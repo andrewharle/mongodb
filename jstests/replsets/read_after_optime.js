@@ -18,10 +18,7 @@
         var oplogTS = localDB.oplog.rs.find().sort({$natural: -1}).limit(1).next();
         var twoKSecTS = new Timestamp(oplogTS.ts.getTime() + 2000, 0);
 
-        var term = -1;
-        if (config.protocolVersion === 1) {
-            term = oplogTS.t;
-        }
+        var term = oplogTS.t;
 
         // Test timeout with maxTimeMS
         var runTimeoutTest = function() {
@@ -31,7 +28,7 @@
                 readConcern: {afterOpTime: {ts: twoKSecTS, t: term}},
                 maxTimeMS: 5000,
             }),
-                                         ErrorCodes.ExceededTimeLimit);
+                                         ErrorCodes.MaxTimeMSExpired);
         };
 
         // Run the time out test 3 times with replication debug log level increased to 2

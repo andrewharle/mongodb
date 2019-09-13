@@ -1,25 +1,27 @@
 // key_string.h
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -40,6 +42,7 @@
 #include "mongo/bson/timestamp.h"
 #include "mongo/db/record_id.h"
 #include "mongo/platform/decimal128.h"
+#include "mongo/util/assert_util.h"
 
 namespace mongo {
 
@@ -48,7 +51,7 @@ public:
     /**
      * Selects version of KeyString to use. V0 and V1 differ in their encoding of numeric values.
      */
-    enum class Version : uint8_t { V0 = 0, V1 = 1 };
+    enum class Version : uint8_t { V0 = 0, V1 = 1, kLatestVersion = V1 };
     static StringData versionToString(Version version) {
         return version == Version::V0 ? "V0" : "V1";
     }
@@ -241,7 +244,9 @@ public:
             return _buf[0] & 0x7f;
         }
         void setSizeByte(uint8_t size) {
-            dassert(size < kMaxBytesNeeded);
+            // This error can only occur in cases where the key is not only too long, but also
+            // has too many fields requiring type bits.
+            uassert(ErrorCodes::KeyTooLong, "The key is too long", size < kMaxBytesNeeded);
             _buf[0] = 0x80 | size;
         }
 
@@ -292,8 +297,23 @@ public:
         appendRecordId(rid);
     }
 
+    static size_t getKeySize(const char* buffer,
+                             size_t len,
+                             Ordering ord,
+                             const TypeBits& typeBits);
     static BSONObj toBson(StringData data, Ordering ord, const TypeBits& types);
-    static BSONObj toBson(const char* buffer, size_t len, Ordering ord, const TypeBits& types);
+    /**
+     * Decodes the given KeyString buffer into it's BSONObj representation. This is marked as
+     * noexcept since the assumption is that 'buffer' is a valid KeyString buffer and this method
+     * is not expected to throw.
+     *
+     * If the buffer provided may not be valid, use the 'safe' version instead.
+     */
+    static BSONObj toBson(const char* buffer,
+                          size_t len,
+                          Ordering ord,
+                          const TypeBits& types) noexcept;
+    static BSONObj toBsonSafe(const char* buffer, size_t len, Ordering ord, const TypeBits& types);
 
     /**
      * Decodes a RecordId from the end of a buffer.

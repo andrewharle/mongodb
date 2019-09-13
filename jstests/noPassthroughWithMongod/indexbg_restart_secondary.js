@@ -4,7 +4,7 @@
  * The index build should resume when the secondary is restarted.
  */
 
-// @tags: [requires_persistence, requires_journaling]
+// @tags: [requires_persistence, requires_journaling, requires_replication]
 (function() {
     'use strict';
 
@@ -26,8 +26,6 @@
 
     var master = replTest.getPrimary();
     var second = replTest.getSecondary();
-
-    var secondId = replTest.getNodeId(second);
 
     var masterDB = master.getDB('bgIndexSec');
     var secondDB = second.getDB('bgIndexSec');
@@ -60,7 +58,9 @@
     // the oplog entry so it isn't replayed. If (A) is present without (B), then there are two ways
     // that the index can be rebuilt on startup and this test is only for the one triggered by (A).
     secondDB.adminCommand({fsync: 1});
-    replTest.restart(secondId, {}, /*signal=*/9, /*wait=*/true);
+
+    MongoRunner.stopMongod(second, 9, {allowedExitCode: MongoRunner.EXIT_SIGKILL});
+    replTest.start(second, {}, /*restart=*/true, /*wait=*/true);
 
     // Make sure secondary comes back.
     assert.soon(function() {
@@ -75,4 +75,5 @@
     assert.soon(function() {
         return 2 == secondDB.getCollection(collectionName).getIndexes().length;
     }, "Index build not resumed after restart", 30000, 50);
+    replTest.stopSet();
 }());

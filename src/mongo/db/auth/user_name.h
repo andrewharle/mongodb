@@ -1,28 +1,31 @@
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -32,8 +35,11 @@
 #include <string>
 
 
+#include "mongo/base/clonable_ptr.h"
 #include "mongo/base/disallow_copying.h"
+#include "mongo/base/status_with.h"
 #include "mongo/base/string_data.h"
+#include "mongo/util/mongoutils/str.h"
 
 namespace mongo {
 
@@ -46,6 +52,11 @@ class UserName {
 public:
     UserName() : _splitPoint(0) {}
     UserName(StringData user, StringData dbname);
+
+    /**
+     * Parses a string of the form "db.username" into a UserName object.
+     */
+    static StatusWith<UserName> parse(StringData userNameStr);
 
     /**
      * Gets the user part of a UserName.
@@ -66,6 +77,13 @@ public:
      */
     const std::string& getFullName() const {
         return _fullName;
+    }
+
+    /**
+     * Gets the full unambiguous unique name of a user as a string, formatted as "db.user"
+     */
+    std::string getUnambiguousName() const {
+        return str::stream() << getDB() << "." << getUser();
     }
 
     /**
@@ -100,13 +118,11 @@ std::ostream& operator<<(std::ostream& os, const UserName& name);
 class UserNameIterator {
 public:
     class Impl {
-        MONGO_DISALLOW_COPYING(Impl);
-
     public:
-        Impl(){};
+        Impl() = default;
         virtual ~Impl(){};
-        static Impl* clone(Impl* orig) {
-            return orig ? orig->doClone() : NULL;
+        std::unique_ptr<Impl> clone() const {
+            return std::unique_ptr<Impl>(doClone());
         }
         virtual bool more() const = 0;
         virtual const UserName& get() const = 0;
@@ -117,14 +133,8 @@ public:
         virtual Impl* doClone() const = 0;
     };
 
-    UserNameIterator() : _impl(nullptr) {}
-    UserNameIterator(const UserNameIterator& other) : _impl(Impl::clone(other._impl.get())) {}
-    explicit UserNameIterator(Impl* impl) : _impl(impl) {}
-
-    UserNameIterator& operator=(const UserNameIterator& other) {
-        _impl.reset(Impl::clone(other._impl.get()));
-        return *this;
-    }
+    UserNameIterator() = default;
+    explicit UserNameIterator(std::unique_ptr<Impl> impl) : _impl(std::move(impl)) {}
 
     bool more() const {
         return _impl.get() && _impl->more();
@@ -145,29 +155,27 @@ public:
     }
 
 private:
-    std::unique_ptr<Impl> _impl;
+    clonable_ptr<Impl> _impl;
 };
 
 
 template <typename ContainerIterator>
 class UserNameContainerIteratorImpl : public UserNameIterator::Impl {
-    MONGO_DISALLOW_COPYING(UserNameContainerIteratorImpl);
-
 public:
     UserNameContainerIteratorImpl(const ContainerIterator& begin, const ContainerIterator& end)
         : _curr(begin), _end(end) {}
-    virtual ~UserNameContainerIteratorImpl() {}
-    virtual bool more() const {
+    ~UserNameContainerIteratorImpl() override {}
+    bool more() const override {
         return _curr != _end;
     }
-    virtual const UserName& next() {
+    const UserName& next() override {
         return *(_curr++);
     }
-    virtual const UserName& get() const {
+    const UserName& get() const override {
         return *_curr;
     }
-    virtual UserNameIterator::Impl* doClone() const {
-        return new UserNameContainerIteratorImpl(_curr, _end);
+    UserNameIterator::Impl* doClone() const override {
+        return new UserNameContainerIteratorImpl(*this);
     }
 
 private:
@@ -178,12 +186,22 @@ private:
 template <typename ContainerIterator>
 UserNameIterator makeUserNameIterator(const ContainerIterator& begin,
                                       const ContainerIterator& end) {
-    return UserNameIterator(new UserNameContainerIteratorImpl<ContainerIterator>(begin, end));
+    return UserNameIterator(
+        std::make_unique<UserNameContainerIteratorImpl<ContainerIterator>>(begin, end));
 }
 
 template <typename Container>
 UserNameIterator makeUserNameIteratorForContainer(const Container& container) {
     return makeUserNameIterator(container.begin(), container.end());
+}
+
+template <typename Container>
+Container userNameIteratorToContainer(UserNameIterator it) {
+    Container container;
+    while (it.more()) {
+        container.emplace_back(it.next());
+    }
+    return container;
 }
 
 }  // namespace mongo

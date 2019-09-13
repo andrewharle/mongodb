@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,6 +40,10 @@
 #include <unistd.h>
 #endif
 
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
+
 #include <sstream>
 
 #include "mongo/util/assert_util.h"
@@ -56,11 +62,15 @@
 namespace mongo {
 namespace unittest {
 
-DeathTestImpl::DeathTestImpl(std::unique_ptr<Test> test) : _test(std::move(test)) {}
+DeathTestImpl::DeathTestImpl(stdx::function<std::unique_ptr<Test>()> makeTest)
+    : _makeTest(std::move(makeTest)) {}
 
 void DeathTestImpl::_doTest() {
-#ifdef _WIN32
+#if defined(_WIN32)
     log() << "Skipping death test on Windows";
+    return;
+#elif defined(__APPLE__) && (TARGET_OS_TV || TARGET_OS_WATCH)
+    log() << "Skipping death test on tvOS/watchOS";
     return;
 #else
     int pipes[2];
@@ -114,7 +124,8 @@ void DeathTestImpl::_doTest() {
     checkSyscall(setrlimit(RLIMIT_CORE, &kNoCoreDump));
 
     try {
-        _test->run();
+        auto test = _makeTest();
+        test->run();
     } catch (const TestAssertionFailureException& tafe) {
         log() << "Caught test exception while expecting death: " << tafe;
         // To fail the test, we must exit with a successful error code, because the parent process

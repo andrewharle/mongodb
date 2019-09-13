@@ -1,6 +1,6 @@
 # Don't UBSAN most of third_party, but do ubsan WT
 src:src/third_party/IntelRDFPMathLib20U1/*
-src:src/third_party/asio-asio-*/*
+src:src/third_party/asio-*/*
 src:src/third_party/boost-*/*
 src:src/third_party/gperftools-*/*
 src:src/third_party/icu4c-*/*
@@ -14,6 +14,9 @@ src:src/third_party/tz/*
 src:src/third_party/unicode-*/*
 src:src/third_party/yaml-cpp-*/*
 src:src/third_party/zlib-*/*
+
+# See SERVER-29505.
+src:src/third_party/timelib-*/*
 
 # See SERVER-22705. We depend on the C flexible array trick
 # which trips up UBSAN.

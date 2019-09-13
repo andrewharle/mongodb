@@ -3,7 +3,7 @@ load('jstests/readonly/lib/read_only_test.js');
 runReadOnlyTest(function() {
     'use strict';
     return {
-        name: 'aggregate',
+        name: 'aggregate_readonly',
 
         load: function(writableCollection) {
             assert.doesNotThrow(() => {
@@ -82,6 +82,7 @@ runReadOnlyTest(function() {
             var allowDiskUseCmd = {
                 aggregate: readableCollection.getName(),
                 pipeline: [],
+                cursor: {},
                 allowDiskUse: true
             };
 

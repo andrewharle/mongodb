@@ -6,6 +6,9 @@
 (function() {
     "use strict";
 
+    // Skip db hash check because of invalid index spec.
+    TestData.skipCheckDBHashes = true;
+
     load("jstests/replsets/rslib.js");
 
     const testName = "initial_sync_invalid_index_spec";
@@ -22,29 +25,32 @@
         {createIndexes: "test", indexes: [{v: 2, name: "x_1", key: {x: 1}, invalidOption: 1}]}));
 
     // Add another node to the replica set to allow an initial sync to occur.
-    replTest.add();
+    var initSyncNode = replTest.add();
+    var initSyncNodeAdminDB = initSyncNode.getDB("admin");
 
     clearRawMongoProgramOutput();
     reInitiateWithoutThrowingOnAbortedMember(replTest);
 
+    assert.soon(
+        function() {
+            try {
+                initSyncNodeAdminDB.runCommand({ping: 1});
+            } catch (e) {
+                return true;
+            }
+            return false;
+        },
+        "Node did not terminate due to invalid index spec during initial sync",
+        ReplSetTest.kDefaultTimeoutMS);
+
+    replTest.stop(initSyncNode, undefined, {allowedExitCode: MongoRunner.EXIT_ABRUPT});
+
     const msgInvalidOption = "The field 'invalidOption' is not valid for an index specification";
     const msgInitialSyncFatalAssertion = "Fatal assertion 40088 InitialSyncFailure";
 
-    // As part of the initsync-3dot2-rhel-62 evergreen variant, we run this test with a setParameter
-    // of "use3dot2InitialSync=true" which exercises 3.2 initial sync behavior. This path will
-    // trigger a different fatal assertion than the normal 3.4 path, which we need to handle here.
-    // TODO: Remove this assertion check when the 'use3dot2InitialSync' setParameter is retired.
-    const msg3dot2InitialSyncFatalAssertion = "Fatal Assertion 16233";
+    assert(rawMongoProgramOutput().match(msgInvalidOption) &&
+               rawMongoProgramOutput().match(msgInitialSyncFatalAssertion),
+           "Initial sync should have aborted on invalid index specification");
 
-    const assertFn = function() {
-        return rawMongoProgramOutput().match(msgInvalidOption) &&
-            (rawMongoProgramOutput().match(msgInitialSyncFatalAssertion) ||
-             rawMongoProgramOutput().match(msg3dot2InitialSyncFatalAssertion));
-    };
-    assert.soon(assertFn, "Initial sync should have aborted on invalid index specification");
-
-    replTest.stopSet(undefined,
-                     undefined,
-                     {allowedExitCodes: [MongoRunner.EXIT_ABRUPT, MongoRunner.EXIT_ABORT]});
-
+    replTest.stopSet();
 })();

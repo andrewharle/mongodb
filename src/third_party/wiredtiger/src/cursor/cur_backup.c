@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -13,9 +13,10 @@ static int __backup_list_append(
     WT_SESSION_IMPL *, WT_CURSOR_BACKUP *, const char *);
 static int __backup_list_uri_append(WT_SESSION_IMPL *, const char *, bool *);
 static int __backup_start(
-    WT_SESSION_IMPL *, WT_CURSOR_BACKUP *, const char *[]);
+    WT_SESSION_IMPL *, WT_CURSOR_BACKUP *, bool, const char *[]);
 static int __backup_stop(WT_SESSION_IMPL *, WT_CURSOR_BACKUP *);
-static int __backup_uri(WT_SESSION_IMPL *, const char *[], bool *, bool *);
+static int __backup_uri(
+    WT_SESSION_IMPL *, const char *[], bool, bool *, bool *);
 
 /*
  * __curbackup_next --
@@ -57,12 +58,29 @@ __curbackup_reset(WT_CURSOR *cursor)
 	WT_SESSION_IMPL *session;
 
 	cb = (WT_CURSOR_BACKUP *)cursor;
-	CURSOR_API_CALL(cursor, session, reset, NULL);
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, reset, NULL);
 
 	cb->next = 0;
 	F_CLR(cursor, WT_CURSTD_KEY_SET | WT_CURSTD_VALUE_SET);
 
 err:	API_END_RET(session, ret);
+}
+
+/*
+ * __backup_free --
+ *	Free list resources for a backup cursor.
+ */
+static void
+__backup_free(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
+{
+	int i;
+
+	if (cb->list != NULL) {
+		for (i = 0; cb->list[i] != NULL; ++i)
+			__wt_free(session, cb->list[i]);
+		__wt_free(session, cb->list);
+	}
+
 }
 
 /*
@@ -77,8 +95,8 @@ __curbackup_close(WT_CURSOR *cursor)
 	WT_SESSION_IMPL *session;
 
 	cb = (WT_CURSOR_BACKUP *)cursor;
-
-	CURSOR_API_CALL(cursor, session, close, NULL);
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, close, NULL);
+err:
 
 	/*
 	 * When starting a hot backup, we serialize hot backup cursors and set
@@ -89,13 +107,19 @@ __curbackup_close(WT_CURSOR *cursor)
 	 * discarded when the cursor is closed), because that cursor will never
 	 * not be responsible for cleanup.
 	 */
-	if (F_ISSET(cb, WT_CURBACKUP_LOCKER))
+	if (F_ISSET(cb, WT_CURBACKUP_DUP)) {
+		__backup_free(session, cb);
+		/* Make sure the original backup cursor is still open. */
+		WT_ASSERT(session, F_ISSET(session, WT_SESSION_BACKUP_CURSOR));
+		F_CLR(session, WT_SESSION_BACKUP_DUP);
+		F_CLR(cb, WT_CURBACKUP_DUP);
+	} else if (F_ISSET(cb, WT_CURBACKUP_LOCKER))
 		WT_TRET(__backup_stop(session, cb));
 
-	WT_TRET(__wt_cursor_close(cursor));
+	__wt_cursor_close(cursor);
 	session->bkp_cursor = NULL;
 
-err:	API_END_RET(session, ret);
+	API_END_RET(session, ret);
 }
 
 /*
@@ -103,8 +127,8 @@ err:	API_END_RET(session, ret);
  *	WT_SESSION->open_cursor method for the backup cursor type.
  */
 int
-__wt_curbackup_open(WT_SESSION_IMPL *session,
-    const char *uri, const char *cfg[], WT_CURSOR **cursorp)
+__wt_curbackup_open(WT_SESSION_IMPL *session, const char *uri,
+    WT_CURSOR *other, const char *cfg[], WT_CURSOR **cursorp)
 {
 	WT_CURSOR_STATIC_INIT(iface,
 	    __wt_cursor_get_key,		/* get-key */
@@ -119,9 +143,13 @@ __wt_curbackup_open(WT_SESSION_IMPL *session,
 	    __wt_cursor_notsup,			/* search */
 	    __wt_cursor_search_near_notsup,	/* search-near */
 	    __wt_cursor_notsup,			/* insert */
+	    __wt_cursor_modify_notsup,		/* modify */
 	    __wt_cursor_notsup,			/* update */
 	    __wt_cursor_notsup,			/* remove */
+	    __wt_cursor_notsup,			/* reserve */
 	    __wt_cursor_reconfigure_notsup,	/* reconfigure */
+	    __wt_cursor_notsup,			/* cache */
+	    __wt_cursor_reopen_notsup,		/* reopen */
 	    __curbackup_close);			/* close */
 	WT_CURSOR *cursor;
 	WT_CURSOR_BACKUP *cb;
@@ -129,16 +157,14 @@ __wt_curbackup_open(WT_SESSION_IMPL *session,
 
 	WT_STATIC_ASSERT(offsetof(WT_CURSOR_BACKUP, iface) == 0);
 
-	cb = NULL;
-
 	WT_RET(__wt_calloc_one(session, &cb));
-	cursor = &cb->iface;
+	cursor = (WT_CURSOR *)cb;
 	*cursor = iface;
-	cursor->session = &session->iface;
-	session->bkp_cursor = cb;
-
+	cursor->session = (WT_SESSION *)session;
 	cursor->key_format = "S";	/* Return the file names as the key. */
 	cursor->value_format = "";	/* No value. */
+
+	session->bkp_cursor = cb;
 
 	/*
 	 * Start the backup and fill in the cursor's list.  Acquire the schema
@@ -146,7 +172,7 @@ __wt_curbackup_open(WT_SESSION_IMPL *session,
 	 */
 	WT_WITH_CHECKPOINT_LOCK(session,
 	    WT_WITH_SCHEMA_LOCK(session,
-		ret = __backup_start(session, cb, cfg)));
+		ret = __backup_start(session, cb, other != NULL, cfg)));
 	WT_ERR(ret);
 
 	WT_ERR(__wt_cursor_init(cursor, uri, NULL, cfg, cursorp));
@@ -177,7 +203,7 @@ __backup_log_append(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb, bool active)
 	ret = 0;
 
 	if (conn->log) {
-		WT_ERR(__wt_log_get_all_files(
+		WT_ERR(__wt_log_get_backup_files(
 		    session, &logfiles, &logcount, &cb->maxid, active));
 		for (i = 0; i < logcount; i++)
 			WT_ERR(__backup_list_append(session, cb, logfiles[i]));
@@ -191,8 +217,8 @@ err:	WT_TRET(__wt_fs_directory_list_free(session, &logfiles, logcount));
  *	Start a backup.
  */
 static int
-__backup_start(
-    WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb, const char *cfg[])
+__backup_start(WT_SESSION_IMPL *session,
+    WT_CURSOR_BACKUP *cb, bool is_dup, const char *cfg[])
 {
 	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
@@ -208,58 +234,94 @@ __backup_start(
 	cb->list = NULL;
 	cb->list_next = 0;
 
+	WT_RET(__wt_inmem_unsupported_op(session, "backup cursor"));
+
 	/*
 	 * Single thread hot backups: we're holding the schema lock, so we
 	 * know we'll serialize with other attempts to start a hot backup.
 	 */
-	if (conn->hot_backup)
+	if (conn->hot_backup && !is_dup)
 		WT_RET_MSG(
 		    session, EINVAL, "there is already a backup cursor open");
 
-	/*
-	 * The hot backup copy is done outside of WiredTiger, which means file
-	 * blocks can't be freed and re-allocated until the backup completes.
-	 * The checkpoint code checks the backup flag, and if a backup cursor
-	 * is open checkpoints aren't discarded. We release the lock as soon
-	 * as we've set the flag, we don't want to block checkpoints, we just
-	 * want to make sure no checkpoints are deleted.  The checkpoint code
-	 * holds the lock until it's finished the checkpoint, otherwise we
-	 * could start a hot backup that would race with an already-started
-	 * checkpoint.
-	 *
-	 * We are holding the checkpoint and schema locks so schema operations
-	 * will not see the backup file list until it is complete and valid.
-	 */
-	__wt_writelock(session, &conn->hot_backup_lock);
-	conn->hot_backup = true;
-	conn->hot_backup_list = NULL;
-	__wt_writeunlock(session, &conn->hot_backup_lock);
+	if (F_ISSET(session, WT_SESSION_BACKUP_DUP) && is_dup)
+		WT_RET_MSG(session, EINVAL,
+		    "there is already a duplicate backup cursor open");
 
-	/* We're the lock holder, we own cleanup. */
-	F_SET(cb, WT_CURBACKUP_LOCKER);
+	if (!is_dup) {
+		/*
+		 * The hot backup copy is done outside of WiredTiger, which
+		 * means file blocks can't be freed and re-allocated until the
+		 * backup completes. The checkpoint code checks the backup flag,
+		 * and if a backup cursor is open checkpoints aren't discarded.
+		 * We release the lock as soon as we've set the flag, we don't
+		 * want to block checkpoints, we just want to make sure no
+		 * checkpoints are deleted.  The checkpoint code holds the lock
+		 * until it's finished the checkpoint, otherwise we could start
+		 * a hot backup that would race with an already-started
+		 * checkpoint.
+		 *
+		 * We are holding the checkpoint and schema locks so schema
+		 * operations will not see the backup file list until it is
+		 * complete and valid.
+		 */
+		__wt_writelock(session, &conn->hot_backup_lock);
+		conn->hot_backup = true;
+		conn->hot_backup_list = NULL;
+		__wt_writeunlock(session, &conn->hot_backup_lock);
+
+		/* We're the lock holder, we own cleanup. */
+		F_SET(cb, WT_CURBACKUP_LOCKER);
+
+		/*
+		 * Create a temporary backup file.  This must be opened before
+		 * generating the list of targets in backup_uri.  This file will
+		 * later be renamed to the correct name depending on whether or
+		 * not we're doing an incremental backup.  We need a temp file
+		 * so that if we fail or crash while filling it, the existence
+		 * of a partial file doesn't confuse restarting in the source
+		 * database.
+		 */
+		WT_ERR(__wt_fopen(session, WT_BACKUP_TMP,
+		    WT_FS_OPEN_CREATE, WT_STREAM_WRITE, &cb->bfs));
+	}
 
 	/*
-	 * Create a temporary backup file.  This must be opened before
-	 * generating the list of targets in backup_uri.  This file will
-	 * later be renamed to the correct name depending on whether or not
-	 * we're doing an incremental backup.  We need a temp file so that if
-	 * we fail or crash while filling it, the existence of a partial file
-	 * doesn't confuse restarting in the source database.
-	 */
-	WT_ERR(__wt_fopen(session, WT_BACKUP_TMP,
-	    WT_FS_OPEN_CREATE, WT_STREAM_WRITE, &cb->bfs));
-	/*
-	 * If a list of targets was specified, work our way through them.
-	 * Else, generate a list of all database objects.
-	 *
-	 * Include log files if doing a full backup, and copy them before
-	 * copying data files to avoid rolling the metadata forward across
-	 * a checkpoint that completes during the backup.
+	 * If targets were specified, add them to the list. Otherwise it is a
+	 * full backup, add all database objects and log files to the list.
 	 */
 	target_list = false;
-	WT_ERR(__backup_uri(session, cfg, &target_list, &log_only));
-
+	WT_ERR(__backup_uri(session,
+	    cfg, is_dup, &target_list, &log_only));
+	/*
+	 * For a duplicate cursor, all the work is done in backup_uri. The only
+	 * usage accepted is "target=("log:")" so error if not log only.
+	 */
+	if (is_dup) {
+		if (!log_only)
+			WT_ERR_MSG(session, EINVAL,
+			    "duplicate backup cursor must be for logs only.");
+		F_SET(cb, WT_CURBACKUP_DUP);
+		F_SET(session, WT_SESSION_BACKUP_DUP);
+		goto done;
+	}
 	if (!target_list) {
+		/*
+		 * It's important to first gather the log files to be copied
+		 * (which internally starts a new log file), followed by
+		 * choosing a checkpoint to reference in the WiredTiger.backup
+		 * file.
+		 *
+		 * Applications may have logic that takes a checkpoint, followed
+		 * by performing a write that should only appear in the new
+		 * checkpoint. This ordering prevents choosing the prior
+		 * checkpoint, but including the write in the log files
+		 * returned.
+		 *
+		 * It is also possible, and considered legal, to choose the new
+		 * checkpoint, but not include the log file that contains the
+		 * log entry for taking the new checkpoint.
+		 */
 		WT_ERR(__backup_log_append(session, cb, true));
 		WT_ERR(__backup_all(session));
 	}
@@ -267,9 +329,15 @@ __backup_start(
 	/* Add the hot backup and standard WiredTiger files to the list. */
 	if (log_only) {
 		/*
-		 * We also open an incremental backup source file so that we
-		 * can detect a crash with an incremental backup existing in
-		 * the source directory versus an improper destination.
+		 * If this is not a duplicate cursor, using the log target is an
+		 * incremental backup. If this is a duplicate cursor then using
+		 * the log target on an existing backup cursor means this cursor
+		 * returns the current list of log files. That list was set up
+		 * when parsing the URI so we don't have anything to do here.
+		 *
+		 * We also open an incremental backup source file so that we can
+		 * detect a crash with an incremental backup existing in the
+		 * source directory versus an improper destination.
 		 */
 		dest = WT_INCREMENTAL_BACKUP;
 		WT_ERR(__wt_fopen(session, WT_INCREMENTAL_SRC,
@@ -291,17 +359,27 @@ __backup_start(
 	}
 
 err:	/* Close the hot backup file. */
-	WT_TRET(__wt_fclose(session, &cb->bfs));
 	if (srcfs != NULL)
 		WT_TRET(__wt_fclose(session, &srcfs));
+	/*
+	 * Sync and rename the temp file into place.
+	 */
+	if (ret == 0)
+		ret = __wt_sync_and_rename(session,
+		    &cb->bfs, WT_BACKUP_TMP, dest);
 	if (ret == 0) {
-		WT_ASSERT(session, dest != NULL);
-		WT_TRET(__wt_fs_rename(session, WT_BACKUP_TMP, dest, false));
 		__wt_writelock(session, &conn->hot_backup_lock);
 		conn->hot_backup_list = cb->list;
 		__wt_writeunlock(session, &conn->hot_backup_lock);
+		F_SET(session, WT_SESSION_BACKUP_CURSOR);
 	}
+	/*
+	 * If the file hasn't been closed, do it now.
+	 */
+	if (cb->bfs != NULL)
+		WT_TRET(__wt_fclose(session, &cb->bfs));
 
+done:
 	return (ret);
 }
 
@@ -314,27 +392,26 @@ __backup_stop(WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb)
 {
 	WT_CONNECTION_IMPL *conn;
 	WT_DECL_RET;
-	int i;
 
 	conn = S2C(session);
 
 	/* Release all btree names held by the backup. */
+	WT_ASSERT(session, !F_ISSET(cb, WT_CURBACKUP_DUP));
+	/* If it's not a dup backup cursor, make sure one isn't open. */
+	WT_ASSERT(session, !F_ISSET(session, WT_SESSION_BACKUP_DUP));
 	__wt_writelock(session, &conn->hot_backup_lock);
 	conn->hot_backup_list = NULL;
 	__wt_writeunlock(session, &conn->hot_backup_lock);
-	if (cb->list != NULL) {
-		for (i = 0; cb->list[i] != NULL; ++i)
-			__wt_free(session, cb->list[i]);
-		__wt_free(session, cb->list);
-	}
+	__backup_free(session, cb);
 
 	/* Remove any backup specific file. */
 	WT_TRET(__wt_backup_file_remove(session));
 
-	/* Checkpoint deletion can proceed, as can the next hot backup. */
+	/* Checkpoint deletion and next hot backup can proceed. */
 	__wt_writelock(session, &conn->hot_backup_lock);
 	conn->hot_backup = false;
 	__wt_writeunlock(session, &conn->hot_backup_lock);
+	F_CLR(session, WT_SESSION_BACKUP_CURSOR);
 
 	return (ret);
 }
@@ -356,15 +433,15 @@ __backup_all(WT_SESSION_IMPL *session)
  *	Backup a list of objects.
  */
 static int
-__backup_uri(WT_SESSION_IMPL *session,
-    const char *cfg[], bool *foundp, bool *log_only)
+__backup_uri(WT_SESSION_IMPL *session, const char *cfg[],
+    bool is_dup, bool *foundp, bool *log_only)
 {
 	WT_CONFIG targetconf;
 	WT_CONFIG_ITEM cval, k, v;
 	WT_DECL_ITEM(tmp);
 	WT_DECL_RET;
-	bool target_list;
 	const char *uri;
+	bool target_list;
 
 	*foundp = *log_only = false;
 
@@ -398,9 +475,10 @@ __backup_uri(WT_SESSION_IMPL *session,
 		if (WT_PREFIX_MATCH(uri, "log:")) {
 			/*
 			 * Log archive cannot mix with incremental backup, don't
-			 * let that happen.
+			 * let that happen. If we're a duplicate cursor
+			 * archiving is already temporarily suspended.
 			 */
-			if (FLD_ISSET(
+			if (!is_dup && FLD_ISSET(
 			    S2C(session)->log_flags, WT_CONN_LOG_ARCHIVE))
 				WT_ERR_MSG(session, EINVAL,
 				    "incremental backup not possible when "
@@ -410,8 +488,16 @@ __backup_uri(WT_SESSION_IMPL *session,
 			    session, session->bkp_cursor, false));
 		} else {
 			*log_only = false;
-			WT_ERR(__wt_schema_worker(session,
+
+			/*
+			 * If backing up individual tables, we have to include
+			 * indexes, which may involve opening those indexes.
+			 * Acquire the table lock in write mode for that case.
+			 */
+			WT_WITH_TABLE_WRITE_LOCK(session,
+			    ret = __wt_schema_worker(session,
 			    uri, NULL, __backup_list_uri_append, cfg, 0));
+			WT_ERR(ret);
 		}
 	}
 	WT_ERR_NOTFOUND_OK(ret);
@@ -469,12 +555,13 @@ __backup_list_uri_append(
 	    !WT_PREFIX_MATCH(name, "colgroup:") &&
 	    !WT_PREFIX_MATCH(name, "index:") &&
 	    !WT_PREFIX_MATCH(name, "lsm:") &&
+	    !WT_PREFIX_MATCH(name, WT_SYSTEM_PREFIX) &&
 	    !WT_PREFIX_MATCH(name, "table:"))
 		WT_RET_MSG(session, ENOTSUP,
 		    "hot backup is not supported for objects of type %s",
 		    name);
 
-	/* Ignore the lookaside table. */
+	/* Ignore the lookaside table or system info. */
 	if (strcmp(name, WT_LAS_URI) == 0)
 		return (0);
 
@@ -483,6 +570,13 @@ __backup_list_uri_append(
 	ret = __wt_fprintf(session, cb->bfs, "%s\n%s\n", name, value);
 	__wt_free(session, value);
 	WT_RET(ret);
+
+	/*
+	 * We want to retain the system information in the backup metadata
+	 * file above, but there is no file object to copy so return now.
+	 */
+	if (WT_PREFIX_MATCH(name, WT_SYSTEM_PREFIX))
+		return (0);
 
 	/* Add file type objects to the list of files to be copied. */
 	if (WT_PREFIX_MATCH(name, "file:"))
@@ -499,8 +593,8 @@ static int
 __backup_list_append(
     WT_SESSION_IMPL *session, WT_CURSOR_BACKUP *cb, const char *uri)
 {
-	char **p;
 	const char *name;
+	char **p;
 
 	/* Leave a NULL at the end to mark the end of the list. */
 	WT_RET(__wt_realloc_def(session, &cb->list_allocated,

@@ -1,6 +1,7 @@
 /**
  * Test that a TTL index on a capped collection doesn't crash the server or cause the TTL monitor
  * to skip processing other (non-capped) collections on the database.
+ * @tags: [requires_capped]
  */
 (function() {
     "use strict";
@@ -52,7 +53,7 @@
     var ttlPasses = testDB.serverStatus().metrics.ttl.passes;
     assert.commandWorked(testDB.adminCommand({setParameter: 1, ttlMonitorEnabled: true}));
 
-    var timeoutSeconds = 5;
+    var timeoutSeconds = 60;
     assert.soon(
         function checkIfTTLMonitorRan() {
             // The 'ttl.passes' metric is incremented when the TTL monitor starts processing the

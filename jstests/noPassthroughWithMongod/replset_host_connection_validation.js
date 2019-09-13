@@ -1,4 +1,6 @@
 // Test --host with a replica set.
+// @tags: [requires_replication]
+
 (function() {
     'use strict';
 
@@ -25,6 +27,7 @@
         const exitCode = _runMongoProgram(...args);
         jsTest.log("Inner mode test finished, exit code was " + exitCode);
 
+        replTest.stopSet();
         // Pass the inner test's exit code back as the outer test's exit code
         if (exitCode != 0) {
             doassert("inner test failed with exit code " + exitCode);

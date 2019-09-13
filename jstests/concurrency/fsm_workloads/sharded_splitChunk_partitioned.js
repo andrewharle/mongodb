@@ -5,6 +5,8 @@
  *
  * Exercises the concurrent splitChunk operations, but each thread operates on its own set of
  * chunks.
+ *
+ * @tags: [requires_sharding, assumes_balancer_off, assumes_autosplit_off]
  */
 
 load('jstests/concurrency/fsm_libs/extend_workload.js');                // for extendWorkload
@@ -39,8 +41,8 @@ var $config = extendWorkload($config, function($config, $super) {
         // Save the number of chunks before the splitChunk operation. This will be used
         // to verify that the number of chunks after a successful splitChunk increases
         // by one, or after a failed splitChunk stays the same.
-        var numChunksBefore =
-            ChunkHelper.getNumChunks(config, this.partition.chunkLower, this.partition.chunkUpper);
+        var numChunksBefore = ChunkHelper.getNumChunks(
+            config, ns, this.partition.chunkLower, this.partition.chunkUpper);
 
         // Use chunk_helper.js's splitChunk wrapper to tolerate acceptable failures
         // and to use a limited number of retries with exponential backoff.
@@ -67,7 +69,7 @@ var $config = extendWorkload($config, function($config, $super) {
                 // If the operation failed, verify that there is still only one chunk
                 // between the old chunk's lower and upper bounds.
                 var numChunksBetweenOldChunksBounds =
-                    ChunkHelper.getNumChunks(conn, chunk.min._id, chunk.max._id);
+                    ChunkHelper.getNumChunks(conn, ns, chunk.min._id, chunk.max._id);
                 if (splitChunkRes.ok) {
                     msg = 'splitChunk succeeded but the config does not see exactly 2 chunks ' +
                         'between the chunk bounds.\n' + msgBase;
@@ -82,7 +84,7 @@ var $config = extendWorkload($config, function($config, $super) {
                 // of chunks in our partition has increased by 1. If it failed, verify
                 // that it has stayed the same.
                 var numChunksAfter = ChunkHelper.getNumChunks(
-                    config, this.partition.chunkLower, this.partition.chunkUpper);
+                    config, ns, this.partition.chunkLower, this.partition.chunkUpper);
                 if (splitChunkRes.ok) {
                     msg = 'splitChunk succeeded but the config does nnot see exactly 1 more ' +
                         'chunk between the chunk bounds.\n' + msgBase;
@@ -125,7 +127,7 @@ var $config = extendWorkload($config, function($config, $super) {
             // the old chunk's lower and upper bounds. If the operation failed, verify that the
             // mongos still only sees one chunk between the old chunk's lower and upper bounds.
             var numChunksBetweenOldChunksBounds =
-                ChunkHelper.getNumChunks(mongos, chunk.min._id, chunk.max._id);
+                ChunkHelper.getNumChunks(mongos, ns, chunk.min._id, chunk.max._id);
             if (splitChunkRes.ok) {
                 msg = 'splitChunk succeeded but the mongos does not see exactly 2 chunks ' +
                     'between the chunk bounds.\n' + msgBase;
@@ -139,7 +141,7 @@ var $config = extendWorkload($config, function($config, $super) {
             // If the splitChunk operation succeeded, verify that the total number of chunks in our
             // partition has increased by 1. If it failed, verify that it has stayed the same.
             var numChunksAfter = ChunkHelper.getNumChunks(
-                mongos, this.partition.chunkLower, this.partition.chunkUpper);
+                mongos, ns, this.partition.chunkLower, this.partition.chunkUpper);
             if (splitChunkRes.ok) {
                 msg = 'splitChunk succeeded but the mongos does nnot see exactly 1 more ' +
                     'chunk between the chunk bounds.\n' + msgBase;

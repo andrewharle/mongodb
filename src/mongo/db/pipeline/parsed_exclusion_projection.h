@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -64,7 +66,7 @@ public:
     /**
      * Applies this tree of exclusions to the input document.
      */
-    Document applyProjection(Document input) const;
+    Document applyProjection(const Document& input) const;
 
     /**
      * Creates the child if it doesn't already exist. 'field' is not allowed to be dotted.
@@ -97,25 +99,26 @@ private:
  */
 class ParsedExclusionProjection : public ParsedAggregationProjection {
 public:
-    ParsedExclusionProjection() : ParsedAggregationProjection(), _root(new ExclusionNode()) {}
+    ParsedExclusionProjection(const boost::intrusive_ptr<ExpressionContext>& expCtx)
+        : ParsedAggregationProjection(expCtx), _root(new ExclusionNode()) {}
 
-    ProjectionType getType() const final {
-        return ProjectionType::kExclusion;
+    TransformerType getType() const final {
+        return TransformerType::kExclusionProjection;
     }
 
-    Document serialize(bool explain = false) const final;
+    Document serializeStageOptions(boost::optional<ExplainOptions::Verbosity> explain) const final;
 
     /**
      * Parses the projection specification given by 'spec', populating internal data structures.
      */
-    void parse(const boost::intrusive_ptr<ExpressionContext>& expCtx, const BSONObj& spec) final {
-        parse(expCtx, spec, _root.get(), 0);
+    void parse(const BSONObj& spec) final {
+        parse(spec, _root.get(), 0);
     }
 
     /**
      * Exclude the fields specified.
      */
-    Document applyProjection(Document inputDoc) const final;
+    Document applyProjection(const Document& inputDoc) const final;
 
     DocumentSource::GetDepsReturn addDependencies(DepsTracker* deps) const final {
         return DocumentSource::SEE_NEXT;
@@ -124,7 +127,7 @@ public:
     DocumentSource::GetModPathsReturn getModifiedPaths() const final {
         std::set<std::string> modifiedPaths;
         _root->addModifiedPaths(&modifiedPaths);
-        return {DocumentSource::GetModPathsReturn::Type::kFiniteSet, std::move(modifiedPaths)};
+        return {DocumentSource::GetModPathsReturn::Type::kFiniteSet, std::move(modifiedPaths), {}};
     }
 
 private:
@@ -134,10 +137,7 @@ private:
      * Traverses 'spec' and parses each field. Adds any excluded fields at this level to 'node',
      * and recurses on any sub-objects.
      */
-    void parse(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-               const BSONObj& spec,
-               ExclusionNode* node,
-               size_t depth);
+    void parse(const BSONObj& spec, ExclusionNode* node, size_t depth);
 
 
     // The ExclusionNode tree does most of the execution work once constructed.

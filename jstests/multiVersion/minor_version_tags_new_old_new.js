@@ -1,10 +1,9 @@
-load("jstests/replsets/libs/tags.js");
-
 (function() {
     'use strict';
 
-    // 3.2.1 is the final version to use the old style replSetUpdatePosition command.
-    var oldVersion = "3.2.1";
+    load("jstests/replsets/libs/tags.js");
+
+    var oldVersion = "last-stable";
     var newVersion = "latest";
     let nodes = [
         {binVersion: newVersion},
@@ -13,6 +12,5 @@ load("jstests/replsets/libs/tags.js");
         {binVersion: oldVersion},
         {binVersion: newVersion}
     ];
-    new TagsTest({nodes: nodes, forceWriteMode: 'commands', setFeatureCompatibilityVersion: '3.2'})
-        .run();
+    new TagsTest({nodes: nodes, forceWriteMode: 'commands'}).run();
 }());

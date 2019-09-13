@@ -19,10 +19,14 @@
  * with the planCacheListPlans command on the same query shape with the index filters.
  *
  * @tags: [
+ *   # Cannot implicitly shard accessed collections because of collection existing when none
+ *   # expected.
+ *   assumes_no_implicit_collection_creation_after_drop,
  *   # This test attempts to perform queries with plan cache filters set up. The former operation
  *   # may be routed to a secondary in the replica set, whereas the latter must be routed to the
  *   # primary.
  *   assumes_read_preference_unchanged,
+ *   does_not_support_stepdowns,
  * ]
  */
 
@@ -222,10 +226,10 @@ assert.commandWorked(t.runCommand('planCacheSetFilter',
 // pattern.
 
 explain = t.find(queryAA).explain();
-assert(isIxscan(explain.queryPlanner.winningPlan), "Expected index scan: " + tojson(explain));
+assert(isIxscan(db, explain.queryPlanner.winningPlan), "Expected index scan: " + tojson(explain));
 
 explain = t.find(queryAA).collation(collationEN).explain();
-assert(isIxscan(explain.queryPlanner.winningPlan), "Expected index scan: " + tojson(explain));
+assert(isIxscan(db, explain.queryPlanner.winningPlan), "Expected index scan: " + tojson(explain));
 
 // Ensure that index names in planCacheSetFilter only select matching names.
 
@@ -233,4 +237,43 @@ assert.commandWorked(
     t.runCommand('planCacheSetFilter', {query: queryAA, collation: collationEN, indexes: ["a_1"]}));
 
 explain = t.find(queryAA).collation(collationEN).explain();
-assert(isCollscan(explain.queryPlanner.winningPlan), "Expected collscan: " + tojson(explain));
+assert(isCollscan(db, explain.queryPlanner.winningPlan), "Expected collscan: " + tojson(explain));
+
+//
+// Test that planCacheSetFilter and planCacheClearFilters allow queries containing $expr.
+//
+
+t.drop();
+assert.writeOK(t.insert({a: "a"}));
+assert.commandWorked(t.createIndex(indexA1, {name: "a_1"}));
+
+assert.commandWorked(t.runCommand(
+    "planCacheSetFilter", {query: {a: "a", $expr: {$eq: ["$a", "a"]}}, indexes: [indexA1]}));
+filters = getFilters();
+assert.eq(1, filters.length, tojson(filters));
+assert.eq({a: "a", $expr: {$eq: ["$a", "a"]}}, filters[0].query, tojson(filters[0]));
+
+assert.commandWorked(
+    t.runCommand("planCacheClearFilters", {query: {a: "a", $expr: {$eq: ["$a", "a"]}}}));
+filters = getFilters();
+assert.eq(0, filters.length, tojson(filters));
+
+//
+// Test that planCacheSetFilter and planCacheClearFilters do not allow queries containing $expr with
+// unbound variables.
+//
+
+t.drop();
+assert.writeOK(t.insert({a: "a"}));
+assert.commandWorked(t.createIndex(indexA1, {name: "a_1"}));
+
+assert.commandFailed(
+    t.runCommand("planCacheSetFilter",
+                 {query: {a: "a", $expr: {$eq: ["$a", "$$unbound"]}}, indexes: [indexA1]}));
+filters = getFilters();
+assert.eq(0, filters.length, tojson(filters));
+
+assert.commandFailed(
+    t.runCommand("planCacheClearFilters", {query: {a: "a", $expr: {$eq: ["$a", "$$unbound"]}}}));
+filters = getFilters();
+assert.eq(0, filters.length, tojson(filters));

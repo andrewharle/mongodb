@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -48,8 +48,8 @@ main(int argc, char *argv[])
 	WT_RAND_STATE rnd;
 	size_t len;
 	uint32_t hw, sw;
-	u_int i, j;
 	uint8_t *data;
+	u_int i, j;
 
 	opts = &_opts;
 	memset(opts, 0, sizeof(*opts));

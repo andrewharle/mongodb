@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,6 +35,7 @@
 #include "mongo/db/repl/repl_set_config.h"
 #include "mongo/db/repl/replication_coordinator.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/stdx/functional.h"
 
 namespace mongo {
 
@@ -50,16 +53,22 @@ class ReplicationCoordinatorMock : public ReplicationCoordinator {
     MONGO_DISALLOW_COPYING(ReplicationCoordinatorMock);
 
 public:
-    ReplicationCoordinatorMock(const ReplSettings& settings);
+    ReplicationCoordinatorMock(ServiceContext* service, const ReplSettings& settings);
+
+    /**
+     * Creates a ReplicationCoordinatorMock with ReplSettings for a one-node replica set.
+     */
+    explicit ReplicationCoordinatorMock(ServiceContext* service);
+
     virtual ~ReplicationCoordinatorMock();
 
-    virtual void startup(OperationContext* txn);
+    virtual void startup(OperationContext* opCtx);
 
-    virtual void shutdown(OperationContext* txn);
+    virtual void enterTerminalShutdown();
 
-    virtual ReplicationExecutor* getExecutor() override {
-        return nullptr;
-    };
+    virtual void shutdown(OperationContext* opCtx);
+
+    virtual void appendDiagnosticBSON(BSONObjBuilder* bob) override {}
 
     virtual const ReplSettings& getSettings() const;
 
@@ -78,36 +87,38 @@ public:
     virtual void clearSyncSourceBlacklist();
 
     virtual ReplicationCoordinator::StatusAndDuration awaitReplication(
-        OperationContext* txn, const OpTime& opTime, const WriteConcernOptions& writeConcern);
+        OperationContext* opCtx, const OpTime& opTime, const WriteConcernOptions& writeConcern);
 
-    virtual ReplicationCoordinator::StatusAndDuration awaitReplicationOfLastOpForClient(
-        OperationContext* txn, const WriteConcernOptions& writeConcern);
-
-    virtual Status stepDown(OperationContext* txn,
+    virtual Status stepDown(OperationContext* opCtx,
                             bool force,
                             const Milliseconds& waitTime,
                             const Milliseconds& stepdownTime);
 
     virtual bool isMasterForReportingPurposes();
 
-    virtual bool canAcceptWritesForDatabase(StringData dbName);
+    virtual bool canAcceptWritesForDatabase(OperationContext* opCtx, StringData dbName);
 
-    bool canAcceptWritesFor(const NamespaceString& ns) override;
+    virtual bool canAcceptWritesForDatabase_UNSAFE(OperationContext* opCtx, StringData dbName);
+
+    bool canAcceptWritesFor(OperationContext* opCtx, const NamespaceString& ns) override;
+
+    bool canAcceptWritesFor_UNSAFE(OperationContext* opCtx, const NamespaceString& ns) override;
 
     virtual Status checkIfWriteConcernCanBeSatisfied(const WriteConcernOptions& writeConcern) const;
 
-    virtual Status checkCanServeReadsFor(OperationContext* txn,
+    virtual Status checkCanServeReadsFor(OperationContext* opCtx,
                                          const NamespaceString& ns,
                                          bool slaveOk);
+    virtual Status checkCanServeReadsFor_UNSAFE(OperationContext* opCtx,
+                                                const NamespaceString& ns,
+                                                bool slaveOk);
 
-    virtual bool shouldRelaxIndexConstraints(const NamespaceString& ns);
-
-    virtual Status setLastOptimeForSlave(const OID& rid, const Timestamp& ts);
+    virtual bool shouldRelaxIndexConstraints(OperationContext* opCtx, const NamespaceString& ns);
 
     virtual void setMyLastAppliedOpTime(const OpTime& opTime);
     virtual void setMyLastDurableOpTime(const OpTime& opTime);
 
-    virtual void setMyLastAppliedOpTimeForward(const OpTime& opTime);
+    virtual void setMyLastAppliedOpTimeForward(const OpTime& opTime, DataConsistency consistency);
     virtual void setMyLastDurableOpTimeForward(const OpTime& opTime);
 
     virtual void resetMyLastOpTimes();
@@ -117,16 +128,19 @@ public:
     virtual OpTime getMyLastAppliedOpTime() const;
     virtual OpTime getMyLastDurableOpTime() const;
 
-    virtual Status waitUntilOpTimeForRead(OperationContext* txn,
+    virtual Status waitUntilOpTimeForRead(OperationContext* opCtx,
                                           const ReadConcernArgs& settings) override;
 
+    virtual Status waitUntilOpTimeForReadUntil(OperationContext* opCtx,
+                                               const ReadConcernArgs& settings,
+                                               boost::optional<Date_t> deadline) override;
     virtual OID getElectionId();
 
     virtual OID getMyRID() const;
 
     virtual int getMyId() const;
 
-    virtual bool setFollowerMode(const MemberState& newState);
+    virtual Status setFollowerMode(const MemberState& newState);
 
     virtual ApplierState getApplierState();
 
@@ -136,14 +150,14 @@ public:
 
     virtual void signalUpstreamUpdater();
 
-    virtual Status resyncData(OperationContext* txn, bool waitUntilCompleted) override;
+    virtual Status resyncData(OperationContext* opCtx, bool waitUntilCompleted) override;
 
-    virtual StatusWith<BSONObj> prepareReplSetUpdatePositionCommand(
-        ReplSetUpdatePositionCommandStyle commandStyle) const override;
+    virtual StatusWith<BSONObj> prepareReplSetUpdatePositionCommand() const override;
 
     virtual Status processReplSetGetStatus(BSONObjBuilder*, ReplSetGetStatusResponseStyle);
 
-    virtual void fillIsMasterForReplSet(IsMasterResponse* result);
+    void fillIsMasterForReplSet(IsMasterResponse* result,
+                                const SplitHorizon::Parameters& horizon) override;
 
     virtual void appendSlaveInfoData(BSONObjBuilder* result);
 
@@ -163,7 +177,7 @@ public:
 
     virtual bool getMaintenanceMode();
 
-    virtual Status processReplSetSyncFrom(OperationContext* txn,
+    virtual Status processReplSetSyncFrom(OperationContext* opCtx,
                                           const HostAndPort& target,
                                           BSONObjBuilder* resultObj);
 
@@ -172,28 +186,20 @@ public:
     virtual Status processHeartbeat(const ReplSetHeartbeatArgs& args,
                                     ReplSetHeartbeatResponse* response);
 
-    virtual Status processReplSetReconfig(OperationContext* txn,
+    virtual Status processReplSetReconfig(OperationContext* opCtx,
                                           const ReplSetReconfigArgs& args,
                                           BSONObjBuilder* resultObj);
 
-    virtual Status processReplSetInitiate(OperationContext* txn,
+    virtual Status processReplSetInitiate(OperationContext* opCtx,
                                           const BSONObj& configObj,
                                           BSONObjBuilder* resultObj);
-
-    virtual Status processReplSetGetRBID(BSONObjBuilder* resultObj);
-
-    virtual void incrementRollbackID();
 
     virtual Status processReplSetFresh(const ReplSetFreshArgs& args, BSONObjBuilder* resultObj);
 
     virtual Status processReplSetElect(const ReplSetElectArgs& args, BSONObjBuilder* resultObj);
 
-    virtual Status processReplSetUpdatePosition(const OldUpdatePositionArgs& updates,
-                                                long long* configVersion);
     virtual Status processReplSetUpdatePosition(const UpdatePositionArgs& updates,
                                                 long long* configVersion);
-
-    virtual Status processHandshake(OperationContext* txn, const HandshakeArgs& handshake);
 
     virtual bool buildsIndexes();
 
@@ -209,7 +215,9 @@ public:
 
     virtual void blacklistSyncSource(const HostAndPort& host, Date_t until);
 
-    virtual void resetLastOpTimesFromOplog(OperationContext* txn);
+    virtual void resetLastOpTimesFromOplog(OperationContext* opCtx, DataConsistency consistency);
+
+    bool lastOpTimesWereReset() const;
 
     virtual bool shouldChangeSyncSource(const HostAndPort& currentSource,
                                         const rpc::ReplSetMetadata& replMetadata,
@@ -217,7 +225,7 @@ public:
 
     virtual OpTime getLastCommittedOpTime() const;
 
-    virtual Status processReplSetRequestVotes(OperationContext* txn,
+    virtual Status processReplSetRequestVotes(OperationContext* opCtx,
                                               const ReplSetRequestVotesArgs& args,
                                               ReplSetRequestVotesResponse* response);
 
@@ -236,22 +244,14 @@ public:
 
     virtual long long getTerm();
 
-    virtual Status updateTerm(OperationContext* txn, long long term);
-
-    virtual SnapshotName reserveSnapshotName(OperationContext* txn);
-
-    virtual void forceSnapshotCreation() override;
-
-    virtual void createSnapshot(OperationContext* txn,
-                                OpTime timeOfSnapshot,
-                                SnapshotName name) override;
+    virtual Status updateTerm(OperationContext* opCtx, long long term);
 
     virtual void dropAllSnapshots() override;
 
     virtual OpTime getCurrentCommittedSnapshotOpTime() const override;
 
-    virtual void waitUntilSnapshotCommitted(OperationContext* txn,
-                                            const SnapshotName& untilSnapshot) override;
+    virtual void waitUntilSnapshotCommitted(OperationContext* opCtx,
+                                            const Timestamp& untilSnapshot) override;
 
     virtual size_t getNumUncommittedSnapshots() override;
 
@@ -261,7 +261,7 @@ public:
     virtual ReplSettings::IndexPrefetchConfig getIndexPrefetchConfig() const override;
     virtual void setIndexPrefetchConfig(const ReplSettings::IndexPrefetchConfig cfg) override;
 
-    virtual Status stepUpIfEligible() override;
+    virtual Status stepUpIfEligible(bool skipDryRun) override;
 
     /**
      * Sets the return value for calls to getConfig.
@@ -269,20 +269,41 @@ public:
     void setGetConfigReturnValue(ReplSetConfig returnValue);
 
     /**
+     * Sets the function to generate the return value for calls to awaitReplication().
+     * 'opTime' is the optime passed to awaitReplication().
+     */
+    using AwaitReplicationReturnValueFunction = stdx::function<StatusAndDuration(const OpTime&)>;
+    void setAwaitReplicationReturnValueFunction(
+        AwaitReplicationReturnValueFunction returnValueFunction);
+
+    /**
      * Always allow writes even if this node is not master. Used by sharding unit tests.
      */
     void alwaysAllowWrites(bool allowWrites);
 
+    void setMaster(bool isMaster);
+
+    virtual ServiceContext* getServiceContext() override {
+        return _service;
+    }
+
     virtual Status abortCatchupIfNeeded() override;
+
+    void signalDropPendingCollectionsRemovedFromStorage() final;
 
 private:
     AtomicUInt64 _snapshotNameGenerator;
-    const ReplSettings _settings;
+    ServiceContext* const _service;
+    ReplSettings _settings;
     MemberState _memberState;
     OpTime _myLastDurableOpTime;
     OpTime _myLastAppliedOpTime;
     ReplSetConfig _getConfigReturnValue;
+    AwaitReplicationReturnValueFunction _awaitReplicationReturnValueFunction = [](const OpTime&) {
+        return StatusAndDuration(Status::OK(), Milliseconds(0));
+    };
     bool _alwaysAllowWrites = false;
+    bool _resetLastOpTimesCalled = false;
 };
 
 }  // namespace repl

@@ -1,25 +1,25 @@
-// expression_leaf.cpp
 
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -27,6 +27,8 @@
  *    exception statement from all source files in the program, then also delete
  *    it in the license file.
  */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/db/matcher/expression_leaf.h"
 
@@ -39,6 +41,7 @@
 #include "mongo/config.h"
 #include "mongo/db/field_ref.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/db/matcher/path.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/stdx/memory.h"
@@ -46,33 +49,20 @@
 
 namespace mongo {
 
-Status LeafMatchExpression::setPath(StringData path) {
-    _path = path;
-    return _elementPath.init(_path);
+ComparisonMatchExpressionBase::ComparisonMatchExpressionBase(
+    MatchType type,
+    StringData path,
+    const BSONElement& rhs,
+    ElementPath::LeafArrayBehavior leafArrBehavior,
+    ElementPath::NonLeafArrayBehavior nonLeafArrBehavior)
+    : LeafMatchExpression(type, path, leafArrBehavior, nonLeafArrBehavior), _rhs(rhs) {
+    invariant(_rhs);
 }
 
-
-bool LeafMatchExpression::matches(const MatchableDocument* doc, MatchDetails* details) const {
-    MatchableDocument::IteratorHolder cursor(doc, &_elementPath);
-    while (cursor->more()) {
-        ElementIterator::Context e = cursor->next();
-        if (!matchesSingleElement(e.element()))
-            continue;
-        if (details && details->needRecord() && !e.arrayOffset().eoo()) {
-            details->setElemMatchKey(e.arrayOffset().fieldName());
-        }
-        return true;
-    }
-    return false;
-}
-
-// -------------
-
-bool ComparisonMatchExpression::equivalent(const MatchExpression* other) const {
+bool ComparisonMatchExpressionBase::equivalent(const MatchExpression* other) const {
     if (other->matchType() != matchType())
         return false;
-    const ComparisonMatchExpression* realOther =
-        static_cast<const ComparisonMatchExpression*>(other);
+    auto realOther = static_cast<const ComparisonMatchExpressionBase*>(other);
 
     if (!CollatorInterface::collatorsMatch(_collator, realOther->_collator)) {
         return false;
@@ -83,17 +73,34 @@ bool ComparisonMatchExpression::equivalent(const MatchExpression* other) const {
     return path() == realOther->path() && eltCmp.evaluate(_rhs == realOther->_rhs);
 }
 
+void ComparisonMatchExpressionBase::debugString(StringBuilder& debug, int level) const {
+    _debugAddSpace(debug, level);
+    debug << path() << " " << name();
+    debug << " " << _rhs.toString(false);
 
-Status ComparisonMatchExpression::init(StringData path, const BSONElement& rhs) {
-    _rhs = rhs;
-
-    if (rhs.eoo()) {
-        return Status(ErrorCodes::BadValue, "need a real operand");
+    MatchExpression::TagData* td = getTag();
+    if (td) {
+        debug << " ";
+        td->debugString(&debug);
     }
 
-    if (rhs.type() == Undefined) {
-        return Status(ErrorCodes::BadValue, "cannot compare to undefined");
-    }
+    debug << "\n";
+}
+
+BSONObj ComparisonMatchExpressionBase::getSerializedRightHandSide() const {
+    return BSON(name() << _rhs);
+}
+
+ComparisonMatchExpression::ComparisonMatchExpression(MatchType type,
+                                                     StringData path,
+                                                     const BSONElement& rhs)
+    : ComparisonMatchExpressionBase(type,
+                                    path,
+                                    rhs,
+                                    ElementPath::LeafArrayBehavior::kTraverse,
+                                    ElementPath::NonLeafArrayBehavior::kTraverse) {
+    uassert(
+        ErrorCodes::BadValue, "cannot compare to undefined", _rhs.type() != BSONType::Undefined);
 
     switch (matchType()) {
         case LT:
@@ -103,15 +110,12 @@ Status ComparisonMatchExpression::init(StringData path, const BSONElement& rhs) 
         case GTE:
             break;
         default:
-            return Status(ErrorCodes::BadValue, "bad match type for ComparisonMatchExpression");
+            uasserted(ErrorCodes::BadValue, "bad match type for ComparisonMatchExpression");
     }
-
-    return setPath(path);
 }
 
-
-bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const {
-
+bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e,
+                                                     MatchDetails* details) const {
     if (e.canonicalType() != _rhs.canonicalType()) {
         // some special cases
         //  jstNULL and undefined are treated the same
@@ -122,7 +126,6 @@ bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const
         if (_rhs.type() == MaxKey || _rhs.type() == MinKey) {
             return matchType() != EQ;
         }
-
         return false;
     }
 
@@ -148,7 +151,8 @@ bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const
         }
     }
 
-    int x = compareElementValues(e, _rhs, _collator);
+    int x = BSONElement::compareElements(
+        e, _rhs, BSONElement::ComparisonRules::kConsiderFieldName, _collator);
 
     switch (matchType()) {
         case LT:
@@ -168,63 +172,11 @@ bool ComparisonMatchExpression::matchesSingleElement(const BSONElement& e) const
     }
 }
 
-void ComparisonMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
-    debug << path() << " ";
-    switch (matchType()) {
-        case LT:
-            debug << "$lt";
-            break;
-        case LTE:
-            debug << "$lte";
-            break;
-        case EQ:
-            debug << "==";
-            break;
-        case GT:
-            debug << "$gt";
-            break;
-        case GTE:
-            debug << "$gte";
-            break;
-        default:
-            invariant(false);
-    }
-    debug << " " << _rhs.toString(false);
-
-    MatchExpression::TagData* td = getTag();
-    if (NULL != td) {
-        debug << " ";
-        td->debugString(&debug);
-    }
-
-    debug << "\n";
-}
-
-void ComparisonMatchExpression::serialize(BSONObjBuilder* out) const {
-    std::string opString = "";
-    switch (matchType()) {
-        case LT:
-            opString = "$lt";
-            break;
-        case LTE:
-            opString = "$lte";
-            break;
-        case EQ:
-            opString = "$eq";
-            break;
-        case GT:
-            opString = "$gt";
-            break;
-        case GTE:
-            opString = "$gte";
-            break;
-        default:
-            invariant(false);
-    }
-
-    out->append(path(), BSON(opString << _rhs));
-}
+constexpr StringData EqualityMatchExpression::kName;
+constexpr StringData LTMatchExpression::kName;
+constexpr StringData LTEMatchExpression::kName;
+constexpr StringData GTMatchExpression::kName;
+constexpr StringData GTEMatchExpression::kName;
 
 // ---------------
 
@@ -246,7 +198,38 @@ inline pcrecpp::RE_Options flags2options(const char* flags) {
     return options;
 }
 
-RegexMatchExpression::RegexMatchExpression() : LeafMatchExpression(REGEX) {}
+const std::set<char> RegexMatchExpression::kValidRegexFlags = {'i', 'm', 's', 'x'};
+constexpr size_t RegexMatchExpression::kMaxPatternSize;
+
+RegexMatchExpression::RegexMatchExpression(StringData path, const BSONElement& e)
+    : LeafMatchExpression(REGEX, path),
+      _regex(e.regex()),
+      _flags(e.regexFlags()),
+      _re(new pcrecpp::RE(_regex.c_str(), flags2options(_flags.c_str()))) {
+    uassert(ErrorCodes::BadValue, "regex not a regex", e.type() == RegEx);
+    _init();
+}
+
+RegexMatchExpression::RegexMatchExpression(StringData path, StringData regex, StringData options)
+    : LeafMatchExpression(REGEX, path),
+      _regex(regex.toString()),
+      _flags(options.toString()),
+      _re(new pcrecpp::RE(_regex.c_str(), flags2options(_flags.c_str()))) {
+    _init();
+}
+
+void RegexMatchExpression::_init() {
+    uassert(
+        ErrorCodes::BadValue, "Regular expression is too long", _regex.size() <= kMaxPatternSize);
+
+    uassert(ErrorCodes::BadValue,
+            "Regular expression cannot contain an embedded null byte",
+            _regex.find('\0') == std::string::npos);
+
+    uassert(ErrorCodes::BadValue,
+            "Regular expression options string cannot contain an embedded null byte",
+            _flags.find('\0') == std::string::npos);
+}
 
 RegexMatchExpression::~RegexMatchExpression() {}
 
@@ -259,37 +242,7 @@ bool RegexMatchExpression::equivalent(const MatchExpression* other) const {
         _flags == realOther->_flags;
 }
 
-
-Status RegexMatchExpression::init(StringData path, const BSONElement& e) {
-    if (e.type() != RegEx)
-        return Status(ErrorCodes::BadValue, "regex not a regex");
-    return init(path, e.regex(), e.regexFlags());
-}
-
-
-Status RegexMatchExpression::init(StringData path, StringData regex, StringData options) {
-    if (regex.size() > MaxPatternSize) {
-        return Status(ErrorCodes::BadValue, "Regular expression is too long");
-    }
-
-    if (regex.find('\0') != std::string::npos) {
-        return Status(ErrorCodes::BadValue,
-                      "Regular expression cannot contain an embedded null byte");
-    }
-
-    if (options.find('\0') != std::string::npos) {
-        return Status(ErrorCodes::BadValue,
-                      "Regular expression options string cannot contain an embedded null byte");
-    }
-
-    _regex = regex.toString();
-    _flags = options.toString();
-    _re.reset(new pcrecpp::RE(_regex.c_str(), flags2options(_flags.c_str())));
-
-    return setPath(path);
-}
-
-bool RegexMatchExpression::matchesSingleElement(const BSONElement& e) const {
+bool RegexMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
     switch (e.type()) {
         case String:
         case Symbol: {
@@ -318,15 +271,15 @@ void RegexMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void RegexMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder regexBuilder(out->subobjStart(path()));
+BSONObj RegexMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder regexBuilder;
     regexBuilder.append("$regex", _regex);
 
     if (!_flags.empty()) {
         regexBuilder.append("$options", _flags);
     }
 
-    regexBuilder.doneFast();
+    return regexBuilder.obj();
 }
 
 void RegexMatchExpression::serializeToBSONTypeRegex(BSONObjBuilder* out) const {
@@ -339,15 +292,12 @@ void RegexMatchExpression::shortDebugString(StringBuilder& debug) const {
 
 // ---------
 
-Status ModMatchExpression::init(StringData path, int divisor, int remainder) {
-    if (divisor == 0)
-        return Status(ErrorCodes::BadValue, "divisor cannot be 0");
-    _divisor = divisor;
-    _remainder = remainder;
-    return setPath(path);
+ModMatchExpression::ModMatchExpression(StringData path, int divisor, int remainder)
+    : LeafMatchExpression(MOD, path), _divisor(divisor), _remainder(remainder) {
+    uassert(ErrorCodes::BadValue, "divisor cannot be 0", divisor != 0);
 }
 
-bool ModMatchExpression::matchesSingleElement(const BSONElement& e) const {
+bool ModMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
     if (!e.isNumber())
         return false;
     return e.numberLong() % _divisor == _remainder;
@@ -364,8 +314,8 @@ void ModMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void ModMatchExpression::serialize(BSONObjBuilder* out) const {
-    out->append(path(), BSON("$mod" << BSON_ARRAY(_divisor << _remainder)));
+BSONObj ModMatchExpression::getSerializedRightHandSide() const {
+    return BSON("$mod" << BSON_ARRAY(_divisor << _remainder));
 }
 
 bool ModMatchExpression::equivalent(const MatchExpression* other) const {
@@ -380,11 +330,10 @@ bool ModMatchExpression::equivalent(const MatchExpression* other) const {
 
 // ------------------
 
-Status ExistsMatchExpression::init(StringData path) {
-    return setPath(path);
-}
+ExistsMatchExpression::ExistsMatchExpression(StringData path) : LeafMatchExpression(EXISTS, path) {}
 
-bool ExistsMatchExpression::matchesSingleElement(const BSONElement& e) const {
+bool ExistsMatchExpression::matchesSingleElement(const BSONElement& e,
+                                                 MatchDetails* details) const {
     return !e.eoo();
 }
 
@@ -399,8 +348,8 @@ void ExistsMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void ExistsMatchExpression::serialize(BSONObjBuilder* out) const {
-    out->append(path(), BSON("$exists" << true));
+BSONObj ExistsMatchExpression::getSerializedRightHandSide() const {
+    return BSON("$exists" << true);
 }
 
 bool ExistsMatchExpression::equivalent(const MatchExpression* other) const {
@@ -414,140 +363,13 @@ bool ExistsMatchExpression::equivalent(const MatchExpression* other) const {
 
 // ----
 
-const std::string TypeMatchExpression::kMatchesAllNumbersAlias = "number";
-
-const stdx::unordered_map<std::string, BSONType> TypeMatchExpression::typeAliasMap = {
-    {typeName(NumberDouble), NumberDouble},
-    {typeName(String), String},
-    {typeName(Object), Object},
-    {typeName(Array), Array},
-    {typeName(BinData), BinData},
-    {typeName(Undefined), Undefined},
-    {typeName(jstOID), jstOID},
-    {typeName(Bool), Bool},
-    {typeName(Date), Date},
-    {typeName(jstNULL), jstNULL},
-    {typeName(RegEx), RegEx},
-    {typeName(DBRef), DBRef},
-    {typeName(Code), Code},
-    {typeName(Symbol), Symbol},
-    {typeName(CodeWScope), CodeWScope},
-    {typeName(NumberInt), NumberInt},
-    {typeName(bsonTimestamp), bsonTimestamp},
-    {typeName(NumberLong), NumberLong},
-    {typeName(NumberDecimal), NumberDecimal},
-    {typeName(MaxKey), MaxKey},
-    {typeName(MinKey), MinKey}};
-
-Status TypeMatchExpression::initWithBSONType(StringData path, int type) {
-    if (!isValidBSONType(type)) {
-        return Status(ErrorCodes::BadValue,
-                      str::stream() << "Invalid numerical $type code: " << type);
-    }
-
-    _path = path;
-    _type = static_cast<BSONType>(type);
-    return _elementPath.init(_path);
-}
-
-Status TypeMatchExpression::initAsMatchingAllNumbers(StringData path) {
-    _path = path;
-    _matchesAllNumbers = true;
-    return _elementPath.init(_path);
-}
-
-bool TypeMatchExpression::matchesSingleElement(const BSONElement& e) const {
-    if (_matchesAllNumbers) {
-        return e.isNumber();
-    }
-
-    return e.type() == _type;
-}
-
-bool TypeMatchExpression::matches(const MatchableDocument* doc, MatchDetails* details) const {
-    MatchableDocument::IteratorHolder cursor(doc, &_elementPath);
-    while (cursor->more()) {
-        ElementIterator::Context e = cursor->next();
-
-        // In the case where _elementPath is referring to an array,
-        // $type should match elements of that array only.
-        // outerArray() helps to identify elements of the array
-        // and the containing array itself.
-        // This matters when we are looking for {$type: Array}.
-        // Example (_elementPath refers to field 'a' and _type is Array):
-        // a : [        // outer array. should not match
-        //     123,     // inner array
-        //     [ 456 ], // inner array. should match
-        //     ...
-        // ]
-        if (_type == mongo::Array && e.outerArray()) {
-            continue;
-        }
-
-        if (!matchesSingleElement(e.element())) {
-            continue;
-        }
-
-        if (details && details->needRecord() && !e.arrayOffset().eoo()) {
-            details->setElemMatchKey(e.arrayOffset().fieldName());
-        }
-        return true;
-    }
-    return false;
-}
-
-void TypeMatchExpression::debugString(StringBuilder& debug, int level) const {
-    _debugAddSpace(debug, level);
-    debug << _path << " type: ";
-    if (matchesAllNumbers()) {
-        debug << kMatchesAllNumbersAlias;
-    } else {
-        debug << _type;
-    }
-
-    MatchExpression::TagData* td = getTag();
-    if (NULL != td) {
-        debug << " ";
-        td->debugString(&debug);
-    }
-    debug << "\n";
-}
-
-void TypeMatchExpression::serialize(BSONObjBuilder* out) const {
-    if (matchesAllNumbers()) {
-        out->append(path(), BSON("$type" << kMatchesAllNumbersAlias));
-    } else {
-        out->append(path(), BSON("$type" << _type));
-    }
-}
-
-bool TypeMatchExpression::equivalent(const MatchExpression* other) const {
-    if (matchType() != other->matchType())
-        return false;
-
-    const TypeMatchExpression* realOther = static_cast<const TypeMatchExpression*>(other);
-
-    if (_path != realOther->_path) {
-        return false;
-    }
-
-    if (_matchesAllNumbers) {
-        return realOther->_matchesAllNumbers;
-    }
-
-    return _type == realOther->_type;
-}
-
-
-// -----------
-
-Status InMatchExpression::init(StringData path) {
-    return setPath(path);
-}
+InMatchExpression::InMatchExpression(StringData path)
+    : LeafMatchExpression(MATCH_IN, path),
+      _eltCmp(BSONElementComparator::FieldNamesMode::kIgnore, _collator),
+      _equalitySet(_eltCmp.makeBSONEltFlatSet(_originalEqualityVector)) {}
 
 std::unique_ptr<MatchExpression> InMatchExpression::shallowClone() const {
-    auto next = stdx::make_unique<InMatchExpression>();
-    next->init(path());
+    auto next = stdx::make_unique<InMatchExpression>(path());
     next->setCollator(_collator);
     if (getTag()) {
         next->setTag(getTag()->clone());
@@ -564,7 +386,7 @@ std::unique_ptr<MatchExpression> InMatchExpression::shallowClone() const {
     return std::move(next);
 }
 
-bool InMatchExpression::matchesSingleElement(const BSONElement& e) const {
+bool InMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
     if (_hasNull && e.eoo()) {
         return true;
     }
@@ -572,7 +394,7 @@ bool InMatchExpression::matchesSingleElement(const BSONElement& e) const {
         return true;
     }
     for (auto&& regex : _regexes) {
-        if (regex->matchesSingleElement(e)) {
+        if (regex->matchesSingleElement(e, details)) {
             return true;
         }
     }
@@ -599,8 +421,8 @@ void InMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void InMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder inBob(out->subobjStart(path()));
+BSONObj InMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder inBob;
     BSONArrayBuilder arrBob(inBob.subarrayStart("$in"));
     for (auto&& _equality : _equalitySet) {
         arrBob.append(_equality);
@@ -611,7 +433,7 @@ void InMatchExpression::serialize(BSONObjBuilder* out) const {
         arrBob.append(regexBob.obj().firstElement());
     }
     arrBob.doneFast();
-    inBob.doneFast();
+    return inBob.obj();
 }
 
 bool InMatchExpression::equivalent(const MatchExpression* other) const {
@@ -658,10 +480,14 @@ void InMatchExpression::_doSetCollator(const CollatorInterface* collator) {
     _collator = collator;
     _eltCmp = BSONElementComparator(BSONElementComparator::FieldNamesMode::kIgnore, _collator);
 
-    // Re-sort the list of equalities according to our current comparator. This is necessary to work
-    // around https://svn.boost.org/trac10/ticket/13140.
-    std::sort(
-        _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeLessThan());
+    if (!std::is_sorted(_originalEqualityVector.begin(),
+                        _originalEqualityVector.end(),
+                        _eltCmp.makeLessThan())) {
+        // Re-sort the list of equalities according to our current comparator. This is necessary to
+        // work around https://svn.boost.org/trac10/ticket/13140.
+        std::sort(
+            _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeLessThan());
+    }
 
     // We need to re-compute '_equalitySet', since our set comparator has changed.
     _equalitySet = _eltCmp.makeBSONEltFlatSet(_originalEqualityVector);
@@ -685,9 +511,13 @@ Status InMatchExpression::setEqualities(std::vector<BSONElement> equalities) {
 
     _originalEqualityVector = std::move(equalities);
 
-    // Sort the list of equalities to work around https://svn.boost.org/trac10/ticket/13140.
-    std::sort(
-        _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeLessThan());
+    if (!std::is_sorted(_originalEqualityVector.begin(),
+                        _originalEqualityVector.end(),
+                        _eltCmp.makeLessThan())) {
+        // Sort the list of equalities to work around https://svn.boost.org/trac10/ticket/13140.
+        std::sort(
+            _originalEqualityVector.begin(), _originalEqualityVector.end(), _eltCmp.makeLessThan());
+    }
 
     _equalitySet = _eltCmp.makeBSONEltFlatSet(_originalEqualityVector);
 
@@ -699,14 +529,47 @@ Status InMatchExpression::addRegex(std::unique_ptr<RegexMatchExpression> expr) {
     return Status::OK();
 }
 
+MatchExpression::ExpressionOptimizerFunc InMatchExpression::getOptimizer() const {
+    return [](std::unique_ptr<MatchExpression> expression) -> std::unique_ptr<MatchExpression> {
+        // NOTE: We do not recursively call optimize() on the RegexMatchExpression children in the
+        // _regexes list. We assume that optimize() on a RegexMatchExpression is a no-op.
+
+        auto& regexList = static_cast<InMatchExpression&>(*expression)._regexes;
+        auto& equalitySet = static_cast<InMatchExpression&>(*expression)._equalitySet;
+        auto collator = static_cast<InMatchExpression&>(*expression).getCollator();
+        if (regexList.size() == 1 && equalitySet.empty()) {
+            // Simplify IN of exactly one regex to be a regex match.
+            auto& childRe = regexList.front();
+            invariant(!childRe->getTag());
+
+            auto simplifiedExpression = stdx::make_unique<RegexMatchExpression>(
+                expression->path(), childRe->getString(), childRe->getFlags());
+            if (expression->getTag()) {
+                simplifiedExpression->setTag(expression->getTag()->clone());
+            }
+            return std::move(simplifiedExpression);
+        } else if (equalitySet.size() == 1 && regexList.empty()) {
+            // Simplify IN of exactly one equality to be an EqualityMatchExpression.
+            auto simplifiedExpression = stdx::make_unique<EqualityMatchExpression>(
+                expression->path(), *(equalitySet.begin()));
+            simplifiedExpression->setCollator(collator);
+            if (expression->getTag()) {
+                simplifiedExpression->setTag(expression->getTag()->clone());
+            }
+
+            return std::move(simplifiedExpression);
+        }
+
+        return expression;
+    };
+}
+
 // -----------
 
-const double BitTestMatchExpression::kLongLongMaxPlusOneAsDouble =
-    scalbn(1, std::numeric_limits<long long>::digits);
-
-Status BitTestMatchExpression::init(StringData path, std::vector<uint32_t> bitPositions) {
-    _bitPositions = std::move(bitPositions);
-
+BitTestMatchExpression::BitTestMatchExpression(MatchType type,
+                                               StringData path,
+                                               std::vector<uint32_t> bitPositions)
+    : LeafMatchExpression(type, path), _bitPositions(std::move(bitPositions)) {
     // Process bit positions into bitmask.
     for (auto bitPosition : _bitPositions) {
         // Checking bits > 63 is just checking the sign bit, since we sign-extend numbers. For
@@ -715,26 +578,23 @@ Status BitTestMatchExpression::init(StringData path, std::vector<uint32_t> bitPo
         bitPosition = std::min(bitPosition, 63U);
         _bitMask |= 1ULL << bitPosition;
     }
-
-    return setPath(path);
 }
 
-Status BitTestMatchExpression::init(StringData path, uint64_t bitMask) {
-    _bitMask = bitMask;
-
+BitTestMatchExpression::BitTestMatchExpression(MatchType type, StringData path, uint64_t bitMask)
+    : LeafMatchExpression(type, path), _bitMask(bitMask) {
     // Process bitmask into bit positions.
     for (int bit = 0; bit < 64; bit++) {
         if (_bitMask & (1ULL << bit)) {
             _bitPositions.push_back(bit);
         }
     }
-
-    return setPath(path);
 }
 
-Status BitTestMatchExpression::init(StringData path,
-                                    const char* bitMaskBinary,
-                                    uint32_t bitMaskLen) {
+BitTestMatchExpression::BitTestMatchExpression(MatchType type,
+                                               StringData path,
+                                               const char* bitMaskBinary,
+                                               uint32_t bitMaskLen)
+    : LeafMatchExpression(type, path) {
     for (uint32_t byte = 0; byte < bitMaskLen; byte++) {
         char byteAt = bitMaskBinary[byte];
         if (!byteAt) {
@@ -757,8 +617,6 @@ Status BitTestMatchExpression::init(StringData path,
             }
         }
     }
-
-    return setPath(path);
 }
 
 bool BitTestMatchExpression::needFurtherBitTests(bool isBitSet) const {
@@ -781,7 +639,7 @@ bool BitTestMatchExpression::performBitTest(long long eValue) const {
         case BITS_ANY_CLEAR:
             return ~eValue & _bitMask;
         default:
-            invariant(false);
+            MONGO_UNREACHABLE;
     }
 }
 
@@ -816,7 +674,8 @@ bool BitTestMatchExpression::performBitTest(const char* eBinary, uint32_t eBinar
     return mt == BITS_ALL_SET || mt == BITS_ALL_CLEAR;
 }
 
-bool BitTestMatchExpression::matchesSingleElement(const BSONElement& e) const {
+bool BitTestMatchExpression::matchesSingleElement(const BSONElement& e,
+                                                  MatchDetails* details) const {
     // Validate 'e' is a number or a BinData.
     if (!e.isNumber() && e.type() != BSONType::BinData) {
         return false;
@@ -842,7 +701,7 @@ bool BitTestMatchExpression::matchesSingleElement(const BSONElement& e) const {
         // integer are treated as 0. We use 'kLongLongMaxAsDouble' because if we just did
         // eDouble > 2^63-1, it would be compared against 2^63. eDouble=2^63 would not get caught
         // that way.
-        if (eDouble >= kLongLongMaxPlusOneAsDouble ||
+        if (eDouble >= BSONElement::kLongLongMaxPlusOneAsDouble ||
             eDouble < std::numeric_limits<long long>::min()) {
             return false;
         }
@@ -876,7 +735,7 @@ void BitTestMatchExpression::debugString(StringBuilder& debug, int level) const 
             debug << "$bitsAnyClear:";
             break;
         default:
-            invariant(false);
+            MONGO_UNREACHABLE;
     }
 
     debug << " [";
@@ -895,7 +754,7 @@ void BitTestMatchExpression::debugString(StringBuilder& debug, int level) const 
     }
 }
 
-void BitTestMatchExpression::serialize(BSONObjBuilder* out) const {
+BSONObj BitTestMatchExpression::getSerializedRightHandSide() const {
     std::string opString = "";
 
     switch (matchType()) {
@@ -912,7 +771,7 @@ void BitTestMatchExpression::serialize(BSONObjBuilder* out) const {
             opString = "$bitsAnyClear";
             break;
         default:
-            invariant(false);
+            MONGO_UNREACHABLE;
     }
 
     BSONArrayBuilder arrBob;
@@ -921,7 +780,7 @@ void BitTestMatchExpression::serialize(BSONObjBuilder* out) const {
     }
     arrBob.doneFast();
 
-    out->append(path(), BSON(opString << arrBob.arr()));
+    return BSON(opString << arrBob.arr());
 }
 
 bool BitTestMatchExpression::equivalent(const MatchExpression* other) const {

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2017 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,6 +37,7 @@
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/s/catalog_cache_test_fixture.h"
 #include "mongo/s/chunk_manager.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 namespace {
@@ -43,13 +46,28 @@ const NamespaceString kNss("TestDB", "TestColl");
 
 class ChunkManagerQueryTest : public CatalogCacheTestFixture {
 protected:
+    void runGetShardIdsForRangeTest(const BSONObj& shardKey,
+                                    bool unique,
+                                    const std::vector<BSONObj>& splitPoints,
+                                    const BSONObj& min,
+                                    const BSONObj& max,
+                                    const std::set<ShardId>& expectedShardIds) {
+        const ShardKeyPattern shardKeyPattern(shardKey);
+        auto chunkManager = makeChunkManager(kNss, shardKeyPattern, nullptr, false, splitPoints);
+
+        std::set<ShardId> shardIds;
+        chunkManager->getShardIdsForRange(min, max, &shardIds);
+
+        _assertShardIdsMatch(expectedShardIds, shardIds);
+    }
+
     void runQueryTest(const BSONObj& shardKey,
                       std::unique_ptr<CollatorInterface> defaultCollator,
                       bool unique,
                       const std::vector<BSONObj>& splitPoints,
                       const BSONObj& query,
                       const BSONObj& queryCollation,
-                      const std::set<ShardId> expectedShardIds) {
+                      const std::set<ShardId>& expectedShardIds) {
         const ShardKeyPattern shardKeyPattern(shardKey);
         auto chunkManager =
             makeChunkManager(kNss, shardKeyPattern, std::move(defaultCollator), false, splitPoints);
@@ -57,19 +75,52 @@ protected:
         std::set<ShardId> shardIds;
         chunkManager->getShardIdsForQuery(operationContext(), query, queryCollation, &shardIds);
 
+        _assertShardIdsMatch(expectedShardIds, shardIds);
+    }
+
+private:
+    static void _assertShardIdsMatch(const std::set<ShardId>& expectedShardIds,
+                                     const std::set<ShardId>& actualShardIds) {
         BSONArrayBuilder expectedBuilder;
         for (const auto& shardId : expectedShardIds) {
             expectedBuilder << shardId;
         }
 
         BSONArrayBuilder actualBuilder;
-        for (const auto& shardId : shardIds) {
+        for (const auto& shardId : actualShardIds) {
             actualBuilder << shardId;
         }
 
         ASSERT_BSONOBJ_EQ(expectedBuilder.arr(), actualBuilder.arr());
     }
 };
+
+TEST_F(ChunkManagerQueryTest, GetShardIdsForRangeMinAndMaxAreInclusive) {
+    runGetShardIdsForRangeTest(BSON("a" << 1),
+                               false,
+                               {BSON("a" << -100), BSON("a" << 0), BSON("a" << 100)},
+                               BSON("a" << -100),
+                               BSON("a" << 0),
+                               {ShardId("1"), ShardId("2")});
+}
+
+TEST_F(ChunkManagerQueryTest, GetShardIdsForRangeMinAndMaxAreTheSameAtFirstChunkMaxBoundary) {
+    runGetShardIdsForRangeTest(BSON("a" << 1),
+                               false,
+                               {BSON("a" << -100), BSON("a" << 0), BSON("a" << 100)},
+                               BSON("a" << -100),
+                               BSON("a" << -100),
+                               {ShardId("1")});
+}
+
+TEST_F(ChunkManagerQueryTest, GetShardIdsForRangeMinAndMaxAreTheSameAtLastChunkMinBoundary) {
+    runGetShardIdsForRangeTest(BSON("a" << 1),
+                               false,
+                               {BSON("a" << -100), BSON("a" << 0), BSON("a" << 100)},
+                               BSON("a" << 100),
+                               BSON("a" << 100),
+                               {ShardId("3")});
+}
 
 TEST_F(ChunkManagerQueryTest, EmptyQuerySingleShard) {
     runQueryTest(BSON("a" << 1), nullptr, false, {}, BSONObj(), BSONObj(), {ShardId("0")});

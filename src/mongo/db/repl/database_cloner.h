@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -43,18 +45,11 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
-class OldThreadPool;
-
 namespace repl {
-namespace {
-
-using UniqueLock = stdx::unique_lock<stdx::mutex>;
-
-}  // namespace
 
 class StorageInterface;
 
@@ -114,7 +109,7 @@ public:
      * 'listCollectionsFilter' will be extended to include collections only, filtering out views.
      */
     DatabaseCloner(executor::TaskExecutor* executor,
-                   OldThreadPool* dbWorkThreadPool,
+                   ThreadPool* dbWorkThreadPool,
                    const HostAndPort& source,
                    const std::string& dbname,
                    const BSONObj& listCollectionsFilter,
@@ -129,8 +124,6 @@ public:
      * Returns collection info objects read from listCollections result and will not include views.
      */
     const std::vector<BSONObj>& getCollectionInfos_forTest() const;
-
-    std::string getDiagnosticString() const override;
 
     bool isActive() const override;
 
@@ -180,6 +173,11 @@ private:
     bool _isActive_inlock() const;
 
     /**
+     * Returns whether the DatabaseCloner is in shutdown.
+     */
+    bool _isShuttingDown() const;
+
+    /**
      * Read collection names and options from listCollections result.
      */
     void _listCollectionsCallback(const StatusWith<Fetcher::QueryResponse>& fetchResult,
@@ -201,9 +199,7 @@ private:
     /**
      * Calls the above method after unlocking.
      */
-    void _finishCallback_inlock(UniqueLock& lk, const Status& status);
-
-    std::string _getDiagnosticString_inlock() const;
+    void _finishCallback_inlock(stdx::unique_lock<stdx::mutex>& lk, const Status& status);
 
     //
     // All member variables are labeled with one of the following codes indicating the
@@ -217,7 +213,7 @@ private:
     mutable stdx::mutex _mutex;
     mutable stdx::condition_variable _condition;                 // (M)
     executor::TaskExecutor* _executor;                           // (R)
-    OldThreadPool* _dbWorkThreadPool;                            // (R)
+    ThreadPool* _dbWorkThreadPool;                               // (R)
     const HostAndPort _source;                                   // (R)
     const std::string _dbname;                                   // (R)
     const BSONObj _listCollectionsFilter;                        // (R)

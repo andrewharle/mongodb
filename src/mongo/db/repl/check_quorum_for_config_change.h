@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -29,8 +31,8 @@
 #pragma once
 
 #include "mongo/base/status.h"
-#include "mongo/db/repl/replication_executor.h"
 #include "mongo/db/repl/scatter_gather_algorithm.h"
+#include "mongo/executor/task_executor.h"
 
 namespace mongo {
 namespace repl {
@@ -57,12 +59,12 @@ public:
      *
      * "rsConfig" must stay in scope until QuorumChecker's destructor completes.
      */
-    QuorumChecker(const ReplSetConfig* rsConfig, int myIndex);
+    QuorumChecker(const ReplSetConfig* rsConfig, int myIndex, long long term);
     virtual ~QuorumChecker();
 
     virtual std::vector<executor::RemoteCommandRequest> getRequests() const;
     virtual void processResponse(const executor::RemoteCommandRequest& request,
-                                 const ResponseStatus& response);
+                                 const executor::RemoteCommandResponse& response);
 
     virtual bool hasReceivedSufficientResponses() const;
 
@@ -83,13 +85,16 @@ private:
      * Updates the QuorumChecker state based on the data from a single heartbeat response.
      */
     void _tabulateHeartbeatResponse(const executor::RemoteCommandRequest& request,
-                                    const ResponseStatus& response);
+                                    const executor::RemoteCommandResponse& response);
 
     // Pointer to the replica set configuration for which we're checking quorum.
     const ReplSetConfig* const _rsConfig;
 
     // Index of the local node's member configuration in _rsConfig.
     const int _myIndex;
+
+    // The term of this node.
+    const long long _term;
 
     // List of voting nodes that have responded affirmatively.
     std::vector<HostAndPort> _voters;
@@ -118,6 +123,7 @@ private:
  *
  * "myIndex" is the index of this node's member configuration in "rsConfig".
  * "executor" is the event loop in which to schedule network/aysnchronous processing.
+ * "term" is the term of this node.
  *
  * For purposes of initiate, a quorum is only met if all of the following conditions
  * are met:
@@ -126,9 +132,10 @@ private:
  * - No nodes are already joined to a replica set.
  * - No node reports a replica set name other than the one in "rsConfig".
  */
-Status checkQuorumForInitiate(ReplicationExecutor* executor,
+Status checkQuorumForInitiate(executor::TaskExecutor* executor,
                               const ReplSetConfig& rsConfig,
-                              const int myIndex);
+                              const int myIndex,
+                              long long term);
 
 /**
  * Performs a quorum call to determine if a sufficient number of nodes are up
@@ -136,6 +143,7 @@ Status checkQuorumForInitiate(ReplicationExecutor* executor,
  *
  * "myIndex" is the index of this node's member configuration in "rsConfig".
  * "executor" is the event loop in which to schedule network/aysnchronous processing.
+ * "term" is the term of this node.
  *
  * For purposes of reconfig, a quorum is only met if all of the following conditions
  * are met:
@@ -144,9 +152,10 @@ Status checkQuorumForInitiate(ReplicationExecutor* executor,
  * - No responding node reports a replica set name other than the one in "rsConfig".
  * - All responding nodes report a config version less than the one in "rsConfig".
  */
-Status checkQuorumForReconfig(ReplicationExecutor* executor,
+Status checkQuorumForReconfig(executor::TaskExecutor* executor,
                               const ReplSetConfig& rsConfig,
-                              const int myIndex);
+                              const int myIndex,
+                              long long term);
 
 }  // namespace repl
 }  // namespace mongo

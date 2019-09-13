@@ -10,6 +10,9 @@
 // sequence), idle (connection is connected but not used before a shard change), and new
 // (connection connected after shard change).
 //
+// Checking UUID consistency involves talking to shards, but this test shuts down shards.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     'use strict';
 
@@ -52,7 +55,7 @@
 
     mongosConnIdle = new Mongo(st.s0.host);
 
-    MongoRunner.stopMongod(st.shard2);
+    st.rs2.stopSet();
 
     jsTest.log("Testing active connection...");
 
@@ -96,8 +99,7 @@
 
     mongosConnIdle = new Mongo(st.s0.host);
 
-    MongoRunner.stopMongod(st.shard1);
-
+    st.rs1.stopSet();
     jsTest.log("Testing active connection...");
 
     assert.neq(null, mongosConnActive.getCollection(collSharded.toString()).findOne({_id: -1}));

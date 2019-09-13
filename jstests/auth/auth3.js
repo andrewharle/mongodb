@@ -11,7 +11,7 @@
 
     print("make sure curop, killop, and unlock fail");
 
-    var x = admin.$cmd.sys.inprog.findOne();
+    var x = admin.currentOp();
     assert(!("inprog" in x), tojson(x));
     assert.eq(x.code, errorCodeUnauthorized, tojson(x));
 
@@ -29,4 +29,5 @@
     assert("info" in admin.killOp(123));
     assert.eq(admin.fsyncUnlock().errmsg, "fsyncUnlock called when not locked");
 
+    MongoRunner.stopMongod(conn, null, {user: "foo", pwd: "bar"});
 })();

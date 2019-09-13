@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,46 +35,49 @@
 #include <algorithm>
 #include <vector>
 
+#include "mongo/base/checked_cast.h"
 #include "mongo/base/status_with.h"
 #include "mongo/client/remote_command_targeter_factory_mock.h"
 #include "mongo/client/remote_command_targeter_mock.h"
+#include "mongo/client/replica_set_monitor.h"
+#include "mongo/db/catalog_raii.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
-#include "mongo/db/db_raii.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/db/op_observer_impl.h"
+#include "mongo/db/op_observer_registry.h"
 #include "mongo/db/query/cursor_response.h"
 #include "mongo/db/query/query_request.h"
+#include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/oplog.h"
 #include "mongo/db/repl/read_concern_args.h"
 #include "mongo/db/repl/repl_settings.h"
-#include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_coordinator_mock.h"
-#include "mongo/db/service_context_noop.h"
+#include "mongo/db/repl/replication_consistency_markers_mock.h"
+#include "mongo/db/repl/replication_process.h"
+#include "mongo/db/repl/replication_recovery_mock.h"
+#include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/s/config_server_op_observer.h"
+#include "mongo/db/s/op_observer_sharding_impl.h"
+#include "mongo/db/s/shard_server_op_observer.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/rpc/metadata/repl_set_metadata.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/s/balancer_configuration.h"
 #include "mongo/s/catalog/dist_lock_catalog.h"
 #include "mongo/s/catalog/dist_lock_manager.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog/type_changelog.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_shard.h"
 #include "mongo/s/catalog_cache.h"
+#include "mongo/s/catalog_cache_loader.h"
 #include "mongo/s/client/shard_factory.h"
 #include "mongo/s/client/shard_local.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/client/shard_remote.h"
 #include "mongo/s/grid.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
-#include "mongo/s/set_shard_version_request.h"
-#include "mongo/s/sharding_egress_metadata_hook_for_mongod.h"
-#include "mongo/s/write_ops/batched_command_request.h"
-#include "mongo/s/write_ops/batched_command_response.h"
+#include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/clock_source_mock.h"
 #include "mongo/util/tick_source_mock.h"
@@ -86,23 +91,16 @@ using executor::RemoteCommandResponse;
 using repl::ReplicationCoordinator;
 using repl::ReplicationCoordinatorMock;
 using repl::ReplSettings;
-using rpc::ShardingEgressMetadataHookForMongod;
-using unittest::assertGet;
-
-using std::string;
-using std::vector;
 using unittest::assertGet;
 
 ShardingMongodTestFixture::ShardingMongodTestFixture() = default;
 
 ShardingMongodTestFixture::~ShardingMongodTestFixture() = default;
 
-const Seconds ShardingMongodTestFixture::kFutureTimeout{5};
-
 void ShardingMongodTestFixture::setUp() {
     ServiceContextMongoDTest::setUp();
 
-    auto serviceContext = getServiceContext();
+    auto service = getServiceContext();
     _opCtx = cc().makeOperationContext();
 
     // Set up this node as part of a replica set.
@@ -117,21 +115,48 @@ void ShardingMongodTestFixture::setUp() {
         serversBob.append(BSON("host" << _servers[i].toString() << "_id" << static_cast<int>(i)));
     }
     repl::ReplSetConfig replSetConfig;
-    replSetConfig.initialize(BSON("_id" << _setName << "protocolVersion" << 1 << "version" << 3
-                                        << "members"
-                                        << serversBob.arr()));
+    ASSERT_OK(replSetConfig.initialize(
+        BSON("_id" << _setName << "protocolVersion" << 1 << "version" << 3 << "members"
+                   << serversBob.arr())));
     replCoordPtr->setGetConfigReturnValue(replSetConfig);
 
-    repl::ReplicationCoordinator::set(serviceContext, std::move(replCoordPtr));
+    repl::ReplicationCoordinator::set(service, std::move(replCoordPtr));
 
-    serviceContext->setOpObserver(stdx::make_unique<OpObserverImpl>());
-    repl::setOplogCollectionName();
+    auto storagePtr = stdx::make_unique<repl::StorageInterfaceMock>();
+
+    repl::DropPendingCollectionReaper::set(
+        service, stdx::make_unique<repl::DropPendingCollectionReaper>(storagePtr.get()));
+
+    repl::ReplicationProcess::set(service,
+                                  stdx::make_unique<repl::ReplicationProcess>(
+                                      storagePtr.get(),
+                                      stdx::make_unique<repl::ReplicationConsistencyMarkersMock>(),
+                                      stdx::make_unique<repl::ReplicationRecoveryMock>()));
+
+    ASSERT_OK(repl::ReplicationProcess::get(_opCtx.get())->initializeRollbackID(_opCtx.get()));
+
+    repl::StorageInterface::set(service, std::move(storagePtr));
+
+    auto opObserver = checked_cast<OpObserverRegistry*>(service->getOpObserver());
+    opObserver->addObserver(stdx::make_unique<OpObserverShardingImpl>());
+    opObserver->addObserver(stdx::make_unique<ConfigServerOpObserver>());
+    opObserver->addObserver(stdx::make_unique<ShardServerOpObserver>());
+
+    repl::setOplogCollectionName(service);
     repl::createOplog(_opCtx.get());
+
+    // Set the highest FCV because otherwise it defaults to the lower FCV. This way we default to
+    // testing this release's code, not backwards compatibility code.
+    serverGlobalParams.featureCompatibility.setVersion(
+        ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40);
 }
 
 std::unique_ptr<ReplicationCoordinatorMock> ShardingMongodTestFixture::makeReplicationCoordinator(
     ReplSettings replSettings) {
-    return stdx::make_unique<repl::ReplicationCoordinatorMock>(replSettings);
+    auto coordinator =
+        stdx::make_unique<repl::ReplicationCoordinatorMock>(getServiceContext(), replSettings);
+    ASSERT_OK(coordinator->setFollowerMode(repl::MemberState::RS_PRIMARY));
+    return coordinator;
 }
 
 std::unique_ptr<executor::TaskExecutorPool> ShardingMongodTestFixture::makeTaskExecutorPool() {
@@ -139,8 +164,6 @@ std::unique_ptr<executor::TaskExecutorPool> ShardingMongodTestFixture::makeTaskE
     // threads, tasks in the NetworkInterfaceMock must be carried out synchronously by the (single)
     // thread the unit test is running on.
     auto netForFixedTaskExecutor = stdx::make_unique<executor::NetworkInterfaceMock>();
-    netForFixedTaskExecutor->setEgressMetadataHook(
-        stdx::make_unique<ShardingEgressMetadataHookForMongod>());
     _mockNetwork = netForFixedTaskExecutor.get();
 
     // Set up a ThreadPoolTaskExecutor. Note, for local tasks this TaskExecutor uses a
@@ -155,8 +178,6 @@ std::unique_ptr<executor::TaskExecutorPool> ShardingMongodTestFixture::makeTaskE
     // Set up a NetworkInterfaceMock for the (one) arbitrary TaskExecutor that will go in the set
     // of arbitrary TaskExecutors.
     auto netForArbitraryExecutor = stdx::make_unique<executor::NetworkInterfaceMock>();
-    netForArbitraryExecutor->setEgressMetadataHook(
-        stdx::make_unique<ShardingEgressMetadataHookForMongod>());
 
     // Set up (one) TaskExecutor for the set of arbitrary TaskExecutors.
     auto arbitraryExecutorForExecutorPool =
@@ -210,8 +231,7 @@ std::unique_ptr<ShardRegistry> ShardingMongodTestFixture::makeShardRegistry(
     return stdx::make_unique<ShardRegistry>(std::move(shardFactory), configConnStr);
 }
 
-std::unique_ptr<DistLockCatalog> ShardingMongodTestFixture::makeDistLockCatalog(
-    ShardRegistry* shardRegistry) {
+std::unique_ptr<DistLockCatalog> ShardingMongodTestFixture::makeDistLockCatalog() {
     return nullptr;
 }
 
@@ -222,15 +242,6 @@ std::unique_ptr<DistLockManager> ShardingMongodTestFixture::makeDistLockManager(
 
 std::unique_ptr<ShardingCatalogClient> ShardingMongodTestFixture::makeShardingCatalogClient(
     std::unique_ptr<DistLockManager> distLockManager) {
-    return nullptr;
-}
-
-std::unique_ptr<ShardingCatalogManager> ShardingMongodTestFixture::makeShardingCatalogManager(
-    ShardingCatalogClient* catalogClient) {
-    return nullptr;
-}
-
-std::unique_ptr<CatalogCache> ShardingMongodTestFixture::makeCatalogCache() {
     return nullptr;
 }
 
@@ -246,6 +257,7 @@ Status ShardingMongodTestFixture::initializeGlobalShardingStateForMongodForTest(
     const ConnectionString& configConnStr) {
     invariant(serverGlobalParams.clusterRole == ClusterRole::ShardServer ||
               serverGlobalParams.clusterRole == ClusterRole::ConfigServer);
+
     // Create and initialize each sharding component individually before moving them to the Grid
     // in order to control the order of initialization, since some components depend on others.
 
@@ -254,84 +266,52 @@ Status ShardingMongodTestFixture::initializeGlobalShardingStateForMongodForTest(
         executorPoolPtr->startup();
     }
 
-    auto shardRegistryPtr = makeShardRegistry(configConnStr);
-
-    auto distLockCatalogPtr = makeDistLockCatalog(shardRegistryPtr.get());
+    auto distLockCatalogPtr = makeDistLockCatalog();
     _distLockCatalog = distLockCatalogPtr.get();
 
     auto distLockManagerPtr = makeDistLockManager(std::move(distLockCatalogPtr));
     _distLockManager = distLockManagerPtr.get();
 
-    auto catalogClientPtr = makeShardingCatalogClient(std::move(distLockManagerPtr));
-    auto catalogManagerPtr = makeShardingCatalogManager(catalogClientPtr.get());
-    auto catalogCachePtr = makeCatalogCache();
-
-    auto clusterCursorManagerPtr = makeClusterCursorManager();
-
-    auto balancerConfigurationPtr = makeBalancerConfiguration();
-
-    Grid::get(operationContext())
-        ->init(std::move(catalogClientPtr),
-               std::move(catalogManagerPtr),
-               std::move(catalogCachePtr),
-               std::move(shardRegistryPtr),
-               std::move(clusterCursorManagerPtr),
-               std::move(balancerConfigurationPtr),
+    auto const grid = Grid::get(operationContext());
+    grid->init(makeShardingCatalogClient(std::move(distLockManagerPtr)),
+               stdx::make_unique<CatalogCache>(CatalogCacheLoader::get(getServiceContext())),
+               makeShardRegistry(configConnStr),
+               makeClusterCursorManager(),
+               makeBalancerConfiguration(),
                std::move(executorPoolPtr),
                _mockNetwork);
 
-    // Note: ShardRegistry::startup() is not called because it starts a task executor with a self-
-    // rescheduling task to reload the ShardRegistry over the network.
-    if (Grid::get(operationContext())->catalogClient(operationContext())) {
-        auto status = Grid::get(operationContext())->catalogClient(operationContext())->startup();
-        if (!status.isOK()) {
-            return status;
-        }
-    }
+    // NOTE: ShardRegistry::startup() is not called because it starts a task executor with a
+    // self-rescheduling task to reload the ShardRegistry over the network.
+    // grid->shardRegistry()->startup();
 
-    if (Grid::get(operationContext())->catalogManager()) {
-        auto status = Grid::get(operationContext())->catalogManager()->startup();
-        if (!status.isOK()) {
-            return status;
-        }
+    if (grid->catalogClient()) {
+        grid->catalogClient()->startup();
     }
 
     return Status::OK();
 }
 
 void ShardingMongodTestFixture::tearDown() {
-    // Only shut down components that were actually initialized and not already shut down.
+    ReplicaSetMonitor::cleanup();
 
     if (Grid::get(operationContext())->getExecutorPool() && !_executorPoolShutDown) {
         Grid::get(operationContext())->getExecutorPool()->shutdownAndJoin();
     }
 
-    if (Grid::get(operationContext())->catalogManager()) {
-        Grid::get(operationContext())->catalogManager()->shutDown(operationContext());
-    }
-
-    if (Grid::get(operationContext())->catalogClient(operationContext())) {
-        Grid::get(operationContext())
-            ->catalogClient(operationContext())
-            ->shutDown(operationContext());
+    if (Grid::get(operationContext())->catalogClient()) {
+        Grid::get(operationContext())->catalogClient()->shutDown(operationContext());
     }
 
     Grid::get(operationContext())->clearForUnitTests();
 
     _opCtx.reset();
-    _client.reset();
-
     ServiceContextMongoDTest::tearDown();
 }
 
 ShardingCatalogClient* ShardingMongodTestFixture::catalogClient() const {
-    invariant(Grid::get(operationContext())->catalogClient(operationContext()));
-    return Grid::get(operationContext())->catalogClient(operationContext());
-}
-
-ShardingCatalogManager* ShardingMongodTestFixture::catalogManager() const {
-    invariant(Grid::get(operationContext())->catalogManager());
-    return Grid::get(operationContext())->catalogManager();
+    invariant(Grid::get(operationContext())->catalogClient());
+    return Grid::get(operationContext())->catalogClient();
 }
 
 CatalogCache* ShardingMongodTestFixture::catalogCache() const {
@@ -358,11 +338,6 @@ void ShardingMongodTestFixture::shutdownExecutorPool() {
     invariant(!_executorPoolShutDown);
     executorPool()->shutdownAndJoin();
     _executorPoolShutDown = true;
-}
-
-executor::NetworkInterfaceMock* ShardingMongodTestFixture::network() const {
-    invariant(_mockNetwork);
-    return _mockNetwork;
 }
 
 executor::TaskExecutor* ShardingMongodTestFixture::executor() const {

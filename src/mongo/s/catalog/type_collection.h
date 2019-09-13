@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -34,6 +36,7 @@
 #include "mongo/db/jsobj.h"
 #include "mongo/db/keypattern.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -43,14 +46,33 @@ class StatusWith;
 
 
 /**
- * This class represents the layout and contents of documents contained in the
+ * This class represents the layout and contents of documents contained in the config server's
  * config.collections collection. All manipulation of documents coming from that collection
  * should be done with this class.
+ *
+ * Expected config server config.collections collection format:
+ *   {
+ *      "_id" : "foo.bar",
+ *      "lastmodEpoch" : ObjectId("58b6fd76132358839e409e47"),
+ *      "lastmod" : ISODate("1970-02-19T17:02:47.296Z"),
+ *      "dropped" : false,
+ *      "key" : {
+ *          "_id" : 1
+ *      },
+ *      "defaultCollation" : {
+ *          "locale" : "fr_CA"
+ *      },
+ *      "unique" : false,
+ *      "uuid" : UUID,
+ *      "noBalance" : false,
+ *      "allowSplit" : false
+ *   }
+ *
  */
 class CollectionType {
 public:
     // Name of the collections collection in the config server.
-    static const std::string ConfigNS;
+    static const NamespaceString ConfigNS;
 
     static const BSONField<std::string> fullNs;
     static const BSONField<OID> epoch;
@@ -58,6 +80,7 @@ public:
     static const BSONField<BSONObj> keyPattern;
     static const BSONField<BSONObj> defaultCollation;
     static const BSONField<bool> unique;
+    static const BSONField<UUID> uuid;
 
     /**
      * Constructs a new DatabaseType object from BSON. Also does validation of the contents.
@@ -125,9 +148,27 @@ public:
         _unique = unique;
     }
 
+    boost::optional<UUID> getUUID() const {
+        return _uuid;
+    }
+
+    void setUUID(UUID uuid) {
+        _uuid = uuid;
+    }
+
     bool getAllowBalance() const {
         return _allowBalance.get_value_or(true);
     }
+
+    void setIsAssignedShardKey(bool isAssignedShardKey) {
+        _isAssignedShardKey = isAssignedShardKey;
+    }
+
+    bool isAssignedShardKey() const {
+        return _isAssignedShardKey.get_value_or(true);
+    }
+
+    bool hasSameOptions(CollectionType& other);
 
 private:
     // Required full namespace (with the database prefix).
@@ -151,8 +192,15 @@ private:
     // Optional uniqueness of the sharding key. If missing, implies false.
     boost::optional<bool> _unique;
 
+    // Optional in 3.6 binaries, because UUID does not exist in featureCompatibilityVersion=3.4.
+    boost::optional<UUID> _uuid;
+
     // Optional whether balancing is allowed for this collection. If missing, implies true.
     boost::optional<bool> _allowBalance;
+
+    // Optional whether user has assigned a shard key to this collection before.
+    // Implicitly true if missing.
+    boost::optional<bool> _isAssignedShardKey;
 };
 
 }  // namespace mongo

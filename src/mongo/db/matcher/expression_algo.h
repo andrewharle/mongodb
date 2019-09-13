@@ -1,25 +1,27 @@
 // expression_algo.h
 
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,6 +37,7 @@
 
 #include "mongo/base/string_data.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/util/string_map.h"
 
 namespace mongo {
 
@@ -114,10 +117,18 @@ void mapOver(MatchExpression* expr, NodeTraversalFunc func, std::string path = "
  * independent, returns {exprLeft, exprRight}, where each new MatchExpression contains a portion of
  * 'expr'.
  *
+ * Any paths which should be renamed are encoded in 'renames', which maps from path names in 'expr'
+ * to the new values of those paths. If the return value is {exprLeft, exprRight} or {exprLeft,
+ * nullptr}, exprLeft will reflect the path renames. For example, suppose the original match
+ * expression is {old: {$gt: 3}} and 'renames' contains the mapping "old" => "new". The returned
+ * exprLeft value will be {new: {$gt: 3}}, provided that "old" is not in 'fields'.
+ *
  * Never returns {nullptr, nullptr}.
  */
 std::pair<std::unique_ptr<MatchExpression>, std::unique_ptr<MatchExpression>>
-splitMatchExpressionBy(std::unique_ptr<MatchExpression> expr, const std::set<std::string>& fields);
+splitMatchExpressionBy(std::unique_ptr<MatchExpression> expr,
+                       const std::set<std::string>& fields,
+                       const StringMap<std::string>& renames);
 
 }  // namespace expression
 }  // namespace mongo

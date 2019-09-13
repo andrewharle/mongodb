@@ -2,6 +2,8 @@
 // plan. For instance, there are helpers for checking whether a plan is a collection
 // scan or whether the plan is covered (index only).
 
+load("jstests/libs/fixture_helpers.js");  // For FixtureHelpers.
+
 /**
  * Given the root stage of explain's JSON representation of a query plan ('root'), returns all
  * subdocuments whose stage is 'stage'. Returns an empty array if the plan does not have the
@@ -56,64 +58,45 @@ function getPlanStage(root, stage) {
 }
 
 /**
- * Given the root stage of explain's BSON representation of a query plan ('root'),
- * returns true if the plan has a stage called 'stage'.
+ * Given the root stage of explain's JSON representation of a query plan ('root'), returns true if
+ * the query planner reports at least one rejected alternative plan, and false otherwise.
  */
-function planHasStage(root, stage) {
-    return getPlanStage(root, stage) !== null;
-}
-
-/**
- * A query is covered iff it does *not* have a FETCH stage or a COLLSCAN.
- *
- * Given the root stage of explain's BSON representation of a query plan ('root'),
- * returns true if the plan is index only. Otherwise returns false.
- */
-function isIndexOnly(root) {
-    return !planHasStage(root, "FETCH") && !planHasStage(root, "COLLSCAN");
-}
-
-/**
- * Returns true if the BSON representation of a plan rooted at 'root' is using
- * an index scan, and false otherwise.
- */
-function isIxscan(root) {
-    return planHasStage(root, "IXSCAN");
-}
-
-/**
- * Returns true if the BSON representation of a plan rooted at 'root' is using
- * the idhack fast path, and false otherwise.
- */
-function isIdhack(root) {
-    return planHasStage(root, "IDHACK");
-}
-
-/**
- * Returns true if the BSON representation of a plan rooted at 'root' is using
- * a collection scan, and false otherwise.
- */
-function isCollscan(root) {
-    return planHasStage(root, "COLLSCAN");
-}
-
-/**
- * Get the number of chunk skips for the BSON exec stats tree rooted at 'root'.
- */
-function getChunkSkips(root) {
-    if (root.stage === "SHARDING_FILTER") {
-        return root.chunkSkips;
-    } else if ("inputStage" in root) {
-        return getChunkSkips(root.inputStage);
-    } else if ("inputStages" in root) {
-        var skips = 0;
-        for (var i = 0; i < root.inputStages.length; i++) {
-            skips += getChunkSkips(root.inputStages[0]);
-        }
-        return skips;
+function hasRejectedPlans(root) {
+    function sectionHasRejectedPlans(explainSection) {
+        assert(explainSection.hasOwnProperty("rejectedPlans"), tojson(explainSection));
+        return explainSection.rejectedPlans.length !== 0;
     }
 
-    return 0;
+    function cursorStageHasRejectedPlans(cursorStage) {
+        assert(cursorStage.hasOwnProperty("$cursor"), tojson(cursorStage));
+        assert(cursorStage.$cursor.hasOwnProperty("queryPlanner"), tojson(cursorStage));
+        return sectionHasRejectedPlans(cursorStage.$cursor.queryPlanner);
+    }
+
+    if (root.hasOwnProperty("shards")) {
+        // This is a sharded agg explain.
+        const cursorStages = getAggPlanStages(root, "$cursor");
+        assert(cursorStages.length !== 0, "Did not find any $cursor stages in sharded agg explain");
+        return cursorStages.find((cursorStage) => cursorStageHasRejectedPlans(cursorStage)) !==
+            undefined;
+    } else if (root.hasOwnProperty("stages")) {
+        // This is an agg explain.
+        const cursorStages = getAggPlanStages(root, "$cursor");
+        return cursorStages.find((cursorStage) => cursorStageHasRejectedPlans(cursorStage)) !==
+            undefined;
+    } else {
+        // This is some sort of query explain.
+        assert(root.hasOwnProperty("queryPlanner"), tojson(root));
+        assert(root.queryPlanner.hasOwnProperty("winningPlan"), tojson(root));
+        if (!root.queryPlanner.winningPlan.hasOwnProperty("shards")) {
+            // This is an unsharded explain.
+            return sectionHasRejectedPlans(root.queryPlanner);
+        }
+        // This is a sharded explain. Each entry in the shards array contains a 'winningPlan' and
+        // 'rejectedPlans'.
+        return root.queryPlanner.winningPlan.shards.find(
+                   (shard) => sectionHasRejectedPlans(shard)) !== undefined;
+    }
 }
 
 /**
@@ -185,4 +168,122 @@ function getAggPlanStage(root, stage) {
                       tojson(planStageList));
         return planStageList[0];
     }
+}
+
+/**
+ * Given the root stage of agg explain's JSON representation of a query plan ('root'), returns
+ * whether the plan as stage called 'stage'.
+ */
+function aggPlanHasStage(root, stage) {
+    return getAggPlanStage(root, stage) !== null;
+}
+
+/**
+ * Given the root stage of explain's BSON representation of a query plan ('root'),
+ * returns true if the plan has a stage called 'stage'.
+ */
+function planHasStage(db, root, stage) {
+    const matchingStages = getPlanStages(root, stage);
+
+    // If we are executing against a mongos, we may get more than one occurrence of the stage.
+    if (FixtureHelpers.isMongos(db)) {
+        return matchingStages.length >= 1;
+    } else {
+        assert.lt(matchingStages.length,
+                  2,
+                  `Expected to find 0 or 1 matching stages: ${tojson(matchingStages)}`);
+        return matchingStages.length === 1;
+    }
+}
+
+/**
+ * A query is covered iff it does *not* have a FETCH stage or a COLLSCAN.
+ *
+ * Given the root stage of explain's BSON representation of a query plan ('root'),
+ * returns true if the plan is index only. Otherwise returns false.
+ */
+function isIndexOnly(db, root) {
+    return !planHasStage(db, root, "FETCH") && !planHasStage(db, root, "COLLSCAN");
+}
+
+/**
+ * Returns true if the BSON representation of a plan rooted at 'root' is using
+ * an index scan, and false otherwise.
+ */
+function isIxscan(db, root) {
+    return planHasStage(db, root, "IXSCAN");
+}
+
+/**
+ * Returns true if the BSON representation of a plan rooted at 'root' is using
+ * the idhack fast path, and false otherwise.
+ */
+function isIdhack(db, root) {
+    return planHasStage(db, root, "IDHACK");
+}
+
+/**
+ * Returns true if the BSON representation of a plan rooted at 'root' is using
+ * a collection scan, and false otherwise.
+ */
+function isCollscan(db, root) {
+    return planHasStage(db, root, "COLLSCAN");
+}
+
+/**
+ * Get the number of chunk skips for the BSON exec stats tree rooted at 'root'.
+ */
+function getChunkSkips(root) {
+    if (root.stage === "SHARDING_FILTER") {
+        return root.chunkSkips;
+    } else if ("inputStage" in root) {
+        return getChunkSkips(root.inputStage);
+    } else if ("inputStages" in root) {
+        var skips = 0;
+        for (var i = 0; i < root.inputStages.length; i++) {
+            skips += getChunkSkips(root.inputStages[0]);
+        }
+        return skips;
+    }
+
+    return 0;
+}
+
+/**
+ * Given explain output at executionStats level verbosity, confirms that the root stage is COUNT and
+ * that the result of the count is equal to 'expectedCount'.
+ */
+function assertExplainCount({explainResults, expectedCount}) {
+    const execStages = explainResults.executionStats.executionStages;
+
+    // If passed through mongos, then the root stage should be the mongos SINGLE_SHARD stage or
+    // SHARD_MERGE stages, with COUNT as the root stage on each shard. If explaining directly on the
+    // shard, then COUNT is the root stage.
+    if ("SINGLE_SHARD" == execStages.stage || "SHARD_MERGE" == execStages.stage) {
+        let totalCounted = 0;
+        for (let shardExplain of execStages.shards) {
+            const countStage = shardExplain.executionStages;
+            assert.eq(countStage.stage, "COUNT", "root stage on shard is not COUNT");
+            totalCounted += countStage.nCounted;
+        }
+        assert.eq(totalCounted, expectedCount, "wrong count result");
+    } else {
+        assert.eq(execStages.stage, "COUNT", "root stage is not COUNT");
+        assert.eq(execStages.nCounted, expectedCount, "wrong count result");
+    }
+}
+
+/**
+ * Verifies that a given query uses an index and is covered when used in a count command.
+ */
+function assertCoveredQueryAndCount({collection, query, project, count}) {
+    let explain = collection.find(query, project).explain();
+    assert(isIndexOnly(db, explain.queryPlanner.winningPlan),
+           "Winning plan was not covered: " + tojson(explain.queryPlanner.winningPlan));
+
+    // Same query as a count command should also be covered.
+    explain = collection.explain("executionStats").find(query).count();
+    assert(isIndexOnly(db, explain.queryPlanner.winningPlan),
+           "Winning plan for count was not covered: " + tojson(explain.queryPlanner.winningPlan));
+    assertExplainCount({explainResults: explain, expectedCount: count});
 }

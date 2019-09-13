@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -53,6 +55,8 @@ namespace repl {
 const size_t ReplSetConfig::kMaxMembers;
 const size_t ReplSetConfig::kMaxVotingMembers;
 const Milliseconds ReplSetConfig::kInfiniteCatchUpTimeout(-1);
+const Milliseconds ReplSetConfig::kCatchUpDisabled(0);
+const Milliseconds ReplSetConfig::kCatchUpTakeoverDisabled(-1);
 
 const std::string ReplSetConfig::kConfigServerFieldName = "configsvr";
 const std::string ReplSetConfig::kVersionFieldName = "version";
@@ -60,8 +64,10 @@ const std::string ReplSetConfig::kMajorityWriteConcernModeName = "$majority";
 const Milliseconds ReplSetConfig::kDefaultHeartbeatInterval(2000);
 const Seconds ReplSetConfig::kDefaultHeartbeatTimeoutPeriod(10);
 const Milliseconds ReplSetConfig::kDefaultElectionTimeoutPeriod(10000);
-const Milliseconds ReplSetConfig::kDefaultCatchUpTimeoutPeriod(60000);
+const Milliseconds ReplSetConfig::kDefaultCatchUpTimeoutPeriod(kInfiniteCatchUpTimeout);
 const bool ReplSetConfig::kDefaultChainingAllowed(true);
+const Milliseconds ReplSetConfig::kDefaultCatchUpTakeoverDelay(30000);
+const std::string ReplSetConfig::kRepairedFieldName = "repaired";
 
 namespace {
 
@@ -89,25 +95,26 @@ const std::string kHeartbeatIntervalFieldName = "heartbeatIntervalMillis";
 const std::string kHeartbeatTimeoutFieldName = "heartbeatTimeoutSecs";
 const std::string kCatchUpTimeoutFieldName = "catchUpTimeoutMillis";
 const std::string kReplicaSetIdFieldName = "replicaSetId";
+const std::string kCatchUpTakeoverDelayFieldName = "catchUpTakeoverDelayMillis";
 
 }  // namespace
 
-Status ReplSetConfig::initialize(const BSONObj& cfg,
-                                 bool usePV1ByDefault,
-                                 OID defaultReplicaSetId) {
-    return _initialize(cfg, false, usePV1ByDefault, defaultReplicaSetId);
+Status ReplSetConfig::initialize(const BSONObj& cfg, OID defaultReplicaSetId) {
+    return _initialize(cfg, false, defaultReplicaSetId);
 }
 
-Status ReplSetConfig::initializeForInitiate(const BSONObj& cfg, bool usePV1ByDefault) {
-    return _initialize(cfg, true, usePV1ByDefault, OID());
+Status ReplSetConfig::initializeForInitiate(const BSONObj& cfg) {
+    return _initialize(cfg, true, OID());
 }
 
-Status ReplSetConfig::_initialize(const BSONObj& cfg,
-                                  bool forInitiate,
-                                  bool usePV1ByDefault,
-                                  OID defaultReplicaSetId) {
+Status ReplSetConfig::_initialize(const BSONObj& cfg, bool forInitiate, OID defaultReplicaSetId) {
     _isInitialized = false;
     _members.clear();
+
+    if (cfg.hasField(kRepairedFieldName)) {
+        return {ErrorCodes::RepairedReplicaSetNode, "Replicated data has been repaired"};
+    }
+
     Status status =
         bsonCheckOnlyHasFields("replica set configuration", cfg, kLegalConfigTopFieldNames);
     if (!status.isOK())
@@ -135,8 +142,7 @@ Status ReplSetConfig::_initialize(const BSONObj& cfg,
     if (!status.isOK())
         return status;
 
-    for (BSONObj::iterator membersIterator(membersElement.Obj()); membersIterator.more();) {
-        BSONElement memberElement = membersIterator.next();
+    for (auto&& memberElement : membersElement.Obj()) {
         if (memberElement.type() != Object) {
             return Status(ErrorCodes::TypeMismatch,
                           str::stream() << "Expected type of " << kMembersFieldName << "."
@@ -144,12 +150,14 @@ Status ReplSetConfig::_initialize(const BSONObj& cfg,
                                         << " to be Object, but found "
                                         << typeName(memberElement.type()));
         }
-        _members.resize(_members.size() + 1);
         const auto& memberBSON = memberElement.Obj();
-        status = _members.back().initialize(memberBSON, &_tagConfig);
-        if (!status.isOK())
-            return Status(ErrorCodes::InvalidReplicaSetConfig,
-                          str::stream() << status.toString() << " for member:" << memberBSON);
+        try {
+            _members.emplace_back(memberBSON, &_tagConfig);
+        } catch (const DBException& ex) {
+            return Status(
+                ErrorCodes::InvalidReplicaSetConfig,
+                str::stream() << ex.toStatus().toString() << " for member:" << memberBSON);
+        }
     }
 
     //
@@ -172,10 +180,15 @@ Status ReplSetConfig::_initialize(const BSONObj& cfg,
         if (status != ErrorCodes::NoSuchKey) {
             return status;
         }
-
-        if (usePV1ByDefault) {
+        if (forInitiate) {
+            // Default protocolVersion to 1 when initiating a new set.
             _protocolVersion = 1;
         }
+        // If protocolVersion field is missing but this *isn't* for an initiate, leave
+        // _protocolVersion at it's default of 0 for now.  It will error later on, during
+        // validate().
+        // TODO(spencer): Remove this after 4.0, when we no longer need mixed-version support
+        // with versions that don't always include the protocolVersion field.
     }
 
     //
@@ -183,7 +196,7 @@ Status ReplSetConfig::_initialize(const BSONObj& cfg,
     //
     status = bsonExtractBooleanFieldWithDefault(cfg,
                                                 kWriteConcernMajorityJournalDefaultFieldName,
-                                                _protocolVersion == 1,
+                                                true,
                                                 &_writeConcernMajorityJournalDefault);
     if (!status.isOK())
         return status;
@@ -246,8 +259,8 @@ Status ReplSetConfig::_parseSettingsSubdocument(const BSONObj& settings) {
     //
     // Parse electionTimeoutMillis
     //
-    auto greaterThanZero = stdx::bind(std::greater<long long>(), stdx::placeholders::_1, 0);
     long long electionTimeoutMillis;
+    auto greaterThanZero = [](const auto& x) { return x > 0; };
     auto electionTimeoutStatus = bsonExtractIntegerFieldWithDefaultIf(
         settings,
         kElectionTimeoutFieldName,
@@ -279,19 +292,37 @@ Status ReplSetConfig::_parseSettingsSubdocument(const BSONObj& settings) {
     //
     // Parse catchUpTimeoutMillis
     //
-    auto validCatchUpTimeout = [](long long timeout) { return timeout >= 0LL || timeout == -1LL; };
+    auto validCatchUpParameter = [](long long timeout) {
+        return timeout >= 0LL || timeout == -1LL;
+    };
     long long catchUpTimeoutMillis;
     Status catchUpTimeoutStatus = bsonExtractIntegerFieldWithDefaultIf(
         settings,
         kCatchUpTimeoutFieldName,
         durationCount<Milliseconds>(kDefaultCatchUpTimeoutPeriod),
-        validCatchUpTimeout,
+        validCatchUpParameter,
         "catch-up timeout must be positive, 0 (no catch-up) or -1 (infinite catch-up).",
         &catchUpTimeoutMillis);
     if (!catchUpTimeoutStatus.isOK()) {
         return catchUpTimeoutStatus;
     }
     _catchUpTimeoutPeriod = Milliseconds(catchUpTimeoutMillis);
+
+    //
+    // Parse catchUpTakeoverDelayMillis
+    //
+    long long catchUpTakeoverDelayMillis;
+    Status catchUpTakeoverDelayStatus = bsonExtractIntegerFieldWithDefaultIf(
+        settings,
+        kCatchUpTakeoverDelayFieldName,
+        durationCount<Milliseconds>(kDefaultCatchUpTakeoverDelay),
+        validCatchUpParameter,
+        "catch-up takeover delay must be -1 (no catch-up takeover) or greater than or equal to 0.",
+        &catchUpTakeoverDelayMillis);
+    if (!catchUpTakeoverDelayStatus.isOK()) {
+        return catchUpTakeoverDelayStatus;
+    }
+    _catchUpTakeoverDelay = Milliseconds(catchUpTakeoverDelayMillis);
 
     //
     // Parse chainingAllowed
@@ -331,8 +362,7 @@ Status ReplSetConfig::_parseSettingsSubdocument(const BSONObj& settings) {
         return status;
     }
 
-    for (BSONObj::iterator gleModeIter(gleModes); gleModeIter.more();) {
-        const BSONElement modeElement = gleModeIter.next();
+    for (auto&& modeElement : gleModes) {
         if (_customWriteConcernModes.find(modeElement.fieldNameStringData()) !=
             _customWriteConcernModes.end()) {
             return Status(ErrorCodes::DuplicateKey,
@@ -350,8 +380,7 @@ Status ReplSetConfig::_parseSettingsSubdocument(const BSONObj& settings) {
                                         << typeName(modeElement.type()));
         }
         ReplSetTagPattern pattern = _tagConfig.makePattern();
-        for (BSONObj::iterator constraintIter(modeElement.Obj()); constraintIter.more();) {
-            const BSONElement constraintElement = constraintIter.next();
+        for (auto&& constraintElement : modeElement.Obj()) {
             if (!constraintElement.isNumber()) {
                 return Status(ErrorCodes::TypeMismatch,
                               str::stream() << "Expected " << kSettingsFieldName << '.'
@@ -430,11 +459,53 @@ Status ReplSetConfig::validate() const {
     size_t voterCount = 0;
     size_t arbiterCount = 0;
     size_t electableCount = 0;
+
+    auto extractHorizonMembers = [](const auto& replMember) {
+        std::vector<std::string> rv;
+        std::transform(begin(replMember.getHorizonMappings()),
+                       end(replMember.getHorizonMappings()),
+                       back_inserter(rv),
+                       [](auto&& mapping) { return mapping.first; });
+        std::sort(begin(rv), end(rv));
+        return rv;
+    };
+
+    const auto expectedHorizonNameMapping = extractHorizonMembers(_members[0]);
+
+    stdx::unordered_set<std::string> nonUniversalHorizons;
+    std::map<HostAndPort, int> horizonHostNameCounts;
     for (size_t i = 0; i < _members.size(); ++i) {
         const MemberConfig& memberI = _members[i];
         Status status = memberI.validate();
         if (!status.isOK())
             return status;
+
+        // Check the replica set configuration for errors in horizon specification:
+        //   * Check that all members have the same set of horizon names
+        //   * Check that no hostname:port appears more than once for any member
+        //   * Check that all hostname:port endpoints are unique for all members
+        const auto seenHorizonNameMapping = extractHorizonMembers(memberI);
+
+        if (expectedHorizonNameMapping != seenHorizonNameMapping) {
+            // Collect a list of horizons only seen on one side of the pair of horizon maps
+            // considered.  Names that are only on one side are non-universal, and should be
+            // reported -- the same set of horizon names must exist across all replica set members.
+            // We collect the list while parsing over ALL members, this way we can report all
+            // horizons which are not universally listed in the replica set configuration in a
+            // single error message.
+            std::set_symmetric_difference(
+                begin(expectedHorizonNameMapping),
+                end(expectedHorizonNameMapping),
+                begin(seenHorizonNameMapping),
+                end(seenHorizonNameMapping),
+                inserter(nonUniversalHorizons, end(nonUniversalHorizons)));
+        } else {
+            // Because "__default" always lives in the mappings, we don't have to get it separately
+            for (const auto& mapping : memberI.getHorizonMappings()) {
+                ++horizonHostNameCounts[mapping.second];
+            }
+        }
+
         if (memberI.getHostAndPort().isLocalHost()) {
             ++localhostCount;
         }
@@ -492,6 +563,48 @@ Status ReplSetConfig::validate() const {
         }
     }
 
+    // If we found horizons that weren't universally present, list all non-universally present
+    // horizons for this replica set.
+    if (!nonUniversalHorizons.empty()) {
+        const auto missingHorizonList = [&] {
+            std::string rv;
+            for (const auto& horizonName : nonUniversalHorizons) {
+                rv += " " + horizonName + ",";
+            }
+            rv.pop_back();
+            return rv;
+        }();
+        return Status(ErrorCodes::BadValue,
+                      "Saw a replica set member with a different horizon mapping than the "
+                      "others.  The following horizons were not universally present:" +
+                          missingHorizonList);
+    }
+
+    const auto nonUniqueHostNameList = [&] {
+        std::vector<HostAndPort> rv;
+        for (const auto& host : horizonHostNameCounts) {
+            if (host.second > 1)
+                rv.push_back(host.first);
+        }
+        return rv;
+    }();
+
+    if (!nonUniqueHostNameList.empty()) {
+        const auto nonUniqueHostNames = [&] {
+            std::string rv;
+            for (const auto& hostName : nonUniqueHostNameList) {
+                rv += " " + hostName.toString() + ",";
+            }
+            rv.pop_back();
+            return rv;
+        }();
+        return Status(ErrorCodes::BadValue,
+                      "The following hostnames are not unique across all horizons and host "
+                      "specifications in the replica set:" +
+                          nonUniqueHostNames);
+    }
+
+
     if (localhostCount != 0 && localhostCount != _members.size()) {
         return Status(
             ErrorCodes::BadValue,
@@ -516,8 +629,6 @@ Status ReplSetConfig::validate() const {
                       "one non-arbiter member with priority > 0");
     }
 
-    // TODO(schwerin): Validate satisfiability of write modes? Omitting for backwards
-    // compatibility.
     if (_defaultWriteConcern.wMode.empty()) {
         if (_defaultWriteConcern.wNumNodes == 0) {
             return Status(ErrorCodes::BadValue,
@@ -532,17 +643,23 @@ Status ReplSetConfig::validate() const {
         }
     }
 
-    if (_protocolVersion != 0 && _protocolVersion != 1) {
+
+    if (_protocolVersion == 0) {
+        return Status(
+            ErrorCodes::BadValue,
+            str::stream()
+                << "Support for replication protocol version 0 was removed in MongoDB 4.0. "
+                << "Downgrade to MongoDB version 3.6 and upgrade your protocol "
+                   "version to 1 before upgrading your MongoDB version");
+    }
+    if (_protocolVersion != 1) {
         return Status(ErrorCodes::BadValue,
-                      str::stream() << kProtocolVersionFieldName << " field value of "
-                                    << _protocolVersion
-                                    << " is not 1 or 0");
+                      str::stream() << kProtocolVersionFieldName
+                                    << " of 1 is the only supported value. Found: "
+                                    << _protocolVersion);
     }
 
     if (_configServer) {
-        if (_protocolVersion == 0) {
-            return Status(ErrorCodes::BadValue, "Config servers cannot run in protocolVersion 0");
-        }
         if (arbiterCount > 0) {
             return Status(ErrorCodes::BadValue,
                           "Arbiters are not allowed in replica set configurations being used for "
@@ -640,7 +757,7 @@ const MemberConfig* ReplSetConfig::findMemberByID(int id) const {
     return NULL;
 }
 
-const int ReplSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap) const {
+int ReplSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap) const {
     int x = 0;
     for (std::vector<MemberConfig>::const_iterator it = _members.begin(); it != _members.end();
          ++it) {
@@ -652,7 +769,7 @@ const int ReplSetConfig::findMemberIndexByHostAndPort(const HostAndPort& hap) co
     return -1;
 }
 
-const int ReplSetConfig::findMemberIndexByConfigId(long long configId) const {
+int ReplSetConfig::findMemberIndexByConfigId(long long configId) const {
     int x = 0;
     for (const auto& member : _members) {
         if (member.getId() == configId) {
@@ -695,13 +812,10 @@ StatusWith<ReplSetTagPattern> ReplSetConfig::findCustomWriteMode(StringData patt
 }
 
 void ReplSetConfig::_calculateMajorities() {
-    const int voters = std::count_if(_members.begin(),
-                                     _members.end(),
-                                     stdx::bind(&MemberConfig::isVoter, stdx::placeholders::_1));
+    const int voters =
+        std::count_if(begin(_members), end(_members), [](const auto& x) { return x.isVoter(); });
     const int arbiters =
-        std::count_if(_members.begin(),
-                      _members.end(),
-                      stdx::bind(&MemberConfig::isArbiter, stdx::placeholders::_1));
+        std::count_if(begin(_members), end(_members), [](const auto& x) { return x.isArbiter(); });
     _totalVotingMembers = voters;
     _majorityVoteCount = voters / 2 + 1;
     _writeMajority = std::min(_majorityVoteCount, voters - arbiters);
@@ -747,7 +861,7 @@ void ReplSetConfig::_initializeConnectionString() {
     try {
         _connectionString = ConnectionString::forReplicaSet(_replSetName, visibleMembers);
     } catch (const DBException& e) {
-        invariant(e.getCode() == ErrorCodes::FailedToParse);
+        invariant(e.code() == ErrorCodes::FailedToParse);
         // Failure to construct the ConnectionString means either an invalid replica set name
         // or members array, which should be caught in validate()
     }
@@ -762,21 +876,9 @@ BSONObj ReplSetConfig::toBSON() const {
         configBuilder.append(kConfigServerFieldName, _configServer);
     }
 
-    // Only include writeConcernMajorityJournalDefault if it is not the default version for this
-    // ProtocolVersion to prevent breaking cross version-3.2.1 compatibilty of ReplSetConfigs.
-    if (_protocolVersion > 0) {
-        configBuilder.append(kProtocolVersionFieldName, _protocolVersion);
-        // Only include writeConcernMajorityJournalDefault if it is not the default version for this
-        // ProtocolVersion to prevent breaking cross version-3.2.1 compatibilty of
-        // ReplSetConfigs.
-        if (!_writeConcernMajorityJournalDefault) {
-            configBuilder.append(kWriteConcernMajorityJournalDefaultFieldName,
-                                 _writeConcernMajorityJournalDefault);
-        }
-    } else if (_writeConcernMajorityJournalDefault) {
-        configBuilder.append(kWriteConcernMajorityJournalDefaultFieldName,
-                             _writeConcernMajorityJournalDefault);
-    }
+    configBuilder.append(kProtocolVersionFieldName, _protocolVersion);
+    configBuilder.append(kWriteConcernMajorityJournalDefaultFieldName,
+                         _writeConcernMajorityJournalDefault);
 
     BSONArrayBuilder members(configBuilder.subarrayStart(kMembersFieldName));
     for (MemberIterator mem = membersBegin(); mem != membersEnd(); mem++) {
@@ -794,6 +896,8 @@ BSONObj ReplSetConfig::toBSON() const {
                                   durationCount<Milliseconds>(_electionTimeoutPeriod));
     settingsBuilder.appendIntOrLL(kCatchUpTimeoutFieldName,
                                   durationCount<Milliseconds>(_catchUpTimeoutPeriod));
+    settingsBuilder.appendIntOrLL(kCatchUpTakeoverDelayFieldName,
+                                  durationCount<Milliseconds>(_catchUpTakeoverDelay));
 
 
     BSONObjBuilder gleModes(settingsBuilder.subobjStart(kGetLastErrorModesFieldName));
@@ -837,11 +941,11 @@ std::vector<std::string> ReplSetConfig::getWriteConcernNames() const {
 
 Milliseconds ReplSetConfig::getPriorityTakeoverDelay(int memberIdx) const {
     auto member = getMemberAt(memberIdx);
-    int priorityRank = _calculatePriorityRank(member.getPriority());
+    int priorityRank = calculatePriorityRank(member.getPriority());
     return (priorityRank + 1) * getElectionTimeoutPeriod();
 }
 
-int ReplSetConfig::_calculatePriorityRank(double priority) const {
+int ReplSetConfig::calculatePriorityRank(double priority) const {
     int count = 0;
     for (MemberIterator mem = membersBegin(); mem != membersEnd(); mem++) {
         if (mem->getPriority() > priority) {
@@ -849,6 +953,15 @@ int ReplSetConfig::_calculatePriorityRank(double priority) const {
         }
     }
     return count;
+}
+
+bool ReplSetConfig::containsArbiter() const {
+    for (MemberIterator mem = membersBegin(); mem != membersEnd(); mem++) {
+        if (mem->isArbiter()) {
+            return true;
+        }
+    }
+    return false;
 }
 
 }  // namespace repl

@@ -1,17 +1,31 @@
 # -*- mode: python -*-
 
 Import("env")
+Import("get_option")
+
+env = env.Clone()
+
+env.Library(
+    target='cluster_commands_helpers',
+    source=[
+        'cluster_commands_helpers.cpp',
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/db/curop',
+        '$BUILD_DIR/mongo/s/async_requests_sender',
+    ],
+)
 
 # These commands are linked both in MongoS and MongoD
 env.Library(
     target='shared_cluster_commands',
     source=[
-        'cluster_get_shard_map_cmd.cpp',
+        'flush_router_config_cmd.cpp',
+        'get_shard_map_cmd.cpp',
     ],
-    LIBDEPS=[
+    LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands',
-        '$BUILD_DIR/mongo/s/client/sharding_client',
-        '$BUILD_DIR/mongo/s/coreshard',
+        '$BUILD_DIR/mongo/s/grid',
     ]
 )
 
@@ -19,28 +33,35 @@ env.Library(
 env.Library(
     target='cluster_commands',
     source=[
-        'chunk_manager_targeter.cpp',
         'cluster_add_shard_cmd.cpp',
         'cluster_add_shard_to_zone_cmd.cpp',
         'cluster_aggregate.cpp',
-        'cluster_apply_ops_cmd.cpp',
         'cluster_available_query_options_cmd.cpp',
-        'cluster_commands_common.cpp',
+        'cluster_build_info.cpp',
+        'cluster_coll_stats_cmd.cpp',
+        'cluster_collection_mod_cmd.cpp',
         'cluster_compact_cmd.cpp',
         'cluster_control_balancer_cmd.cpp',
         'cluster_count_cmd.cpp',
+        'cluster_create_cmd.cpp',
+        'cluster_create_indexes_cmd.cpp',
         'cluster_current_op.cpp',
+        'cluster_data_size_cmd.cpp',
         'cluster_db_stats_cmd.cpp',
+        'cluster_distinct_cmd.cpp',
         'cluster_drop_cmd.cpp',
         'cluster_drop_database_cmd.cpp',
+        'cluster_drop_indexes_cmd.cpp',
         'cluster_enable_sharding_cmd.cpp',
+        'cluster_eval_cmd.cpp',
         'cluster_explain.cpp',
         'cluster_explain_cmd.cpp',
+        'cluster_filemd5_cmd.cpp',
         'cluster_find_and_modify_cmd.cpp',
         'cluster_find_cmd.cpp',
-        'cluster_flush_router_config_cmd.cpp',
         'cluster_fsync_cmd.cpp',
         'cluster_ftdc_commands.cpp',
+        'cluster_geo_near_cmd.cpp',
         'cluster_get_last_error_cmd.cpp',
         'cluster_get_prev_error_cmd.cpp',
         'cluster_get_shard_version_cmd.cpp',
@@ -56,42 +77,98 @@ env.Library(
         'cluster_merge_chunks_cmd.cpp',
         'cluster_move_chunk_cmd.cpp',
         'cluster_move_primary_cmd.cpp',
+        'cluster_multicast.cpp',
         'cluster_netstat_cmd.cpp',
         'cluster_pipeline_cmd.cpp',
         'cluster_plan_cache_cmd.cpp',
         'cluster_profile_cmd.cpp',
+        'cluster_reindex_cmd.cpp',
         'cluster_remove_shard_cmd.cpp',
         'cluster_remove_shard_from_zone_cmd.cpp',
-        'cluster_repair_database_cmd.cpp',
         'cluster_repl_set_get_status_cmd.cpp',
         'cluster_reset_error_cmd.cpp',
+        'cluster_restart_catalog_command.cpp',
         'cluster_set_feature_compatibility_version_cmd.cpp',
+        'cluster_set_free_monitoring.cpp' if get_option("enable-free-mon") == 'on' else [],
         'cluster_shard_collection_cmd.cpp',
         'cluster_shutdown_cmd.cpp',
         'cluster_split_cmd.cpp',
         'cluster_update_zone_key_range_cmd.cpp',
         'cluster_user_management_commands.cpp',
+        'cluster_validate_cmd.cpp',
         'cluster_whats_my_uri_cmd.cpp',
-        'cluster_write.cpp',
         'cluster_write_cmd.cpp',
         'commands_public.cpp',
-        'dbclient_multi_command.cpp',
-        'run_on_all_shards_cmd.cpp',
-        'sharded_command_processing.cpp',
+        'kill_sessions_remote.cpp',
+        'pipeline_s.cpp',
         'strategy.cpp',
+        env.Idlc('cluster_multicast.idl')[0],
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/auth/auth',
+        '$BUILD_DIR/mongo/db/auth/role_graph',
+        '$BUILD_DIR/mongo/db/auth/saslauth',
+        '$BUILD_DIR/mongo/db/commands/core',
+        '$BUILD_DIR/mongo/db/commands/current_op_common',
+        '$BUILD_DIR/mongo/db/commands/servers',
+        '$BUILD_DIR/mongo/db/commands/feature_compatibility_parsers',
+        '$BUILD_DIR/mongo/db/commands/kill_common',
+        '$BUILD_DIR/mongo/db/commands/list_databases_command',
+        '$BUILD_DIR/mongo/db/commands/profile_common',
+        '$BUILD_DIR/mongo/db/commands/test_commands_enabled',
+        '$BUILD_DIR/mongo/db/commands/write_commands_common',
+        '$BUILD_DIR/mongo/db/ftdc/ftdc_server',
+        '$BUILD_DIR/mongo/db/logical_session_cache_impl',
+        '$BUILD_DIR/mongo/db/pipeline/aggregation',
+        '$BUILD_DIR/mongo/db/stats/counters',
+        '$BUILD_DIR/mongo/db/views/views',
+        '$BUILD_DIR/mongo/executor/async_multicaster',
+        '$BUILD_DIR/mongo/rpc/client_metadata',
+        '$BUILD_DIR/mongo/s/sharding_api',
+        '$BUILD_DIR/mongo/s/sharding_legacy_api',
+        '$BUILD_DIR/mongo/s/write_ops/cluster_write_op_conversion',
+        '$BUILD_DIR/mongo/transport/message_compressor',
+        '$BUILD_DIR/mongo/transport/transport_layer_common',
+        'shared_cluster_commands',
+    ]
+)
+
+env.CppUnitTest(
+    target='append_at_cluster_time_test',
+    source=[
+        'append_at_cluster_time_test.cpp',
     ],
     LIBDEPS=[
-        '$BUILD_DIR/mongo/db/commands/apply_ops_cmd_common',
-        '$BUILD_DIR/mongo/db/commands/killcursors_common',
-        '$BUILD_DIR/mongo/db/ftdc/ftdc_server',
-        '$BUILD_DIR/mongo/db/pipeline/aggregation',
-        '$BUILD_DIR/mongo/db/views/views',
-        '$BUILD_DIR/mongo/rpc/client_metadata',
-        '$BUILD_DIR/mongo/s/client/parallel',
-        '$BUILD_DIR/mongo/s/coreshard',
-        '$BUILD_DIR/mongo/s/mongoscore',
-        '$BUILD_DIR/mongo/s/write_ops/cluster_write_op',
-        '$BUILD_DIR/mongo/s/write_ops/cluster_write_op_conversion',
-        '$BUILD_DIR/mongo/transport/transport_layer_common',
+        'cluster_commands_helpers',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/logical_time',
+        '$BUILD_DIR/mongo/unittest/unittest',
     ]
+)
+
+env.CppUnitTest(
+    target='compute_at_cluster_time_test',
+    source=[
+        'compute_at_cluster_time_test.cpp',
+    ],
+    LIBDEPS=[
+        'cluster_commands_helpers',
+        '$BUILD_DIR/mongo/s/catalog_cache_test_fixture',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/logical_clock',
+        '$BUILD_DIR/mongo/unittest/unittest',
+    ]
+)
+
+env.CppUnitTest(
+    target="cluster_aggregate_test",
+    source=[
+        "cluster_aggregate_test.cpp",
+    ],
+    LIBDEPS=[
+        'cluster_commands',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/auth/saslauth',
+        '$BUILD_DIR/mongo/s/catalog_cache_test_fixture',
+    ],
 )

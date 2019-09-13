@@ -1,4 +1,5 @@
 // Write ops tests for partial indexes.
+// @tags: [cannot_create_unique_index_when_using_hashed_shard_key, requires_non_retryable_writes]
 
 (function() {
     "use strict";
@@ -14,7 +15,7 @@
         } else {
             kpi = res.keysPerIndex;
         }
-        return kpi[coll.getFullName() + ".$" + idxName];
+        return kpi[idxName];
     };
 
     coll.drop();

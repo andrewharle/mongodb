@@ -25,9 +25,6 @@
 /* Define to 1 if you have the `clock_gettime' function. */
 /* #undef HAVE_CLOCK_GETTIME */
 
-/* Define to 1 to enable CRC32 hardware support. */
-/* #undef HAVE_CRC32_HARDWARE */
-
 /* Define to 1 for diagnostic tests. */
 /* #undef HAVE_DIAGNOSTIC */
 
@@ -79,6 +76,9 @@
 /* Define to 1 if you have the <memory.h> header file. */
 /* #undef HAVE_MEMORY_H */
 
+/* Define to 1 to disable any crc32 hardware support. */
+/* #undef HAVE_NO_CRC32_HARDWARE */
+
 /* Define to 1 if pthread condition variables support monotonic clocks. */
 /* #undef HAVE_PTHREAD_COND_MONOTONIC */
 
@@ -123,9 +123,6 @@
 
 /* Define to 1 if you have the <unistd.h> header file. */
 /* #undef HAVE_UNISTD_H */
-
-/* Enable verbose message configuration. */
-/* #undef HAVE_VERBOSE */
 
 /* Define to 1 if you have the <x86intrin.h> header file. */
 #define HAVE_X86INTRIN_H 1

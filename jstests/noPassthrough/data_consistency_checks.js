@@ -69,7 +69,7 @@ var db;
         rst.initiateWithNodeZeroAsPrimary();
 
         // Insert a document so the "dbhash" and "validate" commands have some actual work to do.
-        assert.writeOK(rst.nodes[0].getDB("test").mycoll.insert({}));
+        assert.commandWorked(rst.nodes[0].getDB("test").mycoll.insert({}));
         const output =
             runDataConsistencyChecks({conn: rst.nodes[0], teardown: () => rst.stopSet()});
 
@@ -102,7 +102,7 @@ var db;
         rst.initiate(replSetConfig);
 
         // Insert a document so the "dbhash" and "validate" commands have some actual work to do.
-        assert.writeOK(rst.nodes[0].getDB("test").mycoll.insert({}));
+        assert.commandWorked(rst.nodes[0].getDB("test").mycoll.insert({}));
         const output =
             runDataConsistencyChecks({conn: rst.nodes[0], teardown: () => rst.stopSet()});
 
@@ -167,12 +167,12 @@ var db;
 
         // Insert a document so the "dbhash" and "validate" commands have some actual work to do on
         // the replica set shard.
-        assert.writeOK(st.s.getDB("test").mycoll.insert({_id: 0}));
+        assert.commandWorked(st.s.getDB("test").mycoll.insert({_id: 0}));
         const output = runDataConsistencyChecks({conn: st.s, teardown: () => st.stop()});
 
-        // The "admin" database exists on both the CSRS and the replica set shards due to the
-        // "admin.system.version" collection.
-        let pattern = makePatternForDBHash("admin");
+        // The "config" database exists on both the CSRS and the replica set shards due to the
+        // "config.transactions" collection.
+        let pattern = makePatternForDBHash("config");
         assert.eq(5,
                   countMatches(pattern, output),
                   "expected to find " + tojson(pattern) +

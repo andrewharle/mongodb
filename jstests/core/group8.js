@@ -1,3 +1,12 @@
+// @tags: [
+//     # Cannot implicitly shard accessed collections because of unsupported group operator on
+//     # sharded collection.
+//     assumes_unsharded_collection,
+//
+//     # group requires javascript
+//     requires_scripting
+// ]
+
 // Test correctness of the "keys" and and "count" fields in the group command output.
 var coll = db.group8;
 var result;

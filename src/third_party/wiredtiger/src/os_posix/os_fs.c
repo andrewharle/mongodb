@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -138,7 +138,7 @@ __posix_directory_sync(WT_SESSION_IMPL *session, const char *path)
 	dir = tmp->mem;
 	strrchr(dir, '/')[1] = '\0';
 
-	fd = -1;			/* -Wconditional-uninitialized */
+	fd = 0;				/* -Wconditional-uninitialized */
 	WT_SYSCALL_RETRY((
 	    (fd = open(dir, O_RDONLY, 0444)) == -1 ? -1 : 0), ret);
 	if (ret != 0)
@@ -338,7 +338,7 @@ __posix_file_advise(WT_FILE_HANDLE *file_handle, WT_SESSION *wt_session,
 	 */
 	if (ret == EINVAL) {
 		file_handle->fh_advise = NULL;
-		return (ENOTSUP);
+		return (__wt_set_return(session, ENOTSUP));
 	}
 
 	WT_RET_MSG(session, ret,
@@ -439,11 +439,15 @@ __posix_file_read(WT_FILE_HANDLE *file_handle,
 	/* Break reads larger than 1GB into 1GB chunks. */
 	for (addr = buf; len > 0; addr += nr, len -= (size_t)nr, offset += nr) {
 		chunk = WT_MIN(len, WT_GIGABYTE);
-		if ((nr = pread(pfh->fd, addr, chunk, offset)) <= 0)
-			WT_RET_MSG(session, nr == 0 ? WT_ERROR : __wt_errno(),
+		if ((nr = pread(pfh->fd, addr, chunk, offset)) <= 0) {
+			if (nr == 0)
+				F_SET(S2C(session), WT_CONN_DATA_CORRUPTION);
+			WT_RET_MSG(session,
+			    nr == 0 ? WT_ERROR : __wt_errno(),
 			    "%s: handle-read: pread: failed to read %"
 			    WT_SIZET_FMT " bytes at offset %" PRIuMAX,
 			    file_handle->name, chunk, (uintmax_t)offset);
+		}
 	}
 	return (0);
 }
@@ -596,7 +600,7 @@ __posix_open_file_cloexec(WT_SESSION_IMPL *session, int fd, const char *name)
 	if ((f = fcntl(fd, F_GETFD)) == -1 ||
 	    fcntl(fd, F_SETFD, f | FD_CLOEXEC) == -1)
 		WT_RET_MSG(session, __wt_errno(),
-		    "%s: handle-open: fcntl", name);
+		    "%s: handle-open: fcntl(FD_CLOEXEC)", name);
 	return (0);
 #else
 	WT_UNUSED(session);
@@ -648,7 +652,8 @@ __posix_open_file(WT_FILE_SYSTEM *file_system, WT_SESSION *wt_session,
 		WT_SYSCALL_RETRY((
 		    (pfh->fd = open(name, f, 0444)) == -1 ? -1 : 0), ret);
 		if (ret != 0)
-			WT_ERR_MSG(session, ret, "%s: handle-open: open", name);
+			WT_ERR_MSG(session, ret,
+			    "%s: handle-open: open-directory", name);
 		WT_ERR(__posix_open_file_cloexec(session, pfh->fd, name));
 		goto directory_open;
 	}
@@ -821,6 +826,8 @@ __wt_os_posix(WT_SESSION_IMPL *session)
 
 	/* Initialize the POSIX jump table. */
 	file_system->fs_directory_list = __wt_posix_directory_list;
+	file_system->fs_directory_list_single =
+	    __wt_posix_directory_list_single;
 	file_system->fs_directory_list_free = __wt_posix_directory_list_free;
 	file_system->fs_exist = __posix_fs_exist;
 	file_system->fs_open_file = __posix_open_file;

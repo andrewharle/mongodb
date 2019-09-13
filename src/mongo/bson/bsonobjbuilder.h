@@ -5,31 +5,34 @@
    BSONArrayBuilder
 */
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -45,6 +48,7 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonmisc.h"
 #include "mongo/bson/bsonobj.h"
+#include "mongo/bson/util/builder.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/stdx/type_traits.h"
 #include "mongo/util/itoa.h"
@@ -104,7 +108,7 @@ public:
           _s(this),
           _tracker(nullptr),
           _doneCalled(false) {
-        invariant(_b.len() >= BSONObj::kMinBSONLength);
+        invariant(_b.len() - offset >= BSONObj::kMinBSONLength);
         _b.setlen(_b.len() - 1);  // get rid of the previous EOO.
         // Reserve space for our EOO.
         _b.reserveBytes(1);
@@ -124,6 +128,44 @@ public:
         _b.reserveBytes(1);
     }
 
+    /**
+     * Creates a new BSONObjBuilder prefixed with the fields in 'prefix'.
+     *
+     * If prefix is an rvalue referring to the only view of the underlying BSON buffer, it will be
+     * able to avoid copying and will just reuse the buffer. Therefore, you should try to std::move
+     * into this constructor where possible.
+     */
+    BSONObjBuilder(BSONObj prefix)
+        : _b(_buf), _buf(0), _offset(0), _s(this), _tracker(0), _doneCalled(false) {
+        // If prefix wasn't owned or we don't have exclusive access to it, we must copy.
+        if (!prefix.isOwned() || prefix.sharedBuffer().isShared()) {
+            _b.grow(prefix.objsize());  // Make sure we won't need to realloc().
+            _b.setlen(sizeof(int));     // Skip over size bytes (see first constructor).
+            _b.reserveBytes(1);         // Reserve room for our EOO byte.
+            appendElements(prefix);
+            return;
+        }
+
+        const auto size = prefix.objsize();
+        const char* const firstByte = prefix.objdata();
+        auto buf = prefix.releaseSharedBuffer().constCast();
+        _offset = firstByte - buf.get();
+        _b.useSharedBuffer(std::move(buf));
+        _b.setlen(_offset + size - 1);  // Position right before prefix's EOO byte.
+        _b.reserveBytes(1);             // Reserve room for our EOO byte.
+    }
+
+    // Move constructible, but not assignable due to reference member.
+    BSONObjBuilder(BSONObjBuilder&& other)
+        : _b(&other._b == &other._buf ? _buf : other._b),
+          _buf(std::move(other._buf)),
+          _offset(std::move(other._offset)),
+          _s(this),  // Don't move from other._s because that will leave it pointing to other.
+          _tracker(std::move(other._tracker)),
+          _doneCalled(std::move(other._doneCalled)) {
+        other.abandon();
+    }
+
     ~BSONObjBuilder() {
         // If 'done' has not already been called, and we have a reference to an owning
         // BufBuilder but do not own it ourselves, then we must call _done to write in the
@@ -134,11 +176,19 @@ public:
         }
     }
 
+    /**
+     * The start offset of the object being built by this builder within its buffer.
+     * Needed for the object-resuming constructor.
+     */
+    std::size_t offset() const {
+        return _offset;
+    }
+
     /** add all the fields from the object specified to this object */
-    BSONObjBuilder& appendElements(BSONObj x);
+    BSONObjBuilder& appendElements(const BSONObj& x);
 
     /** add all the fields from the object specified to this object if they don't exist already */
-    BSONObjBuilder& appendElementsUnique(BSONObj x);
+    BSONObjBuilder& appendElementsUnique(const BSONObj& x);
 
     /** append element to the object we are building */
     BSONObjBuilder& append(const BSONElement& e) {
@@ -462,11 +512,6 @@ public:
         return appendSymbol(fieldName, symbol.symbol);
     }
 
-    /** Implements builder interface but no-op in ObjBuilder */
-    void appendNull() {
-        msgasserted(16234, "Invalid call to appendNull in BSONObj Builder.");
-    }
-
     /** Append a Null element to the object */
     BSONObjBuilder& appendNull(StringData fieldName) {
         _b.appendNum((char)jstNULL);
@@ -624,10 +669,12 @@ public:
      * The returned BSONObj will free the buffer when it is finished.
      * @return owned BSONObj
     */
+    template <typename BSONTraits = BSONObj::DefaultSizeTrait>
     BSONObj obj() {
         massert(10335, "builder does not own memory", owned());
-        doneFast();
-        return BSONObj(_b.release());
+        auto out = done<BSONTraits>();
+        out.shareOwnershipWith(_b.release());
+        return out;
     }
 
     /** Fetch the object we have built.
@@ -635,8 +682,9 @@ public:
         scope -- very important to keep in mind.  Use obj() if you
         would like the BSONObj to last longer than the builder.
     */
+    template <typename BSONTraits = BSONObj::DefaultSizeTrait>
     BSONObj done() {
-        return BSONObj(_done());
+        return BSONObj(_done(), BSONTraits{});
     }
 
     // Like 'done' above, but does not construct a BSONObj to return to the caller.
@@ -649,7 +697,7 @@ public:
         Intended use case: append a field if not already there.
     */
     BSONObj asTempObj() {
-        BSONObj temp(_done());
+        BSONObj temp(_done(), BSONObj::LargeSizeTrait{});
         _b.setlen(_b.len() - 1);  // next append should overwrite the EOO
         _b.reserveBytes(1);       // Rereserve room for the real EOO
         _doneCalled = false;
@@ -766,8 +814,6 @@ private:
 };
 
 class BSONArrayBuilder {
-    MONGO_DISALLOW_COPYING(BSONArrayBuilder);
-
 public:
     BSONArrayBuilder() : _i(0), _b() {}
     BSONArrayBuilder(BufBuilder& _b) : _i(0), _b(_b) {}
@@ -970,29 +1016,6 @@ inline BSONFieldValue<BSONObj> BSONField<T>::query(const char* q, const T& t) co
     BSONObjBuilder b;
     b.append(q, t);
     return BSONFieldValue<BSONObj>(_name, b.obj());
-}
-
-// $or helper: OR(BSON("x" << GT << 7), BSON("y" << LT 6));
-inline BSONObj OR(const BSONObj& a, const BSONObj& b) {
-    return BSON("$or" << BSON_ARRAY(a << b));
-}
-inline BSONObj OR(const BSONObj& a, const BSONObj& b, const BSONObj& c) {
-    return BSON("$or" << BSON_ARRAY(a << b << c));
-}
-inline BSONObj OR(const BSONObj& a, const BSONObj& b, const BSONObj& c, const BSONObj& d) {
-    return BSON("$or" << BSON_ARRAY(a << b << c << d));
-}
-inline BSONObj OR(
-    const BSONObj& a, const BSONObj& b, const BSONObj& c, const BSONObj& d, const BSONObj& e) {
-    return BSON("$or" << BSON_ARRAY(a << b << c << d << e));
-}
-inline BSONObj OR(const BSONObj& a,
-                  const BSONObj& b,
-                  const BSONObj& c,
-                  const BSONObj& d,
-                  const BSONObj& e,
-                  const BSONObj& f) {
-    return BSON("$or" << BSON_ARRAY(a << b << c << d << e << f));
 }
 
 inline BSONObjBuilder& BSONObjBuilderValueStream::operator<<(const DateNowLabeler& id) {

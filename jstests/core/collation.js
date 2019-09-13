@@ -1,9 +1,18 @@
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop, does_not_support_stepdowns,
+// requires_non_retryable_commands, requires_non_retryable_writes]
+
 // Integration tests for the collation feature.
 (function() {
     'use strict';
 
     load("jstests/libs/analyze_plan.js");
     load("jstests/libs/get_index_helpers.js");
+    // For isWiredTiger.
+    load("jstests/concurrency/fsm_workload_helpers/server_types.js");
+    // For isReplSet
+    load("jstests/libs/fixture_helpers.js");
 
     var coll = db.collation;
     coll.drop();
@@ -253,17 +262,17 @@
         // Query has simple collation, but index has fr_CA collation.
         explainRes = coll.find({a: "foo"}).explain();
         assert.commandWorked(explainRes);
-        assert(planHasStage(explainRes.queryPlanner.winningPlan, "COLLSCAN"));
+        assert(planHasStage(db, explainRes.queryPlanner.winningPlan, "COLLSCAN"));
 
         // Query has en_US collation, but index has fr_CA collation.
         explainRes = coll.find({a: "foo"}).collation({locale: "en_US"}).explain();
         assert.commandWorked(explainRes);
-        assert(planHasStage(explainRes.queryPlanner.winningPlan, "COLLSCAN"));
+        assert(planHasStage(db, explainRes.queryPlanner.winningPlan, "COLLSCAN"));
 
         // Matching collations.
         explainRes = coll.find({a: "foo"}).collation({locale: "fr_CA"}).explain();
         assert.commandWorked(explainRes);
-        assert(planHasStage(explainRes.queryPlanner.winningPlan, "IXSCAN"));
+        assert(planHasStage(db, explainRes.queryPlanner.winningPlan, "IXSCAN"));
     }
 
     // Should not be possible to create a text index with an explicit non-simple collation.
@@ -322,7 +331,7 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "en_US"}}));
     var explain = coll.explain("queryPlanner").aggregate([{$match: {a: "foo"}}]).stages[0].$cursor;
-    assert(isIxscan(explain.queryPlanner.winningPlan));
+    assert(isIxscan(db, explain.queryPlanner.winningPlan));
 
     // Aggregation should not use index when no collation specified and collection default
     // collation is incompatible with index collation.
@@ -330,7 +339,7 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "simple"}}));
     var explain = coll.explain("queryPlanner").aggregate([{$match: {a: "foo"}}]).stages[0].$cursor;
-    assert(isCollscan(explain.queryPlanner.winningPlan));
+    assert(isCollscan(db, explain.queryPlanner.winningPlan));
 
     // Explain of aggregation with collation should succeed.
     assert.commandWorked(coll.explain().aggregate([], {collation: {locale: "fr"}}));
@@ -437,8 +446,8 @@
     assert.commandWorked(coll.createIndex({a: 1}));
     explainRes = coll.explain("executionStats").find({a: "foo"}).count();
     assert.commandWorked(explainRes);
-    assert(planHasStage(explainRes.executionStats.executionStages, "COUNT_SCAN"));
-    assert(!planHasStage(explainRes.executionStats.executionStages, "FETCH"));
+    assert(planHasStage(db, explainRes.executionStats.executionStages, "COUNT_SCAN"));
+    assert(!planHasStage(db, explainRes.executionStats.executionStages, "FETCH"));
 
     //
     // Collation tests for distinct.
@@ -493,28 +502,28 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "en_US"}}));
     var explain = coll.explain("queryPlanner").distinct("a");
-    assert(planHasStage(explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
-    assert(planHasStage(explain.queryPlanner.winningPlan, "FETCH"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "FETCH"));
 
     // Distinct scan on strings can be used over an index with a collation when the predicate has
     // exact bounds.
     explain = coll.explain("queryPlanner").distinct("a", {a: {$gt: "foo"}});
-    assert(planHasStage(explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
-    assert(planHasStage(explain.queryPlanner.winningPlan, "FETCH"));
-    assert(!planHasStage(explain.queryPlanner.winningPlan, "PROJECTION"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "FETCH"));
+    assert(!planHasStage(db, explain.queryPlanner.winningPlan, "PROJECTION"));
 
     // Distinct scan cannot be used over an index with a collation when the predicate has inexact
     // bounds.
     explain = coll.explain("queryPlanner").distinct("a", {a: {$exists: true}});
-    assert(planHasStage(explain.queryPlanner.winningPlan, "IXSCAN"));
-    assert(planHasStage(explain.queryPlanner.winningPlan, "FETCH"));
-    assert(!planHasStage(explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "IXSCAN"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "FETCH"));
+    assert(!planHasStage(db, explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
 
     // Distinct scan can be used without a fetch when predicate has exact non-string bounds.
     explain = coll.explain("queryPlanner").distinct("a", {a: {$gt: 3}});
-    assert(planHasStage(explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
-    assert(planHasStage(explain.queryPlanner.winningPlan, "PROJECTION"));
-    assert(!planHasStage(explain.queryPlanner.winningPlan, "FETCH"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "DISTINCT_SCAN"));
+    assert(planHasStage(db, explain.queryPlanner.winningPlan, "PROJECTION"));
+    assert(!planHasStage(db, explain.queryPlanner.winningPlan, "FETCH"));
 
     // Distinct should not use index when no collation specified and collection default collation is
     // incompatible with index collation.
@@ -522,7 +531,7 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "simple"}}));
     var explain = coll.explain("queryPlanner").distinct("a");
-    assert(isCollscan(explain.queryPlanner.winningPlan));
+    assert(isCollscan(db, explain.queryPlanner.winningPlan));
 
     // Explain of DISTINCT_SCAN stage should include index collation.
     coll.drop();
@@ -642,6 +651,14 @@
                       .collation({locale: "en_US", strength: 3})
                       .sort({a: 1});
         assert.eq(res.toArray(), [{a: "a"}, {a: "A"}, {a: "b"}, {a: "B"}]);
+
+        // Find should return correct results when collation specified and query contains $expr.
+        coll.drop();
+        assert.writeOK(coll.insert([{a: "A"}, {a: "B"}]));
+        assert.eq(1,
+                  coll.find({$expr: {$eq: ["$a", "a"]}})
+                      .collation({locale: "en_US", strength: 2})
+                      .itcount());
     }
 
     // Find should return correct results when no collation specified and collection has a default
@@ -675,18 +692,29 @@
     assert.neq(null, planStage);
 
     // Find with oplog replay should return correct results when no collation specified and
+    // collection has a default collation. Skip this test for the mobile SE because it doesn't
+    // support capped collections which are needed for oplog replay.
+    if (jsTest.options().storageEngine !== "mobile") {
+        coll.drop();
+        assert.commandWorked(db.createCollection(
+            coll.getName(),
+            {collation: {locale: "en_US", strength: 2}, capped: true, size: 16 * 1024}));
+        assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 0)}));
+        assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 1)}));
+        assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 2)}));
+        assert.eq(2,
+                  coll.find({str: "foo", ts: {$gte: Timestamp(1000, 1)}})
+                      .addOption(DBQuery.Option.oplogReplay)
+                      .itcount());
+    }
+
+    // Find should return correct results for query containing $expr when no collation specified and
     // collection has a default collation.
     coll.drop();
-    assert.commandWorked(db.createCollection(
-        coll.getName(),
-        {collation: {locale: "en_US", strength: 2}, capped: true, size: 16 * 1024}));
-    assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 0)}));
-    assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 1)}));
-    assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 2)}));
-    assert.eq(2,
-              coll.find({str: "foo", ts: {$gte: Timestamp(1000, 1)}})
-                  .addOption(DBQuery.Option.oplogReplay)
-                  .itcount());
+    assert.commandWorked(
+        db.createCollection(coll.getName(), {collation: {locale: "en_US", strength: 2}}));
+    assert.writeOK(coll.insert([{a: "A"}, {a: "B"}]));
+    assert.eq(1, coll.find({$expr: {$eq: ["$a", "a"]}}).itcount());
 
     if (db.getMongo().useReadCommands()) {
         // Find should return correct results when "simple" collation specified and collection has a
@@ -734,22 +762,25 @@
         assert.eq(null, planStage);
 
         // Find with oplog replay should return correct results when "simple" collation specified
-        // and collection has a default collation.
-        coll.drop();
-        assert.commandWorked(db.createCollection(
-            coll.getName(),
-            {collation: {locale: "en_US", strength: 2}, capped: true, size: 16 * 1024}));
-        const t0 = Timestamp(1000, 0);
-        const t1 = Timestamp(1000, 1);
-        const t2 = Timestamp(1000, 2);
-        assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 0)}));
-        assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 1)}));
-        assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 2)}));
-        assert.eq(0,
-                  coll.find({str: "foo", ts: {$gte: Timestamp(1000, 1)}})
-                      .addOption(DBQuery.Option.oplogReplay)
-                      .collation({locale: "simple"})
-                      .itcount());
+        // and collection has a default collation. Skip this test for the mobile SE because it
+        // doesn't support capped collections which are needed for oplog replay.
+        if (jsTest.options().storageEngine !== "mobile") {
+            coll.drop();
+            assert.commandWorked(db.createCollection(
+                coll.getName(),
+                {collation: {locale: "en_US", strength: 2}, capped: true, size: 16 * 1024}));
+            const t0 = Timestamp(1000, 0);
+            const t1 = Timestamp(1000, 1);
+            const t2 = Timestamp(1000, 2);
+            assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 0)}));
+            assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 1)}));
+            assert.writeOK(coll.insert({str: "FOO", ts: Timestamp(1000, 2)}));
+            assert.eq(0,
+                      coll.find({str: "foo", ts: {$gte: Timestamp(1000, 1)}})
+                          .addOption(DBQuery.Option.oplogReplay)
+                          .collation({locale: "simple"})
+                          .itcount());
+        }
     }
 
     // Find should select compatible index when no collation specified and collection has a default
@@ -758,7 +789,7 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "en_US"}}));
     var explain = coll.find({a: "foo"}).explain("queryPlanner");
-    assert(isIxscan(explain.queryPlanner.winningPlan));
+    assert(isIxscan(db, explain.queryPlanner.winningPlan));
 
     // Find should select compatible index when no collation specified and collection default
     // collation is "simple".
@@ -766,7 +797,7 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "simple"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "simple"}}));
     var explain = coll.find({a: "foo"}).explain("queryPlanner");
-    assert(isIxscan(explain.queryPlanner.winningPlan));
+    assert(isIxscan(db, explain.queryPlanner.winningPlan));
 
     // Find should not use index when no collation specified, index collation is "simple", and
     // collection has a non-"simple" default collation.
@@ -774,7 +805,7 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "simple"}}));
     var explain = coll.find({a: "foo"}).explain("queryPlanner");
-    assert(isCollscan(explain.queryPlanner.winningPlan));
+    assert(isCollscan(db, explain.queryPlanner.winningPlan));
 
     // Find should select compatible index when "simple" collation specified and collection has a
     // non-"simple" default collation.
@@ -782,7 +813,7 @@
     assert.commandWorked(db.createCollection(coll.getName(), {collation: {locale: "en_US"}}));
     assert.commandWorked(coll.ensureIndex({a: 1}, {collation: {locale: "simple"}}));
     var explain = coll.find({a: "foo"}).collation({locale: "simple"}).explain("queryPlanner");
-    assert(isIxscan(explain.queryPlanner.winningPlan));
+    assert(isIxscan(db, explain.queryPlanner.winningPlan));
 
     // Find should return correct results when collation specified and run with explain.
     coll.drop();
@@ -1949,6 +1980,55 @@
         assert.eq(8, coll.findOne({_id: "foo"}).x);
     }
 
+    // doTxn
+    if (FixtureHelpers.isReplSet(db) && !isMongos && isWiredTiger(db)) {
+        const session = db.getMongo().startSession();
+        const sessionDb = session.getDatabase(db.getName());
+
+        // Use majority write concern to clear the drop-pending that can cause lock conflicts with
+        // transactions.
+        coll.drop({writeConcern: {w: "majority"}});
+
+        assert.commandWorked(
+            db.createCollection("collation", {collation: {locale: "en_US", strength: 2}}));
+        assert.writeOK(coll.insert({_id: "foo", x: 5, str: "bar"}));
+
+        // preCondition.q respects collection default collation.
+        assert.commandFailed(sessionDb.runCommand({
+            doTxn: [{op: "u", ns: coll.getFullName(), o2: {_id: "foo"}, o: {$set: {x: 6}}}],
+            preCondition: [{ns: coll.getFullName(), q: {_id: "not foo"}, res: {str: "bar"}}],
+            txnNumber: NumberLong("0")
+        }));
+        assert.eq(5, coll.findOne({_id: "foo"}).x);
+        assert.commandWorked(sessionDb.runCommand({
+            doTxn: [{op: "u", ns: coll.getFullName(), o2: {_id: "foo"}, o: {$set: {x: 6}}}],
+            preCondition: [{ns: coll.getFullName(), q: {_id: "FOO"}, res: {str: "bar"}}],
+            txnNumber: NumberLong("1")
+        }));
+        assert.eq(6, coll.findOne({_id: "foo"}).x);
+
+        // preCondition.res respects collection default collation.
+        assert.commandFailed(sessionDb.runCommand({
+            doTxn: [{op: "u", ns: coll.getFullName(), o2: {_id: "foo"}, o: {$set: {x: 7}}}],
+            preCondition: [{ns: coll.getFullName(), q: {_id: "foo"}, res: {str: "not bar"}}],
+            txnNumber: NumberLong("2")
+        }));
+        assert.eq(6, coll.findOne({_id: "foo"}).x);
+        assert.commandWorked(sessionDb.runCommand({
+            doTxn: [{op: "u", ns: coll.getFullName(), o2: {_id: "foo"}, o: {$set: {x: 7}}}],
+            preCondition: [{ns: coll.getFullName(), q: {_id: "foo"}, res: {str: "BAR"}}],
+            txnNumber: NumberLong("3")
+        }));
+        assert.eq(7, coll.findOne({_id: "foo"}).x);
+
+        // <operation>.o2 respects collection default collation.
+        assert.commandWorked(sessionDb.runCommand({
+            doTxn: [{op: "u", ns: coll.getFullName(), o2: {_id: "FOO"}, o: {$set: {x: 8}}}],
+            txnNumber: NumberLong("4")
+        }));
+        assert.eq(8, coll.findOne({_id: "foo"}).x);
+    }
+
     // Test that the collections created with the "copydb" command inherit the default collation of
     // the corresponding collection.
     {
@@ -1974,9 +2054,11 @@
         var destCollectionInfos = destDB.getCollectionInfos({name: coll.getName()});
 
         // The namespace for the _id index will differ since the source and destination collections
-        // are in different databases.
+        // are in different databases. Same for UUID.
         delete sourceCollectionInfos[0].idIndex.ns;
+        delete sourceCollectionInfos[0].info.uuid;
         delete destCollectionInfos[0].idIndex.ns;
+        delete destCollectionInfos[0].info.uuid;
 
         assert.eq(sourceCollectionInfos, destCollectionInfos);
         assert.eq([{_id: "FOO"}], destDB[coll.getName()].find({_id: "foo"}).toArray());
@@ -2003,16 +2085,22 @@
                   coll.find({_id: "foo"}).toArray(),
                   "query should have performed a case-insensitive match");
 
-        assert.commandWorked(db.runCommand({
+        var cloneCollOutput = db.runCommand({
             cloneCollectionAsCapped: coll.getName(),
             toCollection: clonedColl.getName(),
             size: 4096
-        }));
-        const clonedCollectionInfos = db.getCollectionInfos({name: clonedColl.getName()});
-        assert.eq(clonedCollectionInfos.length, 1, tojson(clonedCollectionInfos));
-        assert.eq(originalCollectionInfos[0].options.collation,
-                  clonedCollectionInfos[0].options.collation);
-        assert.eq([{_id: "FOO"}], clonedColl.find({_id: "foo"}).toArray());
+        });
+        if (jsTest.options().storageEngine === "mobile") {
+            // Capped collections are not supported by the mobile storage engine
+            assert.commandFailedWithCode(cloneCollOutput, ErrorCodes.InvalidOptions);
+        } else {
+            assert.commandWorked(cloneCollOutput);
+            const clonedCollectionInfos = db.getCollectionInfos({name: clonedColl.getName()});
+            assert.eq(clonedCollectionInfos.length, 1, tojson(clonedCollectionInfos));
+            assert.eq(originalCollectionInfos[0].options.collation,
+                      clonedCollectionInfos[0].options.collation);
+            assert.eq([{_id: "FOO"}], clonedColl.find({_id: "foo"}).toArray());
+        }
     }
 
     // Test that the find command's min/max options respect the collation.
@@ -2090,7 +2178,7 @@
                          .sort({a: 1, b: 1})
                          .explain();
         assert.commandWorked(explainRes);
-        assert(planHasStage(explainRes.queryPlanner.winningPlan, "SORT"));
+        assert(planHasStage(db, explainRes.queryPlanner.winningPlan, "SORT"));
 
         // This query should fail since min has a string as one of it's boundaries, and the
         // collation doesn't match that of the index.

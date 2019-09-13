@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -474,8 +476,8 @@ class SeveralMoreDocuments : public CheckResultsBase {
     deque<DocumentSource::GetNextResult> inputData() override {
         return {DOC("_id" << 0 << "a" << BSONNULL),
                 DOC("_id" << 1),
-                DOC("_id" << 2 << "a" << DOC_ARRAY("a"
-                                                   << "b")),
+                DOC("_id" << 2 << "a" << DOC_ARRAY("a"_sd
+                                                   << "b"_sd)),
                 DOC("_id" << 3),
                 DOC("_id" << 4 << "a" << DOC_ARRAY(1 << 2 << 3)),
                 DOC("_id" << 5 << "a" << DOC_ARRAY(4 << 5 << 6)),
@@ -749,25 +751,26 @@ TEST_F(UnwindStageTest, UnwindIncludesIndexPathWhenIncludingIndex) {
 //
 
 TEST_F(UnwindStageTest, ShouldRejectNonObjectNonString) {
-    ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << 1)), UserException, 15981);
+    ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << 1)), AssertionException, 15981);
 }
 
 TEST_F(UnwindStageTest, ShouldRejectSpecWithoutPath) {
-    ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << BSONObj())), UserException, 28812);
+    ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << BSONObj())), AssertionException, 28812);
 }
 
 TEST_F(UnwindStageTest, ShouldRejectNonStringPath) {
-    ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << BSON("path" << 2))), UserException, 28808);
+    ASSERT_THROWS_CODE(
+        createUnwind(BSON("$unwind" << BSON("path" << 2))), AssertionException, 28808);
 }
 
 TEST_F(UnwindStageTest, ShouldRejectNonDollarPrefixedPath) {
     ASSERT_THROWS_CODE(createUnwind(BSON("$unwind"
                                          << "somePath")),
-                       UserException,
+                       AssertionException,
                        28818);
     ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << BSON("path"
                                                            << "somePath"))),
-                       UserException,
+                       AssertionException,
                        28818);
 }
 
@@ -776,7 +779,7 @@ TEST_F(UnwindStageTest, ShouldRejectNonBoolPreserveNullAndEmptyArrays) {
                                                            << "$x"
                                                            << "preserveNullAndEmptyArrays"
                                                            << 2))),
-                       UserException,
+                       AssertionException,
                        28809);
 }
 
@@ -785,7 +788,7 @@ TEST_F(UnwindStageTest, ShouldRejectNonStringIncludeArrayIndex) {
                                                            << "$x"
                                                            << "includeArrayIndex"
                                                            << 2))),
-                       UserException,
+                       AssertionException,
                        28810);
 }
 
@@ -794,7 +797,7 @@ TEST_F(UnwindStageTest, ShouldRejectEmptyStringIncludeArrayIndex) {
                                                            << "$x"
                                                            << "includeArrayIndex"
                                                            << ""))),
-                       UserException,
+                       AssertionException,
                        28810);
 }
 
@@ -803,13 +806,13 @@ TEST_F(UnwindStageTest, ShoudlRejectDollarPrefixedIncludeArrayIndex) {
                                                            << "$x"
                                                            << "includeArrayIndex"
                                                            << "$"))),
-                       UserException,
+                       AssertionException,
                        28822);
     ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << BSON("path"
                                                            << "$x"
                                                            << "includeArrayIndex"
                                                            << "$path"))),
-                       UserException,
+                       AssertionException,
                        28822);
 }
 
@@ -820,13 +823,13 @@ TEST_F(UnwindStageTest, ShouldRejectUnrecognizedOption) {
                                                            << true
                                                            << "foo"
                                                            << 3))),
-                       UserException,
+                       AssertionException,
                        28811);
     ASSERT_THROWS_CODE(createUnwind(BSON("$unwind" << BSON("path"
                                                            << "$x"
                                                            << "foo"
                                                            << 3))),
-                       UserException,
+                       AssertionException,
                        28811);
 }
 

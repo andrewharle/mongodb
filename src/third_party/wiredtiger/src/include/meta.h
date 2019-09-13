@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -24,9 +24,14 @@
 
 #define	WT_METADATA_URI		"metadata:"		/* Metadata alias */
 #define	WT_METAFILE		"WiredTiger.wt"		/* Metadata table */
+#define	WT_METAFILE_SLVG	"WiredTiger.wt.orig"	/* Metadata copy */
 #define	WT_METAFILE_URI		"file:WiredTiger.wt"	/* Metadata table URI */
 
+#define	WT_LAS_FILE		"WiredTigerLAS.wt"	/* Lookaside table */
 #define	WT_LAS_URI		"file:WiredTigerLAS.wt"	/* Lookaside table URI*/
+
+#define	WT_SYSTEM_PREFIX	"system:"		/* System URI prefix */
+#define	WT_SYSTEM_CKPT_URI	"system:checkpoint"	/* Checkpoint URI */
 
 /*
  * Optimize comparisons against the metafile URI, flag handles that reference
@@ -35,6 +40,7 @@
 #define	WT_IS_METADATA(dh)      F_ISSET((dh), WT_DHANDLE_IS_METADATA)
 #define	WT_METAFILE_ID		0			/* Metadata file ID */
 
+#define	WT_METADATA_COMPAT	"Compatibility version"
 #define	WT_METADATA_VERSION	"WiredTiger version"	/* Version keys */
 #define	WT_METADATA_VERSION_STR	"WiredTiger version string"
 
@@ -73,9 +79,11 @@ struct __wt_ckpt {
 
 	void	*bpriv;				/* Block manager private */
 
-#define	WT_CKPT_ADD	0x01			/* Checkpoint to be added */
-#define	WT_CKPT_DELETE	0x02			/* Checkpoint to be deleted */
-#define	WT_CKPT_FAKE	0x04			/* Checkpoint is a fake */
-#define	WT_CKPT_UPDATE	0x08			/* Checkpoint requires update */
+/* AUTOMATIC FLAG VALUE GENERATION START */
+#define	WT_CKPT_ADD	0x1u			/* Checkpoint to be added */
+#define	WT_CKPT_DELETE	0x2u			/* Checkpoint to be deleted */
+#define	WT_CKPT_FAKE	0x4u			/* Checkpoint is a fake */
+#define	WT_CKPT_UPDATE	0x8u			/* Checkpoint requires update */
+/* AUTOMATIC FLAG VALUE GENERATION STOP */
 	uint32_t flags;
 };

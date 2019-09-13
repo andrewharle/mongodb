@@ -11,8 +11,6 @@
 
     var cmdLineOpts = db.adminCommand('getCmdLineOpts');
     assert.commandWorked(cmdLineOpts);
-    var isMasterSlave = cmdLineOpts.parsed.master === true;
-    assert(!isMasterSlave, 'Master/Slave is not supported with initial sync hooks');
 
     // The initial sync hooks only work for replica sets.
     var rst = new ReplSetTest(db.getMongo().host);
@@ -23,7 +21,7 @@
 
     // Find the hidden node.
     var hiddenNode;
-    for (var secondary of rst.liveNodes.slaves) {
+    for (var secondary of rst._slaves) {
         var isMasterRes = secondary.getDB('admin').isMaster();
         if (isMasterRes.hidden) {
             hiddenNode = secondary;
@@ -42,7 +40,8 @@
        to ensure we're validating the entire contents of the collection */
 
     // For checkDBHashes
-    rst.checkReplicatedDataHashes();
+    const excludedDBs = jsTest.options().excludedDBsFromDBHash;
+    rst.checkReplicatedDataHashes(undefined, excludedDBs);
 
     load('jstests/hooks/run_validate_collections.js');
 

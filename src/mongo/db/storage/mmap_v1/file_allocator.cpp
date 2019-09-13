@@ -1,30 +1,33 @@
 // @file file_allocator.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kStorage
@@ -50,7 +53,7 @@
 #include <io.h>
 #endif
 
-#include "mongo/db/storage/paths.h"
+#include "mongo/db/storage/mmap_v1/paths.h"
 #include "mongo/platform/posix_fadvise.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/thread.h"
@@ -82,7 +85,7 @@ using std::stringstream;
 unsigned long long FileAllocator::_uniqueNumber = 0;
 static SimpleMutex _uniqueNumberMutex;
 
-MONGO_FP_DECLARE(allocateDiskFull);
+MONGO_FAIL_POINT_DEFINE(allocateDiskFull);
 
 /**
  * Aliases for Win32 CRT functions
@@ -130,7 +133,7 @@ FileAllocator::FileAllocator() : _failed() {}
 
 
 void FileAllocator::start() {
-    stdx::thread t(stdx::bind(&FileAllocator::run, this));
+    stdx::thread t([this] { run(this); });
     t.detach();
 }
 
@@ -259,8 +262,10 @@ void FileAllocator::ensureLength(int fd, long size) {
 
 #if defined(__linux__)
     int ret = posix_fallocate(fd, 0, size);
-    if (ret == 0)
+    if (ret == 0) {
+        LOG(1) << "used fallocate to create empty file";
         return;
+    }
 
     log() << "FileAllocator: posix_fallocate failed: " << errnoWithDescription(ret)
           << " falling back" << endl;
@@ -302,6 +307,7 @@ void FileAllocator::ensureLength(int fd, long size) {
 
         lseek(fd, 0, SEEK_SET);
 
+        log() << "filling with zeroes...";
         const long z = 256 * 1024;
         const std::unique_ptr<char[]> buf_holder(new char[z]);
         char* buf = buf_holder.get();
@@ -323,7 +329,7 @@ void FileAllocator::checkFailure() {
     if (_failed) {
         // we want to log the problem (diskfull.js expects it) but we do not want to dump a stack
         // trace
-        msgassertedNoTrace(12520, "new file allocation failure");
+        msgasserted(12520, "new file allocation failure");
     }
 }
 
@@ -394,7 +400,7 @@ void FileAllocator::run(FileAllocator* fa) {
             string tmp;
             long fd = 0;
             try {
-                log() << "allocating new datafile " << name << ", filling with zeroes..." << endl;
+                log() << "allocating new datafile " << name;
 
                 boost::filesystem::path parent = ensureParentDirCreated(name);
                 tmp = fa->makeTempFileName(parent);

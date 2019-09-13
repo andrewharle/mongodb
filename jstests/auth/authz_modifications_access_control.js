@@ -1,5 +1,6 @@
 /**
  * This tests that the proper access control is enforced around modifications to user and role data.
+ * @tags: [requires_sharding]
  */
 
 function runTest(conn) {
@@ -296,9 +297,11 @@ function runTest(conn) {
 jsTest.log('Test standalone');
 var conn = MongoRunner.runMongod({auth: ''});
 runTest(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s);
 st.stop();

@@ -1,32 +1,34 @@
 // jsontests.cpp - Tests for json.{h,cpp} code and BSONObj::jsonString()
 //
 
+
 /**
- *    Copyright (C) 2008 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
@@ -278,7 +280,6 @@ public:
         BSONObjBuilder b;
         b.appendUndefined("a");
         ASSERT_EQUALS("{ \"a\" : { \"$undefined\" : true } }", b.done().jsonString(Strict));
-        ASSERT_EQUALS("{ \"a\" : undefined }", b.done().jsonString(JS));
         ASSERT_EQUALS("{ \"a\" : undefined }", b.done().jsonString(TenGen));
     }
 };
@@ -336,9 +337,6 @@ public:
         ASSERT_EQUALS(
             "{ \"a\" : { \"$ref\" : \"namespace\", \"$id\" : \"ffffffffffffffffffffffff\" } }",
             built.jsonString(Strict));
-        ASSERT_EQUALS(
-            "{ \"a\" : { \"$ref\" : \"namespace\", \"$id\" : \"ffffffffffffffffffffffff\" } }",
-            built.jsonString(JS));
         ASSERT_EQUALS("{ \"a\" : Dbref( \"namespace\", \"ffffffffffffffffffffffff\" ) }",
                       built.jsonString(TenGen));
     }
@@ -464,7 +462,6 @@ public:
         ASSERT_EQUALS("{ \"a\" : { \"$date\" : \"1969-12-31T19:00:00.000-0500\" } }",
                       built.jsonString(Strict));
         ASSERT_EQUALS("{ \"a\" : Date( 0 ) }", built.jsonString(TenGen));
-        ASSERT_EQUALS("{ \"a\" : Date( 0 ) }", built.jsonString(JS));
 
         // Test dates above our maximum formattable date.  See SERVER-13760.
         BSONObjBuilder b2;
@@ -487,7 +484,6 @@ public:
         ASSERT_EQUALS("{ \"a\" : { \"$date\" : { \"$numberLong\" : \"-1\" } } }",
                       built.jsonString(Strict));
         ASSERT_EQUALS("{ \"a\" : Date( -1 ) }", built.jsonString(TenGen));
-        ASSERT_EQUALS("{ \"a\" : Date( -1 ) }", built.jsonString(JS));
     }
 };
 
@@ -500,7 +496,6 @@ public:
         ASSERT_EQUALS("{ \"a\" : { \"$regex\" : \"abc\", \"$options\" : \"i\" } }",
                       built.jsonString(Strict));
         ASSERT_EQUALS("{ \"a\" : /abc/i }", built.jsonString(TenGen));
-        ASSERT_EQUALS("{ \"a\" : /abc/i }", built.jsonString(JS));
     }
 };
 
@@ -513,7 +508,6 @@ public:
         ASSERT_EQUALS("{ \"a\" : { \"$regex\" : \"/\\\"\", \"$options\" : \"i\" } }",
                       built.jsonString(Strict));
         ASSERT_EQUALS("{ \"a\" : /\\/\\\"/i }", built.jsonString(TenGen));
-        ASSERT_EQUALS("{ \"a\" : /\\/\\\"/i }", built.jsonString(JS));
     }
 };
 
@@ -526,7 +520,6 @@ public:
         ASSERT_EQUALS("{ \"a\" : { \"$regex\" : \"z\", \"$options\" : \"abcgimx\" } }",
                       built.jsonString(Strict));
         ASSERT_EQUALS("{ \"a\" : /z/gim }", built.jsonString(TenGen));
-        ASSERT_EQUALS("{ \"a\" : /z/gim }", built.jsonString(JS));
     }
 };
 
@@ -566,8 +559,6 @@ public:
         BSONObj o = b.obj();
         ASSERT_EQUALS("{ \"x\" : { \"$timestamp\" : { \"t\" : 4, \"i\" : 10 } } }",
                       o.jsonString(Strict));
-        ASSERT_EQUALS("{ \"x\" : { \"$timestamp\" : { \"t\" : 4, \"i\" : 10 } } }",
-                      o.jsonString(JS));
         ASSERT_EQUALS("{ \"x\" : Timestamp( 4, 10 ) }", o.jsonString(TenGen));
     }
 };
@@ -630,7 +621,6 @@ public:
         assertEquals(bson(), fromjson(tojson(bson())), "mode: <default>");
         assertEquals(bson(), fromjson(tojson(bson(), Strict)), "mode: strict");
         assertEquals(bson(), fromjson(tojson(bson(), TenGen)), "mode: tengen");
-        assertEquals(bson(), fromjson(tojson(bson(), JS)), "mode: js");
     }
 
 protected:
@@ -658,7 +648,7 @@ class Bad {
 public:
     virtual ~Bad() {}
     void run() {
-        ASSERT_THROWS(fromjson(json()), MsgAssertionException);
+        ASSERT_THROWS(fromjson(json()), AssertionException);
     }
 
 protected:

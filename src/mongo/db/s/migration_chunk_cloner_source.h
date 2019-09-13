@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -36,6 +38,11 @@ namespace mongo {
 class BSONObj;
 class OperationContext;
 class Status;
+class Timestamp;
+
+namespace repl {
+class OpTime;
+}  // namespace repl
 
 /**
  * This class is responsible for producing chunk documents to be moved from donor to a recipient
@@ -65,7 +72,7 @@ public:
      * NOTE: Must be called without any locks and must succeed, before any other methods are called
      * (except for cancelClone and [insert/update/delete]Op).
      */
-    virtual Status startClone(OperationContext* txn) = 0;
+    virtual Status startClone(OperationContext* opCtx) = 0;
 
     /**
      * Blocking method, which uses some custom selected logic for deciding whether it is appropriate
@@ -77,7 +84,7 @@ public:
      *
      * NOTE: Must be called without any locks.
      */
-    virtual Status awaitUntilCriticalSectionIsAppropriate(OperationContext* txn,
+    virtual Status awaitUntilCriticalSectionIsAppropriate(OperationContext* opCtx,
                                                           Milliseconds maxTimeToWait) = 0;
 
     /**
@@ -93,7 +100,6 @@ public:
      *
      * NOTE: Must be called without any locks.
      */
-
     virtual StatusWith<BSONObj> commitClone(OperationContext* opCtx) = 0;
 
     /**
@@ -102,7 +108,7 @@ public:
      *
      * NOTE: Must be called without any locks.
      */
-    virtual void cancelClone(OperationContext* txn) = 0;
+    virtual void cancelClone(OperationContext* opCtx) = 0;
 
     // These methods are only meaningful for the legacy cloner and they are used as a way to keep a
     // running list of changes, which need to be fetched.
@@ -113,7 +119,7 @@ public:
      *
      * NOTE: Must be called with at least IS lock held on the collection.
      */
-    virtual bool isDocumentInMigratingChunk(OperationContext* txn, const BSONObj& doc) = 0;
+    virtual bool isDocumentInMigratingChunk(const BSONObj& doc) = 0;
 
     /**
      * Notifies this cloner that an insert happened to the collection, which it owns. It is up to
@@ -122,7 +128,9 @@ public:
      *
      * NOTE: Must be called with at least IX lock held on the collection.
      */
-    virtual void onInsertOp(OperationContext* txn, const BSONObj& insertedDoc) = 0;
+    virtual void onInsertOp(OperationContext* opCtx,
+                            const BSONObj& insertedDoc,
+                            const repl::OpTime& opTime) = 0;
 
     /**
      * Notifies this cloner that an update happened to the collection, which it owns. It is up to
@@ -131,7 +139,10 @@ public:
      *
      * NOTE: Must be called with at least IX lock held on the collection.
      */
-    virtual void onUpdateOp(OperationContext* txn, const BSONObj& updatedDoc) = 0;
+    virtual void onUpdateOp(OperationContext* opCtx,
+                            const BSONObj& updatedDoc,
+                            const repl::OpTime& opTime,
+                            const repl::OpTime& prePostImageOpTime) = 0;
 
     /**
      * Notifies this cloner that a delede happened to the collection, which it owns. It is up to the
@@ -140,7 +151,10 @@ public:
      *
      * NOTE: Must be called with at least IX lock held on the collection.
      */
-    virtual void onDeleteOp(OperationContext* txn, const BSONObj& deletedDocId) = 0;
+    virtual void onDeleteOp(OperationContext* opCtx,
+                            const BSONObj& deletedDocId,
+                            const repl::OpTime& opTime,
+                            const repl::OpTime& preImageOpTime) = 0;
 
 protected:
     MigrationChunkClonerSource();

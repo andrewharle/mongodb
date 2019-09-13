@@ -1,3 +1,12 @@
+/**
+ * @tags: [
+ *  requires_non_retryable_commands,
+ *
+ *  # capped collections is not available on embedded
+ *  incompatible_with_embedded,
+ * ]
+ */
+
 (function() {
     "use strict";
     // This test ensures that CloneCollectionAsCapped()ing a nonexistent collection will not

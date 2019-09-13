@@ -1,7 +1,11 @@
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop]
+
 // Integration tests for collation-aware updates.
 (function() {
     'use strict';
-    var coll = db.coll;
+    var coll = db.getCollection("collation_update_test");
 
     const caseInsensitive = {collation: {locale: "en_US", strength: 2}};
     const caseSensitive = {collation: {locale: "en_US", strength: 3}};

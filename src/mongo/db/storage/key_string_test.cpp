@@ -1,25 +1,27 @@
 // key_string_test.cpp
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,6 +37,7 @@
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <memory>
 #include <random>
 #include <typeinfo>
 #include <vector>
@@ -47,6 +50,9 @@
 #include "mongo/db/storage/key_string.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/stdx/functional.h"
+#include "mongo/stdx/future.h"
+#include "mongo/stdx/memory.h"
+#include "mongo/unittest/death_test.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/hex.h"
 #include "mongo/util/log.h"
@@ -57,6 +63,15 @@ using namespace mongo;
 
 BSONObj toBson(const KeyString& ks, Ordering ord) {
     return KeyString::toBson(ks.getBuffer(), ks.getSize(), ord, ks.getTypeBits());
+}
+
+BSONObj toBsonAndCheckKeySize(const KeyString& ks, Ordering ord) {
+    auto keyStringSize = ks.getSize();
+
+    // Validate size of the key in KeyString.
+    ASSERT_EQUALS(keyStringSize,
+                  KeyString::getKeySize(ks.getBuffer(), keyStringSize, ord, ks.getTypeBits()));
+    return KeyString::toBson(ks.getBuffer(), keyStringSize, ord, ks.getTypeBits());
 }
 
 Ordering ALL_ASCENDING = Ordering::make(BSONObj());
@@ -94,13 +109,13 @@ TEST_F(KeyStringTest, Simple1) {
                      KeyString(version, b, ALL_ASCENDING, RecordId()));
 }
 
-#define ROUNDTRIP_ORDER(version, x, order)             \
-    do {                                               \
-        const BSONObj _orig = x;                       \
-        const KeyString _ks(version, _orig, order);    \
-        const BSONObj _converted = toBson(_ks, order); \
-        ASSERT_BSONOBJ_EQ(_converted, _orig);          \
-        ASSERT(_converted.binaryEqual(_orig));         \
+#define ROUNDTRIP_ORDER(version, x, order)                            \
+    do {                                                              \
+        const BSONObj _orig = x;                                      \
+        const KeyString _ks(version, _orig, order);                   \
+        const BSONObj _converted = toBsonAndCheckKeySize(_ks, order); \
+        ASSERT_BSONOBJ_EQ(_converted, _orig);                         \
+        ASSERT(_converted.binaryEqual(_orig));                        \
     } while (0)
 
 #define ROUNDTRIP(version, x)                        \
@@ -161,7 +176,7 @@ TEST_F(KeyStringTest, ActualBytesDouble) {
     // last byte (kEnd) doesn't get flipped
     string hexFlipped;
     for (size_t i = 0; i < hex.size() - 2; i += 2) {
-        char c = fromHex(hex.c_str() + i);
+        char c = uassertStatusOK(fromHex(hex.c_str() + i));
         c = ~c;
         hexFlipped += toHex(&c, 1);
     }
@@ -382,39 +397,47 @@ TEST_F(KeyStringTest, LotsOfNumbers2) {
 }
 
 TEST_F(KeyStringTest, LotsOfNumbers3) {
-    const auto V1 = KeyString::Version::V1;
-    Decimal128::RoundingPrecision roundingPrecisions[]{Decimal128::kRoundTo15Digits,
-                                                       Decimal128::kRoundTo34Digits};
-    Decimal128::RoundingMode roundingModes[]{Decimal128::kRoundTowardNegative,
-                                             Decimal128::kRoundTowardPositive};
+    std::vector<stdx::future<void>> futures;
 
-    for (double i = -1100; i < 1100; i++) {
-        for (double j = 0; j < 52; j++) {
-            for (double k = 0; k < 8; k++) {
-                double x = pow(2, i);
-                double y = pow(2, i - j);
-                double z = pow(2, i - 53 + k);
-                double bin = x + y - z;
+    for (double k = 0; k < 8; k++) {
+        futures.push_back(stdx::async(stdx::launch::async, [k, this] {
 
-                // In general NaNs don't roundtrip as we only store a single NaN, see the NaNs test.
-                if (std::isnan(bin))
-                    continue;
+            for (double i = -1100; i < 1100; i++) {
+                for (double j = 0; j < 52; j++) {
+                    const auto V1 = KeyString::Version::V1;
+                    Decimal128::RoundingPrecision roundingPrecisions[]{
+                        Decimal128::kRoundTo15Digits, Decimal128::kRoundTo34Digits};
+                    Decimal128::RoundingMode roundingModes[]{Decimal128::kRoundTowardNegative,
+                                                             Decimal128::kRoundTowardPositive};
+                    double x = pow(2, i);
+                    double y = pow(2, i - j);
+                    double z = pow(2, i - 53 + k);
+                    double bin = x + y - z;
 
-                ROUNDTRIP(version, BSON("" << bin));
-                ROUNDTRIP(version, BSON("" << -bin));
+                    // In general NaNs don't roundtrip as we only store a single NaN, see the NaNs
+                    // test.
+                    if (std::isnan(bin))
+                        continue;
 
-                if (version < V1)
-                    continue;
+                    ROUNDTRIP(version, BSON("" << bin));
+                    ROUNDTRIP(version, BSON("" << -bin));
 
-                for (auto precision : roundingPrecisions) {
-                    for (auto mode : roundingModes) {
-                        Decimal128 rounded = Decimal128(bin, precision, mode);
-                        ROUNDTRIP(V1, BSON("" << rounded));
-                        ROUNDTRIP(V1, BSON("" << rounded.negate()));
+                    if (version < V1)
+                        continue;
+
+                    for (auto precision : roundingPrecisions) {
+                        for (auto mode : roundingModes) {
+                            Decimal128 rounded = Decimal128(bin, precision, mode);
+                            ROUNDTRIP(V1, BSON("" << rounded));
+                            ROUNDTRIP(V1, BSON("" << rounded.negate()));
+                        }
                     }
                 }
             }
-        }
+        }));
+    }
+    for (auto&& future : futures) {
+        future.get();
     }
 }
 
@@ -776,69 +799,78 @@ void testPermutation(KeyString::Version version,
     // Since KeyStrings are compared using memcmp we can assume it provides a total ordering such
     // that there won't be cases where (a < b && b < c && !(a < c)). This test still needs to ensure
     // that it provides the *correct* total ordering.
+    std::vector<stdx::future<void>> futures;
     for (size_t k = 0; k < orderings.size(); k++) {
-        BSONObj orderObj = orderings[k];
-        Ordering ordering = Ordering::make(orderObj);
-        if (debug)
-            log() << "ordering: " << orderObj;
-
-        std::vector<BSONObj> elements = elementsOrig;
-        BSONObjComparator bsonCmp(orderObj,
-                                  BSONObjComparator::FieldNamesMode::kConsider,
-                                  &SimpleStringDataComparator::kInstance);
-        std::stable_sort(elements.begin(), elements.end(), bsonCmp.makeLessThan());
-
-        for (size_t i = 0; i < elements.size(); i++) {
-            const BSONObj& o1 = elements[i];
-            if (debug)
-                log() << "\to1: " << o1;
-            ROUNDTRIP_ORDER(version, o1, ordering);
-
-            KeyString k1(version, o1, ordering);
-
-            KeyString l1(version, BSON("l" << o1.firstElement()), ordering);  // kLess
-            KeyString g1(version, BSON("g" << o1.firstElement()), ordering);  // kGreater
-            ASSERT_LT(l1, k1);
-            ASSERT_GT(g1, k1);
-
-            if (i + 1 < elements.size()) {
-                const BSONObj& o2 = elements[i + 1];
+        futures.push_back(
+            stdx::async(stdx::launch::async, [k, version, elementsOrig, orderings, debug] {
+                BSONObj orderObj = orderings[k];
+                Ordering ordering = Ordering::make(orderObj);
                 if (debug)
-                    log() << "\t\t o2: " << o2;
-                KeyString k2(version, o2, ordering);
-                KeyString g2(version, BSON("g" << o2.firstElement()), ordering);
-                KeyString l2(version, BSON("l" << o2.firstElement()), ordering);
+                    log() << "ordering: " << orderObj;
 
-                int bsonCmp = o1.woCompare(o2, ordering);
-                invariant(bsonCmp <= 0);  // We should be sorted...
+                std::vector<BSONObj> elements = elementsOrig;
+                BSONObjComparator bsonCmp(orderObj,
+                                          BSONObjComparator::FieldNamesMode::kConsider,
+                                          &SimpleStringDataComparator::kInstance);
+                std::stable_sort(elements.begin(), elements.end(), bsonCmp.makeLessThan());
 
-                if (bsonCmp == 0) {
-                    ASSERT_EQ(k1, k2);
-                } else {
-                    ASSERT_LT(k1, k2);
+                for (size_t i = 0; i < elements.size(); i++) {
+                    const BSONObj& o1 = elements[i];
+                    if (debug)
+                        log() << "\to1: " << o1;
+                    ROUNDTRIP_ORDER(version, o1, ordering);
+
+                    KeyString k1(version, o1, ordering);
+
+                    KeyString l1(version, BSON("l" << o1.firstElement()), ordering);  // kLess
+                    KeyString g1(version, BSON("g" << o1.firstElement()), ordering);  // kGreater
+                    ASSERT_LT(l1, k1);
+                    ASSERT_GT(g1, k1);
+
+                    if (i + 1 < elements.size()) {
+                        const BSONObj& o2 = elements[i + 1];
+                        if (debug)
+                            log() << "\t\t o2: " << o2;
+                        KeyString k2(version, o2, ordering);
+                        KeyString g2(version, BSON("g" << o2.firstElement()), ordering);
+                        KeyString l2(version, BSON("l" << o2.firstElement()), ordering);
+
+                        int bsonCmp = o1.woCompare(o2, ordering);
+                        invariant(bsonCmp <= 0);  // We should be sorted...
+
+                        if (bsonCmp == 0) {
+                            ASSERT_EQ(k1, k2);
+                        } else {
+                            ASSERT_LT(k1, k2);
+                        }
+
+                        // Test the query encodings using kLess and kGreater
+                        int firstElementComp = o1.firstElement().woCompare(o2.firstElement());
+                        if (ordering.descending(1))
+                            firstElementComp = -firstElementComp;
+
+                        invariant(firstElementComp <= 0);
+
+                        if (firstElementComp == 0) {
+                            // If they share a first element then l1/g1 should equal l2/g2 and l1
+                            // should
+                            // be
+                            // less than both and g1 should be greater than both.
+                            ASSERT_EQ(l1, l2);
+                            ASSERT_EQ(g1, g2);
+                            ASSERT_LT(l1, k2);
+                            ASSERT_GT(g1, k2);
+                        } else {
+                            // k1 is less than k2. Less(k2) and Greater(k1) should be between them.
+                            ASSERT_LT(g1, k2);
+                            ASSERT_GT(l2, k1);
+                        }
+                    }
                 }
-
-                // Test the query encodings using kLess and kGreater
-                int firstElementComp = o1.firstElement().woCompare(o2.firstElement());
-                if (ordering.descending(1))
-                    firstElementComp = -firstElementComp;
-
-                invariant(firstElementComp <= 0);
-
-                if (firstElementComp == 0) {
-                    // If they share a first element then l1/g1 should equal l2/g2 and l1 should be
-                    // less than both and g1 should be greater than both.
-                    ASSERT_EQ(l1, l2);
-                    ASSERT_EQ(g1, g2);
-                    ASSERT_LT(l1, k2);
-                    ASSERT_GT(g1, k2);
-                } else {
-                    // k1 is less than k2. Less(k2) and Greater(k1) should be between them.
-                    ASSERT_LT(g1, k2);
-                    ASSERT_GT(l2, k1);
-                }
-            }
-        }
+            }));
+    }
+    for (auto&& future : futures) {
+        future.get();
     }
 }
 
@@ -892,7 +924,7 @@ TEST_F(KeyStringTest, AllPerm2Compare) {
     // Select only a small subset of elements, as the combination is quadratic.
     // We want to select two subsets independently, so all combinations will get tested eventually.
     // kMaxPermElements is the desired number of elements to pass to testPermutation.
-    const size_t kMaxPermElements = kDebugBuild ? 100000 : 500000;
+    const size_t kMaxPermElements = kDebugBuild ? 100'000 : 500'000;
     size_t maxElements = sqrt(kMaxPermElements);
     auto firstElements = thinElements(baseElements, seed, maxElements);
     auto secondElements = thinElements(baseElements, seed + 1, maxElements);
@@ -1054,9 +1086,9 @@ TEST_F(KeyStringTest, NumberOrderLots) {
 
     Ordering ordering = Ordering::make(BSON("a" << 1));
 
-    OwnedPointerVector<KeyString> keyStrings;
+    std::vector<std::unique_ptr<KeyString>> keyStrings;
     for (size_t i = 0; i < numbers.size(); i++) {
-        keyStrings.push_back(new KeyString(version, numbers[i], ordering));
+        keyStrings.push_back(stdx::make_unique<KeyString>(version, numbers[i], ordering));
     }
 
     for (size_t i = 0; i < numbers.size(); i++) {
@@ -1137,6 +1169,139 @@ TEST_F(KeyStringTest, RecordIds) {
                 ASSERT_EQ(KeyString::decodeRecordId(&reader), other);
                 ASSERT(reader.atEof());
             }
+        }
+    }
+}
+
+TEST_F(KeyStringTest, KeyWithTooManyTypeBitsCausesUassert) {
+    BSONObj obj;
+    {
+        BSONObjBuilder builder;
+        {
+            BSONArrayBuilder array(builder.subarrayStart("x"));
+            auto zero = BSON("" << 0.0);
+            for (int i = 0; i < 1016; i++)
+                array.append(zero.firstElement());
+        }
+
+        obj = builder.obj();
+    }
+    KeyString key(version);
+    ASSERT_THROWS_CODE(key.resetToKey(obj, ONE_ASCENDING), DBException, ErrorCodes::KeyTooLong);
+}
+
+TEST_F(KeyStringTest, ToBsonSafeShouldNotTerminate) {
+    KeyString::TypeBits typeBits(KeyString::Version::V1);
+
+    const char invalidString[] = {
+        60,  // CType::kStringLike
+        55,  // Non-null terminated
+    };
+    ASSERT_THROWS_CODE(
+        KeyString::toBsonSafe(invalidString, sizeof(invalidString), ALL_ASCENDING, typeBits),
+        AssertionException,
+        50816);
+
+    const char invalidNumber[] = {
+        43,  // CType::kNumericPositive1ByteInt
+        1,   // Encoded integer part, least significant bit indicates there's a fractional part.
+        0,   // Since the integer part is 1 byte, the next 7 bytes are expected to be the fractional
+             // part and are needed to prevent the BufReader from overflowing.
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    };
+    ASSERT_THROWS_CODE(
+        KeyString::toBsonSafe(invalidNumber, sizeof(invalidNumber), ALL_ASCENDING, typeBits),
+        AssertionException,
+        50810);
+}
+
+TEST_F(KeyStringTest, InvalidDecimalExponent) {
+    const Decimal128 dec("1125899906842624.1");
+    const KeyString ks(KeyString::Version::V1, BSON("" << dec), ALL_ASCENDING);
+
+    // Overwrite the 1st byte to 0, corrupting the exponent. This is meant to reproduce
+    // SERVER-34767.
+    char* ksBuffer = (char*)ks.getBuffer();
+    ksBuffer[1] = 0;
+
+    ASSERT_THROWS_CODE(
+        KeyString::toBsonSafe(ksBuffer, ks.getSize(), ALL_ASCENDING, ks.getTypeBits()),
+        AssertionException,
+        50814);
+}
+
+TEST_F(KeyStringTest, InvalidDecimalZero) {
+    const KeyString ks(KeyString::Version::V1, BSON("" << Decimal128("-0")), ALL_ASCENDING);
+
+    char* ksBuffer = (char*)ks.getBuffer();
+    ksBuffer[2] = 100;
+
+    uint8_t* typeBits = (uint8_t*)ks.getTypeBits().getBuffer();
+    typeBits[1] = 147;
+
+    ASSERT_THROWS_CODE(
+        KeyString::toBsonSafe(ksBuffer, ks.getSize(), ALL_ASCENDING, ks.getTypeBits()),
+        AssertionException,
+        50846);
+}
+
+TEST_F(KeyStringTest, InvalidDecimalContinuation) {
+    auto elem = Decimal128("1.797693134862315708145274237317043E308");
+    const KeyString ks(KeyString::Version::V1, BSON("" << elem), ALL_ASCENDING);
+
+    uint8_t* ksBuffer = (uint8_t*)ks.getBuffer();
+    ksBuffer[2] = 239;
+
+    uint8_t* typeBits = (uint8_t*)ks.getTypeBits().getBuffer();
+    typeBits[1] = 231;
+
+    ASSERT_THROWS_CODE(
+        KeyString::toBsonSafe((char*)ksBuffer, ks.getSize(), ALL_ASCENDING, ks.getTypeBits()),
+        AssertionException,
+        50850);
+}
+
+TEST_F(KeyStringTest, RandomizedInputsForToBsonSafe) {
+    std::mt19937 gen(newSeed());
+    std::uniform_int_distribution<> randomByte(std::numeric_limits<unsigned char>::min(),
+                                               std::numeric_limits<unsigned char>::max());
+
+    const auto interestingElements = getInterestingElements(KeyString::Version::V1);
+    for (auto elem : interestingElements) {
+        const KeyString ks(KeyString::Version::V1, elem, ALL_ASCENDING);
+
+        char* ksBuffer = (char*)ks.getBuffer();
+        char* typeBits = (char*)ks.getTypeBits().getBuffer();
+
+        // Select a random byte to change, except for the first byte as it will likely become an
+        // invalid CType and not test anything interesting.
+        auto offset = randomByte(gen);
+        auto newValue = randomByte(gen);
+        ksBuffer[offset % ks.getSize() + 1] = newValue;
+
+        // Ditto for the type bits buffer.
+        offset = randomByte(gen);
+        newValue = randomByte(gen);
+        typeBits[offset % ks.getTypeBits().getSize() + 1] = newValue;
+
+        try {
+            KeyString::toBsonSafe(ksBuffer, ks.getSize(), ALL_ASCENDING, ks.getTypeBits());
+        } catch (const AssertionException&) {
+            // The expectation is that the randomized buffer is likely an invalid KeyString,
+            // however attempting to decode it should fail gracefully.
+        }
+
+        // Retest with descending.
+        try {
+            KeyString::toBsonSafe(ksBuffer, ks.getSize(), ONE_DESCENDING, ks.getTypeBits());
+        } catch (const AssertionException&) {
+            // The expectation is that the randomized buffer is likely an invalid KeyString,
+            // however attempting to decode it should fail gracefully.
         }
     }
 }
@@ -1292,4 +1457,13 @@ TEST_F(KeyStringTest, DecimalFromUniformDoublePerf) {
         }
     }
     perfTest(version, numbers);
+}
+
+DEATH_TEST(KeyStringTest, ToBsonPromotesAssertionsToTerminate, "terminate() called") {
+    const char invalidString[] = {
+        60,  // CType::kStringLike
+        55,  // Non-null terminated
+    };
+    KeyString::TypeBits typeBits(KeyString::Version::V1);
+    KeyString::toBson(invalidString, sizeof(invalidString), ALL_ASCENDING, typeBits);
 }

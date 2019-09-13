@@ -74,7 +74,23 @@ repos:
       - yum/redhat/6/mongodb-org
       - yum/redhat/6Server/mongodb-org
 
+  - name: rhel67
+    type: rpm
+    edition: org
+    bucket: repo.mongodb.org
+    repos:
+      - yum/redhat/6/mongodb-org
+      - yum/redhat/6Server/mongodb-org
+
   - name: rhel70
+    type: rpm
+    edition: org
+    bucket: repo.mongodb.org
+    repos:
+      - yum/redhat/7/mongodb-org
+      - yum/redhat/7Server/mongodb-org
+
+  - name: rhel72
     type: rpm
     edition: org
     bucket: repo.mongodb.org
@@ -88,6 +104,13 @@ repos:
     bucket: repo.mongodb.org
     repos:
       - yum/amazon/2013.03/mongodb-org
+
+  - name: amazon2
+    type: rpm
+    edition: org
+    bucket: repo.mongodb.org
+    repos:
+      - yum/amazon/2/mongodb-org
 
   - name: suse11
     type: rpm
@@ -114,6 +137,17 @@ repos:
       - i386
     repos:
       - apt/debian/dists/jessie/mongodb-org
+
+  - name: debian92
+    type: deb
+    code_name: "stretch"
+    bucket: repo.mongodb.org
+    edition: org
+    component: main
+    architectures:
+      - amd64
+    repos:
+      - apt/debian/dists/stretch/mongodb-org
 
   - name: debian71
     type: deb
@@ -164,6 +198,19 @@ repos:
     repos:
       - apt/ubuntu/dists/xenial/mongodb-org
 
+  - name: ubuntu1804
+    type: deb
+    code_name: "bionic"
+    edition: org
+    bucket: repo.mongodb.org
+    component: multiverse
+    architectures:
+      - amd64
+      - i386
+      - s390x
+    repos:
+      - apt/ubuntu/dists/bionic/mongodb-org
+
 ####################
 #
 # Enterprise Repos:
@@ -184,8 +231,8 @@ repos:
     bucket: repo.mongodb.com
     repos:
       - yum/redhat/6/mongodb-enterprise
-      - yum/redhat/6Server/mongodb-enterprise        
-
+      - yum/redhat/6Server/mongodb-enterprise
+        
   - name: rhel70
     type: rpm
     edition: enterprise
@@ -217,6 +264,13 @@ repos:
     repos:
       - yum/amazon/2013.03/mongodb-enterprise
 
+  - name: amazon2
+    type: rpm
+    edition: enterprise
+    bucket: repo.mongodb.com
+    repos:
+      - yum/amazon/2/mongodb-enterprise
+
   - name: suse11
     type: rpm
     edition: enterprise
@@ -230,6 +284,17 @@ repos:
     bucket: repo.mongodb.com
     repos:
       - zypper/suse/12/mongodb-enterprise
+
+  - name: debian92
+    type: deb
+    edition: enterprise
+    code_name: "stretch"
+    bucket: repo.mongodb.com
+    component: main
+    architectures:
+      - amd64
+    repos:
+      - apt/debian/dists/stretch/mongodb-enterprise
 
   - name: debian81
     type: deb
@@ -301,3 +366,16 @@ repos:
       - i386
     repos:
       - apt/ubuntu/dists/xenial/mongodb-enterprise
+
+  - name: ubuntu1804
+    type: deb
+    code_name: "bionic"
+    edition: enterprise
+    bucket: repo.mongodb.com
+    component: multiverse
+    architectures:
+      - amd64
+      - i386
+      - s390x
+    repos:
+      - apt/ubuntu/dists/bionic/mongodb-enterprise

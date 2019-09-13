@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2017 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -60,7 +62,7 @@ FTDCController* getGlobalFTDCController() {
     return getFTDCController(getGlobalServiceContext()).get();
 }
 
-std::atomic<bool> localEnabledFlag(FTDCConfig::kEnabledDefault);  // NOLINT
+AtomicBool localEnabledFlag(FTDCConfig::kEnabledDefault);
 
 class ExportedFTDCEnabledParameter
     : public ExportedServerParameter<bool, ServerParameterType::kStartupAndRuntime> {
@@ -82,7 +84,7 @@ public:
 
 } exportedFTDCEnabledParameter;
 
-std::atomic<std::int32_t> localPeriodMillis(FTDCConfig::kPeriodMillisDefault);  // NOLINT
+AtomicInt32 localPeriodMillis(FTDCConfig::kPeriodMillisDefault);
 
 class ExportedFTDCPeriodParameter
     : public ExportedServerParameter<std::int32_t, ServerParameterType::kStartupAndRuntime> {
@@ -111,11 +113,9 @@ public:
 } exportedFTDCPeriodParameter;
 
 // Scale the values down since are defaults are in bytes, but the user interface is MB
-std::atomic<std::int32_t> localMaxDirectorySizeMB(  // NOLINT
-    FTDCConfig::kMaxDirectorySizeBytesDefault / (1024 * 1024));
+AtomicInt32 localMaxDirectorySizeMB(FTDCConfig::kMaxDirectorySizeBytesDefault / (1024 * 1024));
 
-std::atomic<std::int32_t> localMaxFileSizeMB(FTDCConfig::kMaxFileSizeBytesDefault /  // NOLINT
-                                             (1024 * 1024));
+AtomicInt32 localMaxFileSizeMB(FTDCConfig::kMaxFileSizeBytesDefault / (1024 * 1024));
 
 class ExportedFTDCDirectorySizeParameter
     : public ExportedServerParameter<std::int32_t, ServerParameterType::kStartupAndRuntime> {
@@ -186,7 +186,7 @@ public:
 
 } exportedFTDCFileSizeParameter;
 
-std::atomic<std::int32_t> localMaxSamplesPerArchiveMetricChunk(  // NOLINT
+AtomicInt32 localMaxSamplesPerArchiveMetricChunk(
     FTDCConfig::kMaxSamplesPerArchiveMetricChunkDefault);
 
 class ExportedFTDCArchiveChunkSizeParameter
@@ -215,7 +215,7 @@ public:
 
 } exportedFTDCArchiveChunkSizeParameter;
 
-std::atomic<std::int32_t> localMaxSamplesPerInterimMetricChunk(  // NOLINT
+AtomicInt32 localMaxSamplesPerInterimMetricChunk(
     FTDCConfig::kMaxSamplesPerInterimMetricChunkDefault);
 
 class ExportedFTDCInterimChunkSizeParameter
@@ -249,21 +249,14 @@ FTDCSimpleInternalCommandCollector::FTDCSimpleInternalCommandCollector(StringDat
                                                                        StringData name,
                                                                        StringData ns,
                                                                        BSONObj cmdObj)
-    : _name(name.toString()), _ns(ns.toString()), _cmdObj(std::move(cmdObj)) {
-    _command = Command::findCommand(command);
-    invariant(_command);
+    : _name(name.toString()), _request(OpMsgRequest::fromDBAndBody(ns, std::move(cmdObj))) {
+    invariant(command == _request.getCommandName());
+    invariant(CommandHelpers::findCommand(command));  // Fail early if it doesn't exist.
 }
 
 void FTDCSimpleInternalCommandCollector::collect(OperationContext* opCtx, BSONObjBuilder& builder) {
-    std::string errmsg;
-
-    bool ret = _command->run(opCtx, _ns, _cmdObj, 0, errmsg, builder);
-
-    // Some commands return errmsgs when they return false (collstats)
-    // Some commands return bson objs when they return false (replGetStatus)
-    // We append the status as needed to ensure readers of the collected data can check the
-    // status of any individual command.
-    _command->appendCommandStatus(builder, ret, errmsg);
+    auto result = CommandHelpers::runCommandDirectly(opCtx, _request);
+    builder.appendElements(result);
 }
 
 std::string FTDCSimpleInternalCommandCollector::name() const {

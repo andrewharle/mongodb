@@ -1,4 +1,7 @@
 // Test the count command with views.
+//
+// @tags: [requires_fastcount]
+
 (function() {
     "use strict";
 
@@ -53,11 +56,30 @@
     assert.commandWorked(explainPlan);
     assert.eq(explainPlan["stages"][0]["$cursor"]["queryPlanner"]["namespace"], "views_count.coll");
 
+    // Count with explicit explain modes works on a view.
+    explainPlan =
+        assert.commandWorked(lessThanSevenView.explain("queryPlanner").count({x: {$gte: 5}}));
+    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_count.coll");
+    assert(!explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
+
+    explainPlan =
+        assert.commandWorked(lessThanSevenView.explain("executionStats").count({x: {$gte: 5}}));
+    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_count.coll");
+    assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
+    assert.eq(explainPlan.stages[0].$cursor.executionStats.nReturned, 2);
+    assert(!explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"));
+
+    explainPlan =
+        assert.commandWorked(lessThanSevenView.explain("allPlansExecution").count({x: {$gte: 5}}));
+    assert.eq(explainPlan.stages[0].$cursor.queryPlanner.namespace, "views_count.coll");
+    assert(explainPlan.stages[0].$cursor.hasOwnProperty("executionStats"));
+    assert.eq(explainPlan.stages[0].$cursor.executionStats.nReturned, 2);
+    assert(explainPlan.stages[0].$cursor.executionStats.hasOwnProperty("allPlansExecution"));
+
+    // Count with hint works on a view.
+    assert.commandWorked(viewsDB.runCommand({count: "identityView", hint: "_id_"}));
+
     assert.commandFailedWithCode(
         viewsDB.runCommand({count: "identityView", collation: {locale: "en_US"}}),
         ErrorCodes.OptionNotSupportedOnView);
-
-    // Hint cannot be used when counting on a view.
-    assert.commandFailedWithCode(viewsDB.runCommand({count: "identityView", hint: "_id_"}),
-                                 ErrorCodes.InvalidPipelineOperator);
 }());

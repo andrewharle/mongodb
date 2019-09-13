@@ -1,30 +1,33 @@
 // dbclient.cpp - connect to a Mongo database as a database, from C++
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
@@ -37,13 +40,16 @@
 #include "mongo/db/client.h"
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/cursor_response.h"
+#include "mongo/db/query/getmore_request.h"
+#include "mongo/db/query/query_request.h"
 #include "mongo/rpc/factory.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/rpc/metadata.h"
 #include "mongo/rpc/object_check.h"
-#include "mongo/rpc/request_builder_interface.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/util/bufreader.h"
 #include "mongo/util/debug_util.h"
 #include "mongo/util/destructor_guard.h"
 #include "mongo/util/exit.h"
@@ -58,43 +64,21 @@ using std::string;
 using std::vector;
 
 namespace {
-/**
- * This code is mostly duplicated from DBClientWithCommands::runCommand. It may not
- * be worth de-duplicating as this codepath will eventually be removed anyway.
- */
-Message assembleCommandRequest(DBClientWithCommands* cli,
+Message assembleCommandRequest(DBClientBase* cli,
                                StringData database,
                                int legacyQueryOptions,
                                BSONObj legacyQuery) {
-    // TODO: Rewrite this to a common utility shared between this and DBClientMultiCommand.
+    auto request = rpc::upconvertRequest(database, std::move(legacyQuery), legacyQueryOptions);
 
-    // Can be an OP_COMMAND or OP_QUERY message.
-    auto requestBuilder =
-        rpc::makeRequestBuilder(cli->getClientRPCProtocols(), cli->getServerRPCProtocols());
-
-    BSONObj upconvertedCommand;
-    BSONObj upconvertedMetadata;
-
-    std::tie(upconvertedCommand, upconvertedMetadata) =
-        uassertStatusOK(rpc::upconvertRequestMetadata(std::move(legacyQuery), legacyQueryOptions));
-
-    BSONObjBuilder metadataBob;
-    metadataBob.appendElements(upconvertedMetadata);
     if (cli->getRequestMetadataWriter()) {
-        uassertStatusOK(
-            cli->getRequestMetadataWriter()((haveClient() ? cc().getOperationContext() : nullptr),
-                                            &metadataBob,
-                                            cli->getServerAddress()));
+        BSONObjBuilder bodyBob(std::move(request.body));
+        auto opCtx = (haveClient() ? cc().getOperationContext() : nullptr);
+        uassertStatusOK(cli->getRequestMetadataWriter()(opCtx, &bodyBob));
+        request.body = bodyBob.obj();
     }
 
-    requestBuilder->setDatabase(database);
-    // We need to get the command name from the upconverted command as it may have originally
-    // been wrapped.
-    requestBuilder->setCommandName(upconvertedCommand.firstElementFieldName());
-    requestBuilder->setCommandArgs(std::move(upconvertedCommand));
-    requestBuilder->setMetadata(metadataBob.done());
-
-    return requestBuilder->done();
+    return rpc::messageFromOpMsgRequest(
+        cli->getClientRPCProtocols(), cli->getServerRPCProtocols(), std::move(request));
 }
 
 }  // namespace
@@ -109,50 +93,83 @@ int DBClientCursor::nextBatchSize() {
     return batchSize < nToReturn ? batchSize : nToReturn;
 }
 
-void DBClientCursor::_assembleInit(Message& toSend) {
+Message DBClientCursor::_assembleInit() {
+    if (cursorId) {
+        return _assembleGetMore();
+    }
+
     // If we haven't gotten a cursorId yet, we need to issue a new query or command.
-    if (!cursorId) {
+    if (_isCommand) {
         // HACK:
         // Unfortunately, this code is used by the shell to run commands,
         // so we need to allow the shell to send invalid options so that we can
         // test that the server rejects them. Thus, to allow generating commands with
         // invalid options, we validate them here, and fall back to generating an OP_QUERY
         // through assembleQueryRequest if the options are invalid.
-
         bool hasValidNToReturnForCommand = (nToReturn == 1 || nToReturn == -1);
         bool hasValidFlagsForCommand = !(opts & mongo::QueryOption_Exhaust);
+        bool hasInvalidMaxTimeMs = query.hasField("$maxTimeMS");
 
-        if (_isCommand && hasValidNToReturnForCommand && hasValidFlagsForCommand) {
-            toSend = assembleCommandRequest(_client, nsToDatabaseSubstring(ns), opts, query);
-            return;
+        if (hasValidNToReturnForCommand && hasValidFlagsForCommand && !hasInvalidMaxTimeMs) {
+            return assembleCommandRequest(_client, ns.db(), opts, query);
         }
-        assembleQueryRequest(ns, query, nextBatchSize(), nToSkip, fieldsToReturn, opts, toSend);
-        return;
+    } else if (_useFindCommand) {
+        auto qr = QueryRequest::fromLegacyQuery(ns,
+                                                query,
+                                                fieldsToReturn ? *fieldsToReturn : BSONObj(),
+                                                nToSkip,
+                                                nextBatchSize(),
+                                                opts);
+        if (qr.isOK() && !qr.getValue()->isExplain() && !qr.getValue()->isExhaust()) {
+            BSONObj cmd = qr.getValue()->asFindCommand();
+            if (auto readPref = query["$readPreference"]) {
+                // QueryRequest doesn't handle $readPreference.
+                cmd = BSONObjBuilder(std::move(cmd)).append(readPref).obj();
+            }
+            return assembleCommandRequest(_client, ns.db(), opts, std::move(cmd));
+        }
+        // else use legacy OP_QUERY request.
     }
-    // Assemble a legacy getMore request.
-    BufBuilder b;
-    b.appendNum(opts);
-    b.appendStr(ns);
-    b.appendNum(nToReturn);
-    b.appendNum(cursorId);
-    toSend.setData(dbGetMore, b.buf(), b.len());
+
+    _useFindCommand = false;  // Make sure we handle the reply correctly.
+    Message toSend;
+    assembleQueryRequest(ns.ns(), query, nextBatchSize(), nToSkip, fieldsToReturn, opts, toSend);
+    return toSend;
+}
+
+Message DBClientCursor::_assembleGetMore() {
+    invariant(cursorId);
+    if (_useFindCommand) {
+        std::int64_t batchSize = nextBatchSize();
+        auto gmr = GetMoreRequest(ns,
+                                  cursorId,
+                                  boost::make_optional(batchSize != 0, batchSize),
+                                  boost::none,   // awaitDataTimeout
+                                  boost::none,   // term
+                                  boost::none);  // lastKnownCommittedOptime
+        return assembleCommandRequest(_client, ns.db(), opts, gmr.toBSON());
+    } else {
+        // Assemble a legacy getMore request.
+        return makeGetMoreMessage(ns.ns(), cursorId, nextBatchSize(), opts);
+    }
 }
 
 bool DBClientCursor::init() {
-    Message toSend;
-    _assembleInit(toSend);
+    invariant(!_connectionHasPendingReplies);
+    Message toSend = _assembleInit();
     verify(_client);
-    if (!_client->call(toSend, batch.m, false, &_originalHost)) {
+    Message reply;
+    if (!_client->call(toSend, reply, false, &_originalHost)) {
         // log msg temp?
         log() << "DBClientCursor::init call() failed" << endl;
         return false;
     }
-    if (batch.m.empty()) {
+    if (reply.empty()) {
         // log msg temp?
         log() << "DBClientCursor::init message from call() was empty" << endl;
         return false;
     }
-    dataReceived();
+    dataReceived(reply);
     return true;
 }
 
@@ -160,122 +177,120 @@ void DBClientCursor::initLazy(bool isRetry) {
     massert(15875,
             "DBClientCursor::initLazy called on a client that doesn't support lazy",
             _client->lazySupported());
-    Message toSend;
-    _assembleInit(toSend);
+    Message toSend = _assembleInit();
     _client->say(toSend, isRetry, &_originalHost);
+    _lastRequestId = toSend.header().getId();
+    _connectionHasPendingReplies = true;
 }
 
 bool DBClientCursor::initLazyFinish(bool& retry) {
-    bool recvd = _client->recv(batch.m);
+    invariant(_connectionHasPendingReplies);
+    Message reply;
+    bool recvd = _client->recv(reply, _lastRequestId);
+    _connectionHasPendingReplies = false;
 
     // If we get a bad response, return false
-    if (!recvd || batch.m.empty()) {
+    if (!recvd || reply.empty()) {
         if (!recvd)
             log() << "DBClientCursor::init lazy say() failed" << endl;
-        if (batch.m.empty())
+        if (reply.empty())
             log() << "DBClientCursor::init message from say() was empty" << endl;
 
-        _client->checkResponse(NULL, -1, &retry, &_lazyHost);
+        _client->checkResponse({}, true, &retry, &_lazyHost);
 
         return false;
     }
 
-    dataReceived(retry, _lazyHost);
+    dataReceived(reply, retry, _lazyHost);
 
     return !retry;
 }
 
 void DBClientCursor::requestMore() {
-    verify(cursorId && batch.pos == batch.nReturned);
+    if (opts & QueryOption_Exhaust) {
+        return exhaustReceiveMore();
+    }
+
+    invariant(!_connectionHasPendingReplies);
+    verify(cursorId && batch.pos == batch.objs.size());
 
     if (haveLimit) {
-        nToReturn -= batch.nReturned;
+        nToReturn -= batch.objs.size();
         verify(nToReturn > 0);
     }
-    BufBuilder b;
-    b.appendNum(opts);
-    b.appendStr(ns);
-    b.appendNum(nextBatchSize());
-    b.appendNum(cursorId);
 
-    Message toSend;
-    toSend.setData(dbGetMore, b.buf(), b.len());
-    Message response;
-
-    if (_client) {
+    auto doRequestMore = [&] {
+        Message toSend = _assembleGetMore();
+        Message response;
         _client->call(toSend, response);
-        this->batch.m = std::move(response);
-        dataReceived();
-    } else {
-        verify(_scopedHost.size());
-        ScopedDbConnection conn(_scopedHost);
-        conn->call(toSend, response);
-        _client = conn.get();
-        ON_BLOCK_EXIT([this] { _client = nullptr; });
-        this->batch.m = std::move(response);
-        dataReceived();
-        conn.done();
-    }
+        dataReceived(response);
+    };
+    if (_client)
+        return doRequestMore();
+
+    invariant(_scopedHost.size());
+    DBClientBase::withConnection_do_not_use(_scopedHost, [&](DBClientBase* conn) {
+        ON_BLOCK_EXIT([&, origClient = _client ] { _client = origClient; });
+        _client = conn;
+        doRequestMore();
+    });
 }
 
 /** with QueryOption_Exhaust, the server just blasts data at us (marked at end with cursorid==0). */
 void DBClientCursor::exhaustReceiveMore() {
-    verify(cursorId && batch.pos == batch.nReturned);
-    verify(!haveLimit);
+    verify(cursorId && batch.pos == batch.objs.size());
+    uassert(40675, "Cannot have limit for exhaust query", !haveLimit);
     Message response;
     verify(_client);
-    if (!_client->recv(response)) {
+    if (!_client->recv(response, _lastRequestId)) {
         uasserted(16465, "recv failed while exhausting cursor");
     }
-    batch.m = std::move(response);
-    dataReceived();
+    dataReceived(response);
 }
 
-void DBClientCursor::commandDataReceived() {
-    int op = batch.m.operation();
-    invariant(op == opReply || op == dbCommandReply);
+BSONObj DBClientCursor::commandDataReceived(const Message& reply) {
+    int op = reply.operation();
+    invariant(op == opReply || op == dbCommandReply || op == dbMsg);
 
-    batch.nReturned = 1;
-    batch.pos = 0;
-
-    auto commandReply = rpc::makeReply(&batch.m);
-
+    auto commandReply = _client->parseCommandReplyMessage(_client->getServerAddress(), reply);
     auto commandStatus = getStatusFromCommandResult(commandReply->getCommandReply());
 
-    if (ErrorCodes::SendStaleConfig == commandStatus) {
-        throw RecvStaleConfigException("stale config in DBClientCursor::dataReceived()",
-                                       commandReply->getCommandReply());
+    if (commandStatus == ErrorCodes::StaleConfig) {
+        uassertStatusOK(
+            commandStatus.withContext("stale config in DBClientCursor::dataReceived()"));
     } else if (!commandStatus.isOK()) {
         wasError = true;
     }
 
+    auto opCtx = haveClient() ? cc().getOperationContext() : nullptr;
     if (_client->getReplyMetadataReader()) {
-        uassertStatusOK(_client->getReplyMetadataReader()(commandReply->getMetadata(),
-                                                          _client->getServerAddress()));
+        uassertStatusOK(_client->getReplyMetadataReader()(
+            opCtx, commandReply->getMetadata(), _client->getServerAddress()));
     }
 
-    // HACK: If we got an OP_COMMANDREPLY, take the reply object
-    // and shove it in to an OP_REPLY message.
-    if (op == dbCommandReply) {
-        // Need to take ownership here as we destroy the underlying message.
-        BSONObj reply = commandReply->getCommandReply().getOwned();
-        batch.m.reset();
-        replyToQuery(0, batch.m, reply);
-    }
-
-    QueryResult::View qr = batch.m.singleData().view2ptr();
-    batch.data = qr.data();
-    batch.remainingBytes = qr.dataLen();
+    return commandReply->getCommandReply().getOwned();
 }
 
-void DBClientCursor::dataReceived(bool& retry, string& host) {
+void DBClientCursor::dataReceived(const Message& reply, bool& retry, string& host) {
+    batch.objs.clear();
+    batch.pos = 0;
+
     // If this is a reply to our initial command request.
     if (_isCommand && cursorId == 0) {
-        commandDataReceived();
+        batch.objs.push_back(commandDataReceived(reply));
         return;
     }
 
-    QueryResult::View qr = batch.m.singleData().view2ptr();
+    if (_useFindCommand) {
+        cursorId = 0;  // Don't try to kill cursor if we get back an error.
+        auto cr = uassertStatusOK(CursorResponse::parseFromBSON(commandDataReceived(reply)));
+        cursorId = cr.getCursorId();
+        ns = cr.getNSS();  // Unlike OP_REPLY, find command can change the ns to use for getMores.
+        batch.objs = cr.releaseBatch();
+        return;
+    }
+
+    QueryResult::View qr = reply.singleData().view2ptr();
     resultFlags = qr.getResultFlags();
 
     if (qr.getResultFlags() & ResultFlag_ErrSet) {
@@ -287,7 +302,7 @@ void DBClientCursor::dataReceived(bool& retry, string& host) {
         invariant(qr.getCursorId() == 0);
 
         if (!(opts & QueryOption_CursorTailable)) {
-            uasserted(13127,
+            uasserted(ErrorCodes::CursorNotFound,
                       str::stream() << "cursor id " << cursorId << " didn't exist on server.");
         }
 
@@ -301,18 +316,34 @@ void DBClientCursor::dataReceived(bool& retry, string& host) {
         cursorId = qr.getCursorId();
     }
 
-    batch.nReturned = qr.getNReturned();
-    batch.pos = 0;
-    batch.data = qr.data();
-    batch.remainingBytes = qr.dataLen();
+    if (opts & QueryOption_Exhaust) {
+        // With exhaust mode, each reply after the first claims to be a reply to the previous one
+        // rather than the initial request.
+        _connectionHasPendingReplies = (cursorId != 0);
+        _lastRequestId = reply.header().getId();
+    }
 
-    _client->checkResponse(batch.data, batch.nReturned, &retry, &host);  // watches for "not master"
+    batch.objs.reserve(qr.getNReturned());
+
+    BufReader data(qr.data(), qr.dataLen());
+    while (static_cast<int>(batch.objs.size()) < qr.getNReturned()) {
+        if (serverGlobalParams.objcheck) {
+            batch.objs.push_back(data.read<Validated<BSONObj>>());
+        } else {
+            batch.objs.push_back(data.read<BSONObj>());
+        }
+        batch.objs.back().shareOwnershipWith(reply.sharedBuffer());
+    }
+    uassert(ErrorCodes::InvalidBSON,
+            "Got invalid reply from external server while reading from cursor",
+            data.atEof());
+
+    _client->checkResponse(batch.objs, false, &retry, &host);  // watches for "not master"
 
     if (qr.getResultFlags() & ResultFlag_ShardConfigStale) {
         BSONObj error;
         verify(peekError(&error));
-        throw RecvStaleConfigException(
-            (string) "stale config on lazy receive" + causedBy(getErrField(error)), error);
+        uasserted(StaleConfigInfo::parseFromCommandError(error), "stale config on lazy receive");
     }
 
     /* this assert would fire the way we currently work:
@@ -325,17 +356,17 @@ bool DBClientCursor::more() {
     if (!_putBack.empty())
         return true;
 
-    if (haveLimit && batch.pos >= nToReturn)
+    if (haveLimit && static_cast<int>(batch.pos) >= nToReturn)
         return false;
 
-    if (batch.pos < batch.nReturned)
+    if (batch.pos < batch.objs.size())
         return true;
 
     if (cursorId == 0)
         return false;
 
     requestMore();
-    return batch.pos < batch.nReturned;
+    return batch.pos < batch.objs.size();
 }
 
 BSONObj DBClientCursor::next() {
@@ -345,24 +376,11 @@ BSONObj DBClientCursor::next() {
         return ret;
     }
 
-    uassert(13422, "DBClientCursor next() called but more() is false", batch.pos < batch.nReturned);
-
-    if (serverGlobalParams.objcheck) {
-        auto status = validateBSON(batch.data, batch.remainingBytes, _enabledBSONVersion);
-        uassert(ErrorCodes::InvalidBSON,
-                str::stream() << "Got invalid BSON from external server while reading from cursor"
-                              << causedBy(status),
-                status.isOK());
-    }
-
-    BSONObj o(batch.data);
-
-    batch.pos++;
-    batch.data += o.objsize();
-    batch.remainingBytes -= o.objsize();
+    uassert(
+        13422, "DBClientCursor next() called but more() is false", batch.pos < batch.objs.size());
 
     /* todo would be good to make data null at end of batch for safety */
-    return o;
+    return std::move(batch.objs[batch.pos++]);
 }
 
 BSONObj DBClientCursor::nextSafe() {
@@ -371,38 +389,17 @@ BSONObj DBClientCursor::nextSafe() {
     // Only convert legacy errors ($err) to exceptions. Otherwise, just return the response and the
     // caller will interpret it as a command error.
     if (wasError && strcmp(o.firstElementFieldName(), "$err") == 0) {
-        auto code = o["code"].numberInt();
-        if (!code) {
-            code = ErrorCodes::UnknownError;
-        }
-        uasserted(code, o.firstElement().str());
+        uassertStatusOK(getStatusFromCommandResult(o));
     }
 
     return o;
 }
 
 void DBClientCursor::peek(vector<BSONObj>& v, int atMost) {
-    int m = atMost;
-
-    /*
-    for( stack<BSONObj>::iterator i = _putBack.begin(); i != _putBack.end(); i++ ) {
-        if( m == 0 )
-            return;
-        v.push_back(*i);
-        m--;
-        n++;
-    }
-    */
-
-    int p = batch.pos;
-    const char* d = batch.data;
-    while (m && p < batch.nReturned) {
-        BSONObj o(d);
-        d += o.objsize();
-        p++;
-        m--;
-        v.push_back(o);
-    }
+    auto end = atMost >= static_cast<int>(batch.objs.size() - batch.pos)
+        ? batch.objs.end()
+        : batch.objs.begin() + batch.pos + atMost;
+    v.insert(v.end(), batch.objs.begin() + batch.pos, end);
 }
 
 BSONObj DBClientCursor::peekFirst() {
@@ -472,13 +469,15 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
                      nToSkip,
                      fieldsToReturn,
                      queryOptions,
-                     batchSize) {}
+                     batchSize,
+                     {}) {}
 
 DBClientCursor::DBClientCursor(DBClientBase* client,
                                const std::string& ns,
                                long long cursorId,
                                int nToReturn,
-                               int queryOptions)
+                               int queryOptions,
+                               std::vector<BSONObj> initialBatch)
     : DBClientCursor(client,
                      ns,
                      BSONObj(),  // query
@@ -487,7 +486,8 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
                      0,        // nToSkip
                      nullptr,  // fieldsToReturn
                      queryOptions,
-                     0) {}  // batchSize
+                     0,
+                     std::move(initialBatch)) {}  // batchSize
 
 DBClientCursor::DBClientCursor(DBClientBase* client,
                                const std::string& ns,
@@ -497,8 +497,10 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
                                int nToSkip,
                                const BSONObj* fieldsToReturn,
                                int queryOptions,
-                               int batchSize)
-    : _client(client),
+                               int batchSize,
+                               std::vector<BSONObj> initialBatch)
+    : batch{std::move(initialBatch)},
+      _client(client),
       _originalHost(_client->getServerAddress()),
       ns(ns),
       _isCommand(nsIsFull(ns) ? nsToCollectionSubstring(ns) == "$cmd" : false),
@@ -507,33 +509,43 @@ DBClientCursor::DBClientCursor(DBClientBase* client,
       haveLimit(nToReturn > 0 && !(queryOptions & QueryOption_CursorTailable)),
       nToSkip(nToSkip),
       fieldsToReturn(fieldsToReturn),
-      opts(queryOptions),
+      opts(queryOptions & ~QueryOptionLocal_forceOpQuery),
       batchSize(batchSize == 1 ? 2 : batchSize),
       resultFlags(0),
       cursorId(cursorId),
       _ownCursor(true),
       wasError(false),
-      _enabledBSONVersion(Validator<BSONObj>::enabledBSONVersion()) {}
+      _enabledBSONVersion(Validator<BSONObj>::enabledBSONVersion()) {
+    if (queryOptions & QueryOptionLocal_forceOpQuery)
+        _useFindCommand = false;
+}
 
 DBClientCursor::~DBClientCursor() {
     kill();
 }
 
 void DBClientCursor::kill() {
-    DESTRUCTOR_GUARD(
+    DESTRUCTOR_GUARD({
+        if (cursorId && _ownCursor && !globalInShutdownDeprecated()) {
+            auto killCursor = [&](auto&& conn) {
+                if (_useFindCommand) {
+                    conn->killCursor(ns, cursorId);
+                } else {
+                    auto toSend = makeKillCursorsMessage(cursorId);
+                    conn->say(toSend);
+                }
+            };
 
-        if (cursorId && _ownCursor && !inShutdown()) {
-            if (_client) {
-                _client->killCursor(cursorId);
+            if (_client && !_connectionHasPendingReplies) {
+                killCursor(_client);
             } else {
-                verify(_scopedHost.size());
-                ScopedDbConnection conn(_scopedHost);
-                conn->killCursor(cursorId);
-                conn.done();
+                // Use a side connection to send the kill cursor request.
+                verify(_scopedHost.size() || (_client && _connectionHasPendingReplies));
+                DBClientBase::withConnection_do_not_use(
+                    _client ? _client->getServerAddress() : _scopedHost, killCursor);
             }
         }
-
-        );
+    });
 
     // Mark this cursor as dead since we can't do any getMores.
     cursorId = 0;

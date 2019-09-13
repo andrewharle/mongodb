@@ -1,7 +1,11 @@
-//
-// Tests autosplitting heuristics, and that the heuristic counting of chunk sizes
-// works as expected even after splitting.
-//
+/**
+ * Tests autosplitting heuristics, and that the heuristic counting of chunk sizes
+ * works as expected even after splitting.
+ *
+ * This test is labeled resource intensive because its total io_write is 53MB compared to a median
+ * of 5MB across all sharding tests in wiredTiger.
+ * @tags: [resource_intensive]
+ */
 (function() {
     'use strict';
 
@@ -73,7 +77,7 @@
 
         // Check that all chunks (except the two extreme chunks)
         // have been split at least once + 1 extra chunk as reload buffer
-        assert.gte(config.chunks.count(), numChunks * 2 + 3);
+        assert.gte(config.chunks.count({"ns": "foo.hashBar"}), numChunks * 2 + 3);
 
         jsTest.log("DONE!");
 

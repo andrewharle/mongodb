@@ -54,17 +54,19 @@ load('./jstests/libs/chunk_manipulation_util.js');
     waitForMigrateStep(shard1, migrateStepNames.cloned);
 
     // Abort migration on donor side, recipient is unaware
-    var inProgressOps = admin.currentOp().inprog;
+    let inProgressOps = admin.aggregate([{$currentOp: {'allUsers': true}}]);
     var abortedMigration = false;
-    for (var op in inProgressOps) {
-        if (inProgressOps[op].query.moveChunk) {
-            admin.killOp(inProgressOps[op].opid);
+    let inProgressStr = '';
+    while (inProgressOps.hasNext()) {
+        let op = inProgressOps.next();
+        inProgressStr += tojson(op);
+        if (op.command.moveChunk) {
+            admin.killOp(op.opid);
             abortedMigration = true;
         }
     }
-    assert.eq(true,
-              abortedMigration,
-              "Failed to abort migration, current running ops: " + tojson(inProgressOps));
+    assert.eq(
+        true, abortedMigration, "Failed to abort migration, current running ops: " + inProgressStr);
     unpauseMoveChunkAtStep(shard0, moveChunkStepNames.startedMoveChunk);
     assert.throws(function() {
         joinMoveChunk();
@@ -91,9 +93,6 @@ load('./jstests/libs/chunk_manipulation_util.js');
     }, "coll1 migration recipient didn't abort migration in catchup phase.", 2 * 60 * 1000);
     assert.eq(
         1, shard0Coll1.find().itcount(), "donor shard0 completed a migration that it aborted.");
-    assert.eq(1,
-              shard1Coll1.find().itcount(),
-              "shard1 accessed the xfermods log despite donor migration abortion.");
 
     jsTest.log('Finishing coll2 migration, which should succeed....');
     unpauseMigrateAtStep(shard2, migrateStepNames.cloned);
@@ -106,4 +105,5 @@ load('./jstests/libs/chunk_manipulation_util.js');
     assert.eq(3, shard2Coll2.find().itcount(), "shard2 failed to complete migration.");
 
     st.stop();
+    MongoRunner.stopMongod(staticMongod);
 })();

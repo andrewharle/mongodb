@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2010-2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,26 +39,22 @@
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_pool.h"
 #include "mongo/s/balancer_configuration.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
-#include "mongo/s/catalog/sharding_catalog_manager.h"
 #include "mongo/s/catalog_cache.h"
 #include "mongo/s/client/shard_factory.h"
-#include "mongo/s/client/shard_registry.h"
 #include "mongo/s/query/cluster_cursor_manager.h"
-#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
-
-// Global grid instance
-Grid grid;
+namespace {
+const auto grid = ServiceContext::declareDecoration<Grid>();
+}  // namespace
 
 Grid::Grid() = default;
 
 Grid::~Grid() = default;
 
 Grid* Grid::get(ServiceContext* serviceContext) {
-    return &grid;
+    return &grid(serviceContext);
 }
 
 Grid* Grid::get(OperationContext* operationContext) {
@@ -64,7 +62,6 @@ Grid* Grid::get(OperationContext* operationContext) {
 }
 
 void Grid::init(std::unique_ptr<ShardingCatalogClient> catalogClient,
-                std::unique_ptr<ShardingCatalogManager> catalogManager,
                 std::unique_ptr<CatalogCache> catalogCache,
                 std::unique_ptr<ShardRegistry> shardRegistry,
                 std::unique_ptr<ClusterCursorManager> cursorManager,
@@ -72,7 +69,6 @@ void Grid::init(std::unique_ptr<ShardingCatalogClient> catalogClient,
                 std::unique_ptr<executor::TaskExecutorPool> executorPool,
                 executor::NetworkInterface* network) {
     invariant(!_catalogClient);
-    invariant(!_catalogManager);
     invariant(!_catalogCache);
     invariant(!_shardRegistry);
     invariant(!_cursorManager);
@@ -81,7 +77,6 @@ void Grid::init(std::unique_ptr<ShardingCatalogClient> catalogClient,
     invariant(!_network);
 
     _catalogClient = std::move(catalogClient);
-    _catalogManager = std::move(catalogManager);
     _catalogCache = std::move(catalogCache);
     _shardRegistry = std::move(shardRegistry);
     _cursorManager = std::move(cursorManager);
@@ -90,6 +85,26 @@ void Grid::init(std::unique_ptr<ShardingCatalogClient> catalogClient,
     _network = network;
 
     _shardRegistry->init();
+}
+
+bool Grid::isShardingInitialized() const {
+    return _shardingInitialized.load();
+}
+
+void Grid::setShardingInitialized() {
+    invariant(!_shardingInitialized.load());
+    _shardingInitialized.store(true);
+}
+
+Grid::CustomConnectionPoolStatsFn Grid::getCustomConnectionPoolStatsFn() const {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _customConnectionPoolStatsFn;
+}
+
+void Grid::setCustomConnectionPoolStatsFn(CustomConnectionPoolStatsFn statsFn) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    invariant(!_customConnectionPoolStatsFn || !statsFn);
+    _customConnectionPoolStatsFn = std::move(statsFn);
 }
 
 bool Grid::allowLocalHost() const {
@@ -117,7 +132,6 @@ void Grid::advanceConfigOpTime(repl::OpTime opTime) {
 }
 
 void Grid::clearForUnitTests() {
-    _catalogManager.reset();
     _catalogClient.reset();
     _catalogCache.reset();
     _shardRegistry.reset();

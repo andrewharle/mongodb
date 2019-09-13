@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -41,57 +43,82 @@ class OperationContext;
 
 /**
  * Startup parameter to ignore featureCompatibilityVersion checks. This parameter cannot be set if
- * the node is started with --replSet, --master, or --slave. This should never be set by end users.
+ * the node is started with --replSet. This should never be set by end users.
  */
 extern bool internalValidateFeaturesAsMaster;
 
 class FeatureCompatibilityVersion {
 public:
-    static constexpr StringData k32IncompatibleIndexName = "incompatible_with_version_32"_sd;
-    static constexpr StringData kCollection = "admin.system.version"_sd;
-    static constexpr StringData kCommandName = "setFeatureCompatibilityVersion"_sd;
-    static constexpr StringData kDatabase = "admin"_sd;
-    static constexpr StringData kParameterName = "featureCompatibilityVersion"_sd;
-    static constexpr StringData kVersionField = "version"_sd;
-
     /**
-     * Parses the featureCompatibilityVersion document from admin.system.version, and returns the
-     * version.
+     * Should be taken in shared mode by any operations that should not run while
+     * setFeatureCompatibilityVersion is running.
+     *
+     * setFCV takes this lock in exclusive mode so that it both does not run with the shared mode
+     * operations and does not run with itself.
      */
-    static StatusWith<ServerGlobalParams::FeatureCompatibility::Version> parse(
-        const BSONObj& featureCompatibilityVersionDoc);
+    static Lock::ResourceMutex fcvLock;
 
     /**
-     * Sets the minimum allowed version in the cluster, which determines what features are
-     * available.
-     * 'version' should be '3.4' or '3.2'.
+     * Records intent to perform a 3.6 -> 4.0 upgrade by updating the on-disk feature
+     * compatibility version document to have 'version'=3.6, 'targetVersion'=4.0.
+     * Should be called before schemas are modified.
      */
-    static void set(OperationContext* txn, StringData version);
+    static void setTargetUpgrade(OperationContext* opCtx);
 
     /**
-     * If there are no non-local databases and we are not running with --shardsvr, set
-     * featureCompatibilityVersion to 3.4.
+     * Records intent to perform a 4.0 -> 3.6 downgrade by updating the on-disk feature
+     * compatibility version document to have 'version'=3.6, 'targetVersion'=3.6.
+     * Should be called before schemas are modified.
      */
-    static void setIfCleanStartup(OperationContext* txn, repl::StorageInterface* storageInterface);
+    static void setTargetDowngrade(OperationContext* opCtx);
 
     /**
-     * Examines a document inserted or updated in admin.system.version. If it is the
-     * featureCompatibilityVersion document, validates the document and on commit, updates
-     * the server parameter.
+     * Records the completion of a 3.6 <-> 4.0 upgrade or downgrade by updating the on-disk feature
+     * compatibility version document to have 'version'=version and unsetting the 'targetVersion'
+     * field.
+     * Should be called after schemas are modified.
+     */
+    static void unsetTargetUpgradeOrDowngrade(OperationContext* opCtx, StringData version);
+
+    /**
+     * If there are no non-local databases, store the featureCompatibilityVersion document. If we
+     * are not running with --shardsvr, set the version to be the upgrade value. If we are running
+     * with --shardsvr, set the version to be the downgrade value.
+     */
+    static void setIfCleanStartup(OperationContext* opCtx,
+                                  repl::StorageInterface* storageInterface);
+
+    /**
+     * Returns true if the server is on a clean startup. A clean startup means there are no
+     * databases on disk besides the local database.
+     */
+    static bool isCleanStartUp();
+
+    /**
+     * Examines a document inserted or updated in the server configuration collection
+     * (admin.system.version). If it is the featureCompatibilityVersion document, validates the
+     * document and on commit, updates the server parameter.
      */
     static void onInsertOrUpdate(OperationContext* opCtx, const BSONObj& doc);
 
     /**
-     * Examines the _id of a document removed from admin.system.version. If it is the
-     * featureCompatibilityVersion document, resets the server parameter to its default value (3.2).
-     * on commit.
+     * Sets the server's outgoing and incomingInternalClient minWireVersions according to the
+     * current featureCompatibilityVersion value.
      */
-    static void onDelete(OperationContext* opCtx, const BSONObj& doc);
+    static void updateMinWireVersion();
+
+private:
+    /**
+     * Validate version. Uasserts if invalid.
+     */
+    static void _validateVersion(StringData version);
 
     /**
-     * Resets the server parameter to its default value (3.2) on commit.
+     * Build update command.
      */
-    static void onDropCollection(OperationContext* opCtx);
+    typedef stdx::function<void(BSONObjBuilder)> UpdateBuilder;
+    static void _runUpdateCommand(OperationContext* opCtx, UpdateBuilder callback);
 };
+
 
 }  // namespace mongo

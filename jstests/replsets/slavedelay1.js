@@ -17,7 +17,7 @@ doTest = function(signal) {
     replTest.initiate(config);
 
     var master = replTest.getPrimary().getDB(name);
-    var slaveConns = replTest.liveNodes.slaves;
+    var slaveConns = replTest._slaves;
     var slaves = [];
     for (var i in slaveConns) {
         var d = slaveConns[i].getDB(name);
@@ -66,8 +66,8 @@ doTest = function(signal) {
     master = reconfig(replTest, config);
     master = master.getSisterDB(name);
 
-    assert.writeOK(
-        master.foo.insert({_id: 123, x: 'foo'}, {writeConcern: {w: 2, wtimeout: 10 * 60 * 1000}}));
+    assert.writeOK(master.foo.insert(
+        {_id: 123, x: 'foo'}, {writeConcern: {w: 2, wtimeout: ReplSetTest.kDefaultTimeoutMS}}));
 
     for (var i = 0; i < 8; i++) {
         assert.eq(conn.getDB(name).foo.findOne({_id: 123}), null);
@@ -108,10 +108,9 @@ doTest = function(signal) {
         sleep(1000);
     }
 
-    // the node should have the document in 15 seconds (20 for some safety against races)
     assert.soon(function() {
         return conn.getDB(name).foo.findOne({_id: 124}) != null;
-    }, 10 * 1000);
+    }, "findOne should complete within default timeout");
 
     replTest.stopSet();
 };

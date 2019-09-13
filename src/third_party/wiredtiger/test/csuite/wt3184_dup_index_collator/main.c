@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -74,7 +74,7 @@ static int
 index_compare(WT_COLLATOR *collator, WT_SESSION *session,
 	      const WT_ITEM *key1, const WT_ITEM *key2, int *cmp)
 {
-	WT_ITEM ikey1, pkey1, ikey2, pkey2;
+	WT_ITEM ikey1, ikey2, pkey1, pkey2;
 
 	(void)collator;
 	testutil_check(wiredtiger_struct_unpack(session,

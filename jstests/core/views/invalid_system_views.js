@@ -2,10 +2,18 @@
  * Tests that invalid view definitions in system.views do not impact valid commands on existing
  * collections.
  *
- * @tags: [requires_collmod_command]
+ * @tags: [
+ *   assumes_superuser_permissions,
+ *   requires_non_retryable_commands,
+ *   requires_non_retryable_writes,
+ *   # applyOps uses the oplog that require replication support
+ *   requires_replication,
+ * ]
  */
+
 (function() {
     "use strict";
+    const isMongos = db.runCommand({isdbgrid: 1}).isdbgrid;
 
     function runTest(badViewDefinition) {
         let viewsDB = db.getSiblingDB("invalid_system_views");
@@ -32,12 +40,17 @@
                 " in system.views";
         }
 
-        // Commands that run on existing regular collections should not be impacted by the presence
-        // of invalid views.
-        assert.commandWorked(
-            db.adminCommand(
-                {applyOps: [{op: "c", ns: "invalid_system_views.$cmd", o: {drop: "collection3"}}]}),
-            makeErrorMessage("applyOps"));
+        if (!isMongos) {
+            // Commands that run on existing regular collections should not be impacted by the
+            // presence of invalid views. However, applyOps doesn't work on mongos.
+            assert.commandWorked(
+                db.adminCommand(  //
+                    {
+                      applyOps:
+                          [{op: "c", ns: "invalid_system_views.$cmd", o: {drop: "collection3"}}]
+                    }),
+                makeErrorMessage("applyOps"));
+        }
 
         assert.writeOK(viewsDB.collection.insert({y: "baz"}), makeErrorMessage("insert"));
 
@@ -57,8 +70,9 @@
         const lookup = {
             $lookup: {from: "collection2", localField: "_id", foreignField: "_id", as: "match"}
         };
-        assert.commandWorked(viewsDB.runCommand({aggregate: "collection", pipeline: [lookup]}),
-                             makeErrorMessage("aggregate with $lookup"));
+        assert.commandWorked(
+            viewsDB.runCommand({aggregate: "collection", pipeline: [lookup], cursor: {}}),
+            makeErrorMessage("aggregate with $lookup"));
 
         const graphLookup = {
             $graphLookup: {
@@ -69,8 +83,9 @@
                 as: "match"
             }
         };
-        assert.commandWorked(viewsDB.runCommand({aggregate: "collection", pipeline: [graphLookup]}),
-                             makeErrorMessage("aggregate with $graphLookup"));
+        assert.commandWorked(
+            viewsDB.runCommand({aggregate: "collection", pipeline: [graphLookup], cursor: {}}),
+            makeErrorMessage("aggregate with $graphLookup"));
 
         assert.commandWorked(viewsDB.runCommand({dropIndexes: "collection", index: "x_1"}),
                              makeErrorMessage("dropIndexes"));
@@ -81,8 +96,8 @@
         assert.commandWorked(viewsDB.collection.reIndex(), makeErrorMessage("reIndex"));
 
         const storageEngine = jsTest.options().storageEngine;
-        if (storageEngine === "ephemeralForTest" || storageEngine === "inMemory") {
-            print("Not testing compact command on ephemeral storage engine " + storageEngine);
+        if (isMongos || storageEngine === "ephemeralForTest" || storageEngine === "inMemory") {
+            print("Not testing compact command on mongos or ephemeral storage engine");
         } else {
             assert.commandWorked(viewsDB.runCommand({compact: "collection", force: true}),
                                  makeErrorMessage("compact"));

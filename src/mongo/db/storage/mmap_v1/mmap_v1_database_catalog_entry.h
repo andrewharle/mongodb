@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -53,7 +55,7 @@ class OperationContext;
 
 class MMAPV1DatabaseCatalogEntry : public DatabaseCatalogEntry {
 public:
-    MMAPV1DatabaseCatalogEntry(OperationContext* txn,
+    MMAPV1DatabaseCatalogEntry(OperationContext* opCtx,
                                StringData name,
                                StringData path,
                                bool directoryperdb,
@@ -61,6 +63,14 @@ public:
                                std::unique_ptr<ExtentManager> extentManager);
 
     virtual ~MMAPV1DatabaseCatalogEntry();
+
+    /**
+     * Must be called before destruction.
+     */
+    virtual void close(OperationContext* opCtx) {
+        _extentManager->close(opCtx);
+        _namespaceIndex.close(opCtx);
+    }
 
     // these two seem the same and yet different
     // TODO(ERH): consolidate into one ideally
@@ -90,14 +100,14 @@ public:
 
     virtual void appendExtraStats(OperationContext* opCtx, BSONObjBuilder* out, double scale) const;
 
-    Status createCollection(OperationContext* txn,
+    Status createCollection(OperationContext* opCtx,
                             StringData ns,
                             const CollectionOptions& options,
                             bool allocateDefaultSpace);
 
-    Status dropCollection(OperationContext* txn, StringData ns);
+    Status dropCollection(OperationContext* opCtx, StringData ns);
 
-    Status renameCollection(OperationContext* txn,
+    Status renameCollection(OperationContext* opCtx,
                             StringData fromNS,
                             StringData toNS,
                             bool stayTemp);
@@ -111,7 +121,7 @@ public:
 
     RecordStore* getRecordStore(StringData ns) const;
 
-    IndexAccessMethod* getIndex(OperationContext* txn,
+    IndexAccessMethod* getIndex(OperationContext* opCtx,
                                 const CollectionCatalogEntry* collection,
                                 IndexCatalogEntry* index);
 
@@ -122,17 +132,17 @@ public:
         return _extentManager.get();
     }
 
-    CollectionOptions getCollectionOptions(OperationContext* txn, StringData ns) const;
+    CollectionOptions getCollectionOptions(OperationContext* opCtx, StringData ns) const;
 
-    CollectionOptions getCollectionOptions(OperationContext* txn, RecordId nsRid) const;
+    CollectionOptions getCollectionOptions(OperationContext* opCtx, RecordId nsRid) const;
 
     /**
      * Creates a CollectionCatalogEntry in the form of an index rather than a collection.
      * MMAPv1 puts both indexes and collections into CCEs. A namespace named 'name' must not
      * exist.
      */
-    void createNamespaceForIndex(OperationContext* txn, StringData name);
-    static void invalidateSystemCollectionRecord(OperationContext* txn,
+    void createNamespaceForIndex(OperationContext* opCtx, StringData name);
+    static void invalidateSystemCollectionRecord(OperationContext* opCtx,
                                                  NamespaceString systemCollectionNamespace,
                                                  RecordId record);
 
@@ -164,20 +174,20 @@ private:
     RecordStoreV1Base* _getNamespaceRecordStore() const;
     RecordStoreV1Base* _getRecordStore(StringData ns) const;
 
-    RecordId _addNamespaceToNamespaceCollection(OperationContext* txn,
+    RecordId _addNamespaceToNamespaceCollection(OperationContext* opCtx,
                                                 StringData ns,
                                                 const BSONObj* options);
 
-    void _removeNamespaceFromNamespaceCollection(OperationContext* txn, StringData ns);
+    void _removeNamespaceFromNamespaceCollection(OperationContext* opCtx, StringData ns);
 
-    Status _renameSingleNamespace(OperationContext* txn,
+    Status _renameSingleNamespace(OperationContext* opCtx,
                                   StringData fromNS,
                                   StringData toNS,
                                   bool stayTemp);
 
-    void _ensureSystemCollection(OperationContext* txn, StringData ns);
+    void _ensureSystemCollection(OperationContext* opCtx, StringData ns);
 
-    void _init(OperationContext* txn);
+    void _init(OperationContext* opCtx);
 
     /**
      * Populate the _collections cache.

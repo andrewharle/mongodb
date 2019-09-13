@@ -1,4 +1,11 @@
-// Where we test operations dealing with large chunks
+/**
+ * Where we test operations dealing with large chunks
+ *
+ * This test is labeled resource intensive because its total io_write is 220MB compared to a median
+ * of 5MB across all sharding tests in wiredTiger. Its total io_write is 1160MB compared to a median
+ * of 135MB in mmapv1.
+ * @tags: [resource_intensive]
+ */
 (function() {
     'use strict';
 
@@ -13,7 +20,7 @@
 
     // Turn on sharding on the 'test.foo' collection and generate a large chunk
     assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
 
     var bigString = "";
     while (bigString.length < 10000) {
@@ -31,7 +38,7 @@
 
     assert.commandWorked(s.s0.adminCommand({shardcollection: "test.foo", key: {_id: 1}}));
 
-    assert.eq(1, s.config.chunks.count(), "step 1 - need one large chunk");
+    assert.eq(1, s.config.chunks.count({"ns": "test.foo"}), "step 1 - need one large chunk");
 
     var primary = s.getPrimaryShard("test").getDB("test");
     var secondary = s.getOther(primary).getDB("test");
@@ -51,15 +58,14 @@
 
     // Move the chunk
     print("checkpoint 1b");
-    var before = s.config.chunks.find().toArray();
+    var before = s.config.chunks.find({ns: 'test.foo'}).toArray();
     assert.commandWorked(
         s.s0.adminCommand({movechunk: "test.foo", find: {_id: 1}, to: secondary.getMongo().name}));
 
-    var after = s.config.chunks.find().toArray();
+    var after = s.config.chunks.find({ns: 'test.foo'}).toArray();
     assert.neq(before[0].shard, after[0].shard, "move chunk did not work");
 
     s.config.changelog.find().forEach(printjson);
 
     s.stop();
-
 })();

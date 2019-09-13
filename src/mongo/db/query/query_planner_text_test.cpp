@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -105,6 +107,17 @@ TEST_F(QueryPlannerTest, HaveBadPrefixOnTextIndex) {
     runInvalidQuery(fromjson("{$text: {$search: 'blah'}}"));
 
     runInvalidQuery(fromjson("{$or: [{a:1}, {$text: {$search: 'blah'}}]}"));
+}
+
+// Outside predicates are not yet pushed into contained ORs for text indexes.
+TEST_F(QueryPlannerTest, PrefixOnTextIndexIsOutsidePred) {
+    params.options = QueryPlannerParams::NO_TABLE_SCAN;
+    addIndex(BSON("a" << 1 << "_fts"
+                      << "text"
+                      << "_ftsx"
+                      << 1));
+    addIndex(BSON("b" << 1));
+    runInvalidQuery(fromjson("{$and: [{a: 5}, {$or: [{$text: {$search: 'blah'}}, {b: 6}]}]}"));
 }
 
 // There can be more than one prefix, but they all require points.
@@ -532,6 +545,32 @@ TEST_F(QueryPlannerTest, InexactFetchPredicateOverTrailingFieldHandledCorrectlyM
     assertNumSolutions(1U);
     assertSolutionExists(
         "{fetch: {filter: {b: {$exists: true}}, node: {text: {search: 'foo', prefix: {a: 3}}}}}");
+}
+
+TEST_F(QueryPlannerTest, ExprEqCannotUsePrefixOfTextIndex) {
+    params.options = QueryPlannerParams::NO_TABLE_SCAN;
+    addIndex(BSON("a" << 1 << "_fts"
+                      << "text"
+                      << "_ftsx"
+                      << 1));
+
+    runInvalidQuery(fromjson("{a: {$_internalExprEq: 3}, $text: {$search: 'blah'}}"));
+}
+
+TEST_F(QueryPlannerTest, ExprEqCanUseSuffixOfTextIndex) {
+    params.options = QueryPlannerParams::NO_TABLE_SCAN;
+    addIndex(BSON("_fts"
+                  << "text"
+                  << "_ftsx"
+                  << 1
+                  << "a"
+                  << 1));
+
+    runQuery(fromjson("{a: {$_internalExprEq: 3}, $text: {$search: 'blah'}}"));
+
+    assertNumSolutions(1U);
+    assertSolutionExists(
+        "{text: {search: 'blah', prefix: {}, filter: {a: {$_internalExprEq: 3}}}}");
 }
 
 }  // namespace

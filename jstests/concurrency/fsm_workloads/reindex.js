@@ -5,9 +5,9 @@
  *
  * Bulk inserts 1000 documents and builds indexes. Then alternates between reindexing and querying
  * against the collection. Operates on a separate collection for each thread.
+ *
+ * @tags: [SERVER-40561]
  */
-
-load('jstests/concurrency/fsm_workload_helpers/drop_utils.js');  // for dropCollections
 
 var $config = (function() {
     var data = {
@@ -99,17 +99,5 @@ var $config = (function() {
         query: {reIndex: 0.5, query: 0.5}
     };
 
-    var teardown = function teardown(db, collName, cluster) {
-        var pattern = new RegExp('^' + this.prefix + '_\\d+$');
-        dropCollections(db, pattern);
-    };
-
-    return {
-        threadCount: 15,
-        iterations: 10,
-        states: states,
-        transitions: transitions,
-        teardown: teardown,
-        data: data
-    };
+    return {threadCount: 15, iterations: 10, states: states, transitions: transitions, data: data};
 })();

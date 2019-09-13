@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kNetwork
@@ -42,17 +45,14 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/bson_extract_optime.h"
 #include "mongo/db/server_options.h"
-#include "mongo/s/grid.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/thread.h"
 #include "mongo/util/background.h"
-#include "mongo/util/concurrency/mutex.h"  // for StaticObserver
 #include "mongo/util/debug_util.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
-#include "mongo/util/static_observer.h"
 #include "mongo/util/string_map.h"
 #include "mongo/util/timer.h"
 
@@ -65,7 +65,10 @@ using std::string;
 using std::vector;
 
 // Failpoint for disabling AsyncConfigChangeHook calls on updated RS nodes.
-MONGO_FP_DECLARE(failAsyncConfigChangeHook);
+MONGO_FAIL_POINT_DEFINE(failAsyncConfigChangeHook);
+
+// Failpoint for changing the default refresh period
+MONGO_FAIL_POINT_DEFINE(modifyReplicaSetMonitorDefaultRefreshPeriod);
 
 namespace {
 
@@ -90,12 +93,11 @@ const int64_t unknownLatency = numeric_limits<int64_t>::max();
 
 const ReadPreferenceSetting kPrimaryOnlyReadPreference(ReadPreference::PrimaryOnly, TagSet());
 const Milliseconds kFindHostMaxBackOffTime(500);
+AtomicBool areRefreshRetriesDisabledForTest{false};  // Only true in tests.
 
 // TODO: Move to ReplicaSetMonitorManager
 ReplicaSetMonitor::ConfigChangeHook asyncConfigChangeHook;
 ReplicaSetMonitor::ConfigChangeHook syncConfigChangeHook;
-
-StaticObserver staticObserver;
 
 //
 // Helpers for stl algorithms
@@ -163,10 +165,19 @@ struct HostNotIn {
     const std::set<HostAndPort>& _hosts;
 };
 
+int32_t pingTimeMillis(const Node& node) {
+    auto latencyMillis = node.latencyMicros / 1000;
+    if (latencyMillis > numeric_limits<int32_t>::max()) {
+        // In particular, Node::unknownLatency does not fit in an int32.
+        return numeric_limits<int32_t>::max();
+    }
+    return latencyMillis;
+}
+
 /**
  * Replica set refresh period on the task executor.
  */
-const Seconds kRefreshPeriod(30);
+const Seconds kDefaultRefreshPeriod(30);
 }  // namespace
 
 // If we cannot find a host after 15 seconds of refreshing, give up
@@ -174,6 +185,16 @@ const Seconds ReplicaSetMonitor::kDefaultFindHostTimeout(15);
 
 // Defaults to random selection as required by the spec
 bool ReplicaSetMonitor::useDeterministicHostSelection = false;
+
+Seconds ReplicaSetMonitor::getDefaultRefreshPeriod() {
+    MONGO_FAIL_POINT_BLOCK_IF(modifyReplicaSetMonitorDefaultRefreshPeriod,
+                              data,
+                              [&](const BSONObj& data) { return data.hasField("period"); }) {
+        return Seconds{data.getData().getIntField("period")};
+    }
+
+    return kDefaultRefreshPeriod;
+}
 
 ReplicaSetMonitor::ReplicaSetMonitor(StringData name, const std::set<HostAndPort>& seeds)
     : _state(std::make_shared<SetState>(name, seeds)),
@@ -183,32 +204,11 @@ ReplicaSetMonitor::ReplicaSetMonitor(const MongoURI& uri)
     : _state(std::make_shared<SetState>(uri)), _executor(globalRSMonitorManager.getExecutor()) {}
 
 void ReplicaSetMonitor::init() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    invariant(_executor);
-    std::weak_ptr<ReplicaSetMonitor> that(shared_from_this());
-    auto status = _executor->scheduleWork([=](const CallbackArgs& cbArgs) {
-        if (auto ptr = that.lock()) {
-            ptr->_refresh(cbArgs);
-        }
-    });
-
-    if (status.getStatus() == ErrorCodes::ShutdownInProgress) {
-        LOG(1) << "Couldn't schedule refresh for " << getName()
-               << ". Executor shutdown in progress";
-        return;
-    }
-
-    if (!status.isOK()) {
-        severe() << "Can't start refresh for replica set " << getName()
-                 << causedBy(redact(status.getStatus()));
-        fassertFailed(40139);
-    }
-
-    _refresherHandle = status.getValue();
+    _scheduleRefresh(_executor->now());
 }
 
 ReplicaSetMonitor::~ReplicaSetMonitor() {
-    // need this lock because otherwise can get race with scheduling in _refresh
+    // need this lock because otherwise can get race with _scheduleRefresh()
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     if (!_refresherHandle || !_executor) {
         return;
@@ -223,52 +223,52 @@ ReplicaSetMonitor::~ReplicaSetMonitor() {
     _refresherHandle = {};
 }
 
-void ReplicaSetMonitor::_refresh(const CallbackArgs& cbArgs) {
-    if (!cbArgs.status.isOK()) {
+void ReplicaSetMonitor::_scheduleRefresh(Date_t when) {
+    // Reschedule the refresh
+    invariant(_executor);
+
+    if (_isRemovedFromManager.load()) {  // already removed so no need to refresh
+        LOG(1) << "Stopping refresh for replica set " << getName() << " because its removed";
         return;
     }
 
-    Timer t;
-    startOrContinueRefresh().refreshAll();
-    LOG(1) << "Refreshing replica set " << getName() << " took " << t.millis() << " msec";
-    {
-        // reschedule itself
-        invariant(_executor);
-        if (_isRemovedFromManager.load()) {  // already removed so no need to refresh
-            LOG(1) << "Stopping refresh for replica set " << getName() << " because its removed";
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    std::weak_ptr<ReplicaSetMonitor> that(shared_from_this());
+    auto status = _executor->scheduleWorkAt(when, [that](const CallbackArgs& cbArgs) {
+        if (!cbArgs.status.isOK())
             return;
+
+        if (auto ptr = that.lock()) {
+            ptr->_doScheduledRefresh(cbArgs.myHandle);
         }
+    });
 
-        stdx::lock_guard<stdx::mutex> lk(_mutex);
-        std::weak_ptr<ReplicaSetMonitor> that(shared_from_this());
-        auto status = _executor->scheduleWorkAt(_executor->now() + kRefreshPeriod,
-                                                [=](const CallbackArgs& cbArgs) {
-                                                    if (auto ptr = that.lock()) {
-                                                        ptr->_refresh(cbArgs);
-                                                    }
-                                                });
-
-        if (status.getStatus() == ErrorCodes::ShutdownInProgress) {
-            LOG(1) << "Cant schedule refresh for " << getName()
-                   << ". Executor shutdown in progress";
-            return;
-        }
-
-        if (!status.isOK()) {
-            severe() << "Can't continue refresh for replica set " << getName() << " due to "
-                     << redact(status.getStatus());
-            fassertFailed(40140);
-        }
-
-        _refresherHandle = status.getValue();
+    if (status.getStatus() == ErrorCodes::ShutdownInProgress) {
+        LOG(1) << "Cant schedule refresh for " << getName() << ". Executor shutdown in progress";
+        return;
     }
+
+    if (!status.isOK()) {
+        severe() << "Can't continue refresh for replica set " << getName() << " due to "
+                 << redact(status.getStatus());
+        fassertFailed(40140);
+    }
+
+    _refresherHandle = status.getValue();
+}
+
+void ReplicaSetMonitor::_doScheduledRefresh(const CallbackHandle& currentHandle) {
+    startOrContinueRefresh().refreshAll();
+
+    // And now we set up the next one
+    _scheduleRefresh(_executor->now() + _state->refreshPeriod);
 }
 
 StatusWith<HostAndPort> ReplicaSetMonitor::getHostOrRefresh(const ReadPreferenceSetting& criteria,
                                                             Milliseconds maxWait) {
     if (_isRemovedFromManager.load()) {
-        return Status(ErrorCodes::ReplicaSetMonitorRemoved,
-                      str::stream() << "ReplicaSetMonitor for set " << getName() << " is removed");
+        return {ErrorCodes::ReplicaSetMonitorRemoved,
+                str::stream() << "ReplicaSetMonitor for set " << getName() << " is removed"};
     }
 
     {
@@ -276,7 +276,7 @@ StatusWith<HostAndPort> ReplicaSetMonitor::getHostOrRefresh(const ReadPreference
         stdx::lock_guard<stdx::mutex> lk(_state->mutex);
         HostAndPort out = _state->getMatchingHost(criteria);
         if (!out.empty())
-            return out;
+            return {std::move(out)};
     }
 
     const auto startTimeMs = Date_t::now();
@@ -290,11 +290,15 @@ StatusWith<HostAndPort> ReplicaSetMonitor::getHostOrRefresh(const ReadPreference
 
         HostAndPort out = refresher.refreshUntilMatches(criteria);
         if (!out.empty())
-            return out;
+            return {std::move(out)};
+
+        if (globalInShutdownDeprecated()) {
+            return {ErrorCodes::ShutdownInProgress, str::stream() << "Server is shutting down"};
+        }
 
         const Milliseconds remaining = maxWait - (Date_t::now() - startTimeMs);
 
-        if (remaining < kFindHostMaxBackOffTime) {
+        if (remaining < kFindHostMaxBackOffTime || areRefreshRetriesDisabledForTest.load()) {
             break;
         }
 
@@ -302,11 +306,10 @@ StatusWith<HostAndPort> ReplicaSetMonitor::getHostOrRefresh(const ReadPreference
         sleepFor(kFindHostMaxBackOffTime);
     }
 
-    return Status(ErrorCodes::FailedToSatisfyReadPreference,
-                  str::stream() << "could not find host matching read preference "
-                                << criteria.toString()
-                                << " for set "
-                                << getName());
+    return {ErrorCodes::FailedToSatisfyReadPreference,
+            str::stream() << "Could not find host matching read preference " << criteria.toString()
+                          << " for set "
+                          << getName()};
 }
 
 HostAndPort ReplicaSetMonitor::getMasterOrUassert() {
@@ -375,6 +378,11 @@ std::string ReplicaSetMonitor::getServerAddress() const {
     return _state->getConfirmedServerAddress();
 }
 
+const MongoURI& ReplicaSetMonitor::getOriginalUri() const {
+    // setUri is const so no need to lock.
+    return _state->setUri;
+}
+
 bool ReplicaSetMonitor::contains(const HostAndPort& host) const {
     stdx::lock_guard<stdx::mutex> lk(_state->mutex);
     return _state->seedNodes.count(host);
@@ -413,12 +421,21 @@ void ReplicaSetMonitor::setSynchronousConfigChangeHook(ConfigChangeHook hook) {
 }
 
 // TODO move to correct order with non-statics before pushing
-void ReplicaSetMonitor::appendInfo(BSONObjBuilder& bsonObjBuilder) const {
+void ReplicaSetMonitor::appendInfo(BSONObjBuilder& bsonObjBuilder, bool forFTDC) const {
     stdx::lock_guard<stdx::mutex> lk(_state->mutex);
 
+    BSONObjBuilder monitorInfo(bsonObjBuilder.subobjStart(getName()));
+    if (forFTDC) {
+        for (size_t i = 0; i < _state->nodes.size(); i++) {
+            const Node& node = _state->nodes[i];
+            monitorInfo.appendNumber(node.host.toString(), pingTimeMillis(node));
+        }
+        return;
+    }
+
     // NOTE: the format here must be consistent for backwards compatibility
-    BSONArrayBuilder hosts(bsonObjBuilder.subarrayStart("hosts"));
-    for (unsigned i = 0; i < _state->nodes.size(); i++) {
+    BSONArrayBuilder hosts(monitorInfo.subarrayStart("hosts"));
+    for (size_t i = 0; i < _state->nodes.size(); i++) {
         const Node& node = _state->nodes[i];
 
         BSONObjBuilder builder;
@@ -427,15 +444,7 @@ void ReplicaSetMonitor::appendInfo(BSONObjBuilder& bsonObjBuilder) const {
         builder.append("ismaster", node.isMaster);  // intentionally not camelCase
         builder.append("hidden", false);            // we don't keep hidden nodes in the set
         builder.append("secondary", node.isUp && !node.isMaster);
-
-        int32_t pingTimeMillis = 0;
-        if (node.latencyMicros / 1000 > numeric_limits<int32_t>::max()) {
-            // In particular, Node::unknownLatency does not fit in an int32.
-            pingTimeMillis = numeric_limits<int32_t>::max();
-        } else {
-            pingTimeMillis = node.latencyMicros / 1000;
-        }
-        builder.append("pingTimeMillis", pingTimeMillis);
+        builder.append("pingTimeMillis", pingTimeMillis(node));
 
         if (!node.tags.isEmpty()) {
             builder.append("tags", node.tags);
@@ -443,7 +452,6 @@ void ReplicaSetMonitor::appendInfo(BSONObjBuilder& bsonObjBuilder) const {
 
         hosts.append(builder.obj());
     }
-    hosts.done();
 }
 
 void ReplicaSetMonitor::shutdown() {
@@ -454,6 +462,10 @@ void ReplicaSetMonitor::cleanup() {
     globalRSMonitorManager.removeAllMonitors();
     asyncConfigChangeHook = ReplicaSetMonitor::ConfigChangeHook();
     syncConfigChangeHook = ReplicaSetMonitor::ConfigChangeHook();
+}
+
+void ReplicaSetMonitor::disableRefreshRetries_forTest() {
+    areRefreshRetriesDisabledForTest.store(true);
 }
 
 bool ReplicaSetMonitor::isKnownToHaveGoodPrimary() const {
@@ -472,15 +484,23 @@ void ReplicaSetMonitor::markAsRemoved() {
     _isRemovedFromManager.store(true);
 }
 
-Refresher::Refresher(const SetStatePtr& setState)
-    : _set(setState), _scan(setState->currentScan), _startedNewScan(false) {
+Refresher::Refresher(const SetStatePtr& setState) : _set(setState), _scan(setState->currentScan) {
     if (_scan)
         return;  // participate in in-progress scan
 
     LOG(2) << "Starting new refresh of replica set " << _set->name;
     _scan = startNewScan(_set.get());
     _set->currentScan = _scan;
-    _startedNewScan = true;
+}
+
+HostAndPort Refresher::refreshUntilMatches(const ReadPreferenceSetting& criteria) {
+    return _refreshUntilMatches(&criteria);
+};
+
+void Refresher::refreshAll() {
+    Timer t;
+    _refreshUntilMatches(nullptr);
+    LOG(1) << "Refreshing replica set " << _set->name << " took " << t.millis() << " msec";
 }
 
 Refresher::NextStep Refresher::getNextStep() {
@@ -503,7 +523,7 @@ Refresher::NextStep Refresher::getNextStep() {
     if (_scan->hostsToScan.empty()) {
         // We've tried all hosts we can, so nothing more to do in this round.
         if (!_scan->foundUpMaster) {
-            warning() << "No primary detected for set " << _set->name;
+            warning() << "Unable to reach primary for set " << _set->name;
 
             // Since we've talked to everyone we could but still didn't find a primary, we
             // do the best we can, and assume all unconfirmedReplies are actually from nodes
@@ -536,7 +556,8 @@ Refresher::NextStep Refresher::getNextStep() {
         } else {
             auto nScans = _set->consecutiveFailedScans++;
             if (nScans <= 10 || nScans % 10 == 0) {
-                log() << "All nodes for set " << _set->name << " are down. "
+                log() << "Cannot reach any nodes for set " << _set->name
+                      << ". Please check network connectivity and the status of the set. "
                       << "This has happened for " << _set->consecutiveFailedScans
                       << " checks in a row.";
             }
@@ -828,6 +849,8 @@ HostAndPort Refresher::_refreshUntilMatches(const ReadPreferenceSetting* criteri
 
                 if (_set->setUri.isValid()) {
                     targetURI = _set->setUri.cloneURIForServer(ns.host);
+                    targetURI.setUser("");
+                    targetURI.setPassword("");
                 } else {
                     targetURI = MongoURI(ConnectionString(ns.host));
                 }
@@ -987,13 +1010,15 @@ void Node::update(const IsMasterReply& reply) {
     lastWriteDateUpdateTime = Date_t::now();
 }
 
-SetState::SetState(StringData name, const std::set<HostAndPort>& seedNodes)
+SetState::SetState(StringData name, const std::set<HostAndPort>& seedNodes, MongoURI uri)
     : name(name.toString()),
       consecutiveFailedScans(0),
       seedNodes(seedNodes),
       latencyThresholdMicros(serverGlobalParams.defaultLocalThresholdMillis * 1000),
       rand(int64_t(time(0))),
-      roundRobin(0) {
+      roundRobin(0),
+      setUri(std::move(uri)),
+      refreshPeriod(getDefaultRefreshPeriod()) {
     uassert(13642, "Replica set seed list can't be empty", !seedNodes.empty());
 
     if (name.empty())
@@ -1014,9 +1039,8 @@ SetState::SetState(StringData name, const std::set<HostAndPort>& seedNodes)
 
 SetState::SetState(const MongoURI& uri)
     : SetState(uri.getSetName(),
-               std::set<HostAndPort>(uri.getServers().begin(), uri.getServers().end())) {
-    setUri = uri;
-}
+               std::set<HostAndPort>(uri.getServers().begin(), uri.getServers().end()),
+               uri) {}
 
 HostAndPort SetState::getMatchingHost(const ReadPreferenceSetting& criteria) const {
     switch (criteria.pref) {
@@ -1077,7 +1101,7 @@ HostAndPort SetState::getMatchingHost(const ReadPreferenceSetting& criteria) con
                         Date_t maxWriteTime = (*latestSecNode)->lastWriteDate;
                         matchNode = [=](const Node& node) -> bool {
                             return duration_cast<Seconds>(maxWriteTime - node.lastWriteDate) +
-                                kRefreshPeriod <=
+                                refreshPeriod <=
                                 criteria.maxStalenessSeconds;
                         };
                     }
@@ -1087,7 +1111,7 @@ HostAndPort SetState::getMatchingHost(const ReadPreferenceSetting& criteria) con
                     matchNode = [=](const Node& node) -> bool {
                         return duration_cast<Seconds>(node.lastWriteDateUpdateTime -
                                                       node.lastWriteDate) -
-                            primaryStaleness + kRefreshPeriod <=
+                            primaryStaleness + refreshPeriod <=
                             criteria.maxStalenessSeconds;
                     };
                 }

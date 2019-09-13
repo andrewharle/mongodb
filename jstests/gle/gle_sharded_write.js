@@ -2,6 +2,10 @@
 // Ensures GLE correctly reports basic write stats and failures
 // Note that test should work correctly with and without write commands.
 //
+
+// Checking UUID consistency involves talking to shards, but this test shuts down one shard.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     'use strict';
 
@@ -142,27 +146,6 @@
     assert.eq(coll.count(), 0);
 
     //
-    // Geo $near is not supported on mongos
-    coll.ensureIndex({loc: "2dsphere"});
-    coll.remove({});
-    var query = {
-        loc: {
-            $near: {
-                $geometry: {type: "Point", coordinates: [0, 0]},
-                $maxDistance: 1000,
-            }
-        }
-    };
-    printjson(coll.remove(query));
-    printjson(gle = coll.getDB().runCommand({getLastError: 1}));
-    assert(gle.ok);
-    assert(gle.err);
-    assert(gle.code);
-    assert(!gle.errmsg);
-    assert(gle.shards);
-    assert.eq(coll.count(), 0);
-
-    //
     // First shard down
     //
 
@@ -172,7 +155,8 @@
     coll.insert([{_id: 1}, {_id: -1}]);
     // Wait for write to be written to shards before shutting it down.
     printjson(gle = coll.getDB().runCommand({getLastError: 1}));
-    MongoRunner.stopMongod(st.shard0);
+    st.rs0.stopSet();
+
     printjson(gle = coll.getDB().runCommand({getLastError: 1}));
     // Should get an error about contacting dead host.
     assert(!gle.ok);

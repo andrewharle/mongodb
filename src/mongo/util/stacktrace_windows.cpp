@@ -1,28 +1,31 @@
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
@@ -31,7 +34,12 @@
 
 #include "mongo/util/stacktrace.h"
 
+#pragma warning(push)
+// C4091: 'typedef ': ignored on left of '' when no variable is declared
+#pragma warning(disable : 4091)
 #include <DbgHelp.h>
+#pragma warning(pop)
+
 #include <boost/filesystem/operations.hpp>
 #include <boost/optional.hpp>
 #include <cstdio>
@@ -213,7 +221,7 @@ static void getsymbolAndOffset(HANDLE process,
     std::string symbolString(symbolInfo->Name);
     static const size_t bufferSize = 32;
     std::unique_ptr<char[]> symbolOffset(new char[bufferSize]);
-    _snprintf(symbolOffset.get(), bufferSize, "+0x%x", displacement64);
+    _snprintf(symbolOffset.get(), bufferSize, "+0x%llx", displacement64);
     symbolString += symbolOffset.get();
     returnedSymbolAndOffset->swap(symbolString);
 }
@@ -322,21 +330,19 @@ void printWindowsStackTrace(CONTEXT& context, std::ostream& os) {
     ++sourceWidth;
     size_t frameCount = traceList.size();
     for (size_t i = 0; i < frameCount; ++i) {
-        std::stringstream ss;
-        ss << traceList[i].moduleName << " ";
+        os << traceList[i].moduleName << ' ';
         size_t width = traceList[i].moduleName.length();
         while (width < moduleWidth) {
-            ss << " ";
+            os << ' ';
             ++width;
         }
-        ss << traceList[i].sourceAndLine << " ";
+        os << traceList[i].sourceAndLine << ' ';
         width = traceList[i].sourceAndLine.length();
         while (width < sourceWidth) {
-            ss << " ";
+            os << ' ';
             ++width;
         }
-        ss << traceList[i].symbolAndOffset;
-        log() << ss.str();
+        os << traceList[i].symbolAndOffset << '\n';
     }
 }
 

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,13 +37,14 @@
 #include <algorithm>
 
 #include "mongo/db/matcher/expression_parser.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
 #include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/pipeline/expression_context_for_test.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/query/query_planner_test_lib.h"
 #include "mongo/util/log.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 namespace mongo {
 
@@ -51,13 +54,9 @@ const NamespaceString QueryPlannerTest::nss("test.collection");
 
 void QueryPlannerTest::setUp() {
     opCtx = serviceContext.makeOperationContext();
-    internalQueryPlannerEnableHashIntersection = true;
+    internalQueryPlannerEnableHashIntersection.store(true);
     params.options = QueryPlannerParams::INCLUDE_COLLSCAN;
     addIndex(BSON("_id" << 1));
-}
-
-OperationContext* QueryPlannerTest::txn() {
-    return opCtx.get();
 }
 
 void QueryPlannerTest::addIndex(BSONObj keyPattern, bool multikey) {
@@ -204,7 +203,7 @@ void QueryPlannerTest::runQueryHintMinMax(const BSONObj& query,
                                           const BSONObj& hint,
                                           const BSONObj& minObj,
                                           const BSONObj& maxObj) {
-    runQueryFull(query, BSONObj(), BSONObj(), 0, 0, hint, minObj, maxObj, false);
+    runQueryFull(query, BSONObj(), BSONObj(), 0, 0, hint, minObj, maxObj);
 }
 
 void QueryPlannerTest::runQuerySortProjSkipNToReturnHint(const BSONObj& query,
@@ -213,11 +212,7 @@ void QueryPlannerTest::runQuerySortProjSkipNToReturnHint(const BSONObj& query,
                                                          long long skip,
                                                          long long ntoreturn,
                                                          const BSONObj& hint) {
-    runQueryFull(query, sort, proj, skip, ntoreturn, hint, BSONObj(), BSONObj(), false);
-}
-
-void QueryPlannerTest::runQuerySnapshot(const BSONObj& query) {
-    runQueryFull(query, BSONObj(), BSONObj(), 0, 0, BSONObj(), BSONObj(), BSONObj(), true);
+    runQueryFull(query, sort, proj, skip, ntoreturn, hint, BSONObj(), BSONObj());
 }
 
 void QueryPlannerTest::runQueryFull(const BSONObj& query,
@@ -227,8 +222,7 @@ void QueryPlannerTest::runQueryFull(const BSONObj& query,
                                     long long ntoreturn,
                                     const BSONObj& hint,
                                     const BSONObj& minObj,
-                                    const BSONObj& maxObj,
-                                    bool snapshot) {
+                                    const BSONObj& maxObj) {
     // Clean up any previous state from a call to runQueryFull
     solns.clear();
     cq.reset();
@@ -251,13 +245,19 @@ void QueryPlannerTest::runQueryFull(const BSONObj& query,
     qr->setHint(hint);
     qr->setMin(minObj);
     qr->setMax(maxObj);
-    qr->setSnapshot(snapshot);
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
     auto statusWithCQ =
-        CanonicalQuery::canonicalize(txn(), std::move(qr), ExtensionsCallbackNoop());
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     ASSERT_OK(statusWithCQ.getStatus());
     cq = std::move(statusWithCQ.getValue());
 
-    ASSERT_OK(QueryPlanner::plan(*cq, params, &solns.mutableVector()));
+    auto statusWithSolutions = QueryPlanner::plan(*cq, params);
+    ASSERT_OK(statusWithSolutions.getStatus());
+    solns = std::move(statusWithSolutions.getValue());
 }
 
 void QueryPlannerTest::runInvalidQuery(const BSONObj& query) {
@@ -286,7 +286,7 @@ void QueryPlannerTest::runInvalidQueryHintMinMax(const BSONObj& query,
                                                  const BSONObj& hint,
                                                  const BSONObj& minObj,
                                                  const BSONObj& maxObj) {
-    runInvalidQueryFull(query, BSONObj(), BSONObj(), 0, 0, hint, minObj, maxObj, false);
+    runInvalidQueryFull(query, BSONObj(), BSONObj(), 0, 0, hint, minObj, maxObj);
 }
 
 void QueryPlannerTest::runInvalidQuerySortProjSkipNToReturnHint(const BSONObj& query,
@@ -295,7 +295,7 @@ void QueryPlannerTest::runInvalidQuerySortProjSkipNToReturnHint(const BSONObj& q
                                                                 long long skip,
                                                                 long long ntoreturn,
                                                                 const BSONObj& hint) {
-    runInvalidQueryFull(query, sort, proj, skip, ntoreturn, hint, BSONObj(), BSONObj(), false);
+    runInvalidQueryFull(query, sort, proj, skip, ntoreturn, hint, BSONObj(), BSONObj());
 }
 
 void QueryPlannerTest::runInvalidQueryFull(const BSONObj& query,
@@ -305,8 +305,7 @@ void QueryPlannerTest::runInvalidQueryFull(const BSONObj& query,
                                            long long ntoreturn,
                                            const BSONObj& hint,
                                            const BSONObj& minObj,
-                                           const BSONObj& maxObj,
-                                           bool snapshot) {
+                                           const BSONObj& maxObj) {
     solns.clear();
     cq.reset();
 
@@ -328,14 +327,18 @@ void QueryPlannerTest::runInvalidQueryFull(const BSONObj& query,
     qr->setHint(hint);
     qr->setMin(minObj);
     qr->setMax(maxObj);
-    qr->setSnapshot(snapshot);
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
     auto statusWithCQ =
-        CanonicalQuery::canonicalize(txn(), std::move(qr), ExtensionsCallbackNoop());
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     ASSERT_OK(statusWithCQ.getStatus());
     cq = std::move(statusWithCQ.getValue());
 
-    Status s = QueryPlanner::plan(*cq, params, &solns.mutableVector());
-    ASSERT_NOT_OK(s);
+    auto statusWithSolutions = QueryPlanner::plan(*cq, params);
+    ASSERT_NOT_OK(statusWithSolutions.getStatus());
 }
 
 void QueryPlannerTest::runQueryAsCommand(const BSONObj& cmdObj) {
@@ -348,13 +351,19 @@ void QueryPlannerTest::runQueryAsCommand(const BSONObj& cmdObj) {
     std::unique_ptr<QueryRequest> qr(
         assertGet(QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain)));
 
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
     auto statusWithCQ =
-        CanonicalQuery::canonicalize(txn(), std::move(qr), ExtensionsCallbackNoop());
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     ASSERT_OK(statusWithCQ.getStatus());
     cq = std::move(statusWithCQ.getValue());
 
-    Status s = QueryPlanner::plan(*cq, params, &solns.mutableVector());
-    ASSERT_OK(s);
+    auto statusWithSolutions = QueryPlanner::plan(*cq, params);
+    ASSERT_OK(statusWithSolutions.getStatus());
+    solns = std::move(statusWithSolutions.getValue());
 }
 
 void QueryPlannerTest::runInvalidQueryAsCommand(const BSONObj& cmdObj) {
@@ -367,13 +376,18 @@ void QueryPlannerTest::runInvalidQueryAsCommand(const BSONObj& cmdObj) {
     std::unique_ptr<QueryRequest> qr(
         assertGet(QueryRequest::makeFromFindCommand(nss, cmdObj, isExplain)));
 
+    const boost::intrusive_ptr<ExpressionContext> expCtx;
     auto statusWithCQ =
-        CanonicalQuery::canonicalize(txn(), std::move(qr), ExtensionsCallbackNoop());
+        CanonicalQuery::canonicalize(opCtx.get(),
+                                     std::move(qr),
+                                     expCtx,
+                                     ExtensionsCallbackNoop(),
+                                     MatchExpressionParser::kAllowAllSpecialFeatures);
     ASSERT_OK(statusWithCQ.getStatus());
     cq = std::move(statusWithCQ.getValue());
 
-    Status status = QueryPlanner::plan(*cq, params, &solns.mutableVector());
-    ASSERT_NOT_OK(status);
+    auto statusWithSolutions = QueryPlanner::plan(*cq, params);
+    ASSERT_NOT_OK(statusWithSolutions.getStatus());
 }
 
 size_t QueryPlannerTest::getNumSolutions() const {
@@ -445,10 +459,16 @@ void QueryPlannerTest::assertHasOneSolutionOf(const std::vector<std::string>& so
     FAIL(ss);
 }
 
+void QueryPlannerTest::assertHasOnlyCollscan() const {
+    assertNumSolutions(1U);
+    assertSolutionExists("{cscan: {dir: 1}}");
+}
+
 std::unique_ptr<MatchExpression> QueryPlannerTest::parseMatchExpression(
     const BSONObj& obj, const CollatorInterface* collator) {
-    StatusWithMatchExpression status =
-        MatchExpressionParser::parse(obj, ExtensionsCallbackDisallowExtensions(), collator);
+    boost::intrusive_ptr<ExpressionContextForTest> expCtx(new ExpressionContextForTest());
+    expCtx->setCollator(collator);
+    StatusWithMatchExpression status = MatchExpressionParser::parse(obj, std::move(expCtx));
     if (!status.isOK()) {
         FAIL(str::stream() << "failed to parse query: " << obj.toString() << ". Reason: "
                            << status.getStatus().toString());

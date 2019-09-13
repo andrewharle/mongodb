@@ -4,6 +4,7 @@
 (function() {
 
     'use strict';
+    load('jstests/libs/feature_compatibility_version.js');
 
     var rst = new ReplSetTest(
         {name: "configRS", nodes: 3, nodeOptions: {configsvr: "", storageEngine: "wiredTiger"}});
@@ -13,6 +14,11 @@
     conf.members[2].priority = 0;
     conf.writeConcernMajorityJournalDefault = true;
     rst.initiate(conf);
+
+    // Ensure the featureCompatibilityVersion is lastStableFCV so that the mongos can connect if it
+    // is binary version last-stable.
+    assert.commandWorked(
+        rst.getPrimary().adminCommand({setFeatureCompatibilityVersion: lastStableFCV}));
 
     var seedList = rst.name + "/" + rst.nodes[1].host;  // node 1 is guaranteed to not be primary
     {
@@ -43,4 +49,6 @@
     var admin = mongos.getDB('admin');
     mongos.setSlaveOk(true);
     assert.eq(1, admin.foo.findOne().a);
+    MongoRunner.stopMongos(mongos);
+    rst.stopSet();
 })();

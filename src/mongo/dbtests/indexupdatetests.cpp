@@ -1,31 +1,33 @@
 //@file indexupdatetests.cpp : mongo/db/index_update.{h,cpp} tests
 
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -40,7 +42,7 @@
 #include "mongo/db/dbdirectclient.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d.h"
+#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/dbtests/dbtests.h"
 
 namespace IndexUpdateTests {
@@ -58,7 +60,7 @@ static const char* const _ns = "unittests.indexupdate";
  */
 class IndexBuildBase {
 public:
-    IndexBuildBase() : _ctx(&_txn, _ns), _client(&_txn) {
+    IndexBuildBase() : _ctx(&_opCtx, _ns), _client(&_opCtx) {
         _client.createCollection(_ns);
     }
     ~IndexBuildBase() {
@@ -74,17 +76,17 @@ protected:
 
     bool buildIndexInterrupted(const BSONObj& key, bool allowInterruption) {
         try {
-            MultiIndexBlock indexer(&_txn, collection());
+            MultiIndexBlock indexer(&_opCtx, collection());
             if (allowInterruption)
                 indexer.allowInterruption();
 
             uassertStatusOK(indexer.init(key));
             uassertStatusOK(indexer.insertAllDocumentsInCollection());
-            WriteUnitOfWork wunit(&_txn);
+            WriteUnitOfWork wunit(&_opCtx);
             indexer.commit();
             wunit.commit();
         } catch (const DBException& e) {
-            if (ErrorCodes::isInterruption(ErrorCodes::Error(e.getCode())))
+            if (ErrorCodes::isInterruption(e.code()))
                 return true;
 
             throw;
@@ -93,7 +95,7 @@ protected:
     }
 
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContext& _opCtx = *_txnPtr;
     OldClientWriteContext _ctx;
     DBDirectClient _client;
 };
@@ -107,25 +109,27 @@ public:
         Database* db = _ctx.db();
         Collection* coll;
         {
-            WriteUnitOfWork wunit(&_txn);
-            db->dropCollection(&_txn, _ns);
-            coll = db->createCollection(&_txn, _ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            db->dropCollection(&_opCtx, _ns).transitional_ignore();
+            coll = db->createCollection(&_opCtx, _ns);
 
             OpDebug* const nullOpDebug = nullptr;
-            coll->insertDocument(&_txn,
-                                 BSON("_id" << 1 << "a"
-                                            << "dup"),
+            coll->insertDocument(&_opCtx,
+                                 InsertStatement(BSON("_id" << 1 << "a"
+                                                            << "dup")),
                                  nullOpDebug,
-                                 true);
-            coll->insertDocument(&_txn,
-                                 BSON("_id" << 2 << "a"
-                                            << "dup"),
+                                 true)
+                .transitional_ignore();
+            coll->insertDocument(&_opCtx,
+                                 InsertStatement(BSON("_id" << 2 << "a"
+                                                            << "dup")),
                                  nullOpDebug,
-                                 true);
+                                 true)
+                .transitional_ignore();
             wunit.commit();
         }
 
-        MultiIndexBlock indexer(&_txn, coll);
+        MultiIndexBlock indexer(&_opCtx, coll);
         indexer.allowBackgroundBuilding();
         indexer.allowInterruption();
         indexer.ignoreUniqueConstraint();
@@ -146,7 +150,7 @@ public:
         ASSERT_OK(indexer.init(spec).getStatus());
         ASSERT_OK(indexer.insertAllDocumentsInCollection());
 
-        WriteUnitOfWork wunit(&_txn);
+        WriteUnitOfWork wunit(&_opCtx);
         indexer.commit();
         wunit.commit();
     }
@@ -161,25 +165,27 @@ public:
         Database* db = _ctx.db();
         Collection* coll;
         {
-            WriteUnitOfWork wunit(&_txn);
-            db->dropCollection(&_txn, _ns);
-            coll = db->createCollection(&_txn, _ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            db->dropCollection(&_opCtx, _ns).transitional_ignore();
+            coll = db->createCollection(&_opCtx, _ns);
 
             OpDebug* const nullOpDebug = nullptr;
-            coll->insertDocument(&_txn,
-                                 BSON("_id" << 1 << "a"
-                                            << "dup"),
+            coll->insertDocument(&_opCtx,
+                                 InsertStatement(BSON("_id" << 1 << "a"
+                                                            << "dup")),
                                  nullOpDebug,
-                                 true);
-            coll->insertDocument(&_txn,
-                                 BSON("_id" << 2 << "a"
-                                            << "dup"),
+                                 true)
+                .transitional_ignore();
+            coll->insertDocument(&_opCtx,
+                                 InsertStatement(BSON("_id" << 2 << "a"
+                                                            << "dup")),
                                  nullOpDebug,
-                                 true);
+                                 true)
+                .transitional_ignore();
             wunit.commit();
         }
 
-        MultiIndexBlock indexer(&_txn, coll);
+        MultiIndexBlock indexer(&_opCtx, coll);
         indexer.allowBackgroundBuilding();
         indexer.allowInterruption();
         // indexer.ignoreUniqueConstraint(); // not calling this
@@ -214,25 +220,25 @@ public:
         RecordId loc1;
         RecordId loc2;
         {
-            WriteUnitOfWork wunit(&_txn);
-            db->dropCollection(&_txn, _ns);
-            coll = db->createCollection(&_txn, _ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            db->dropCollection(&_opCtx, _ns).transitional_ignore();
+            coll = db->createCollection(&_opCtx, _ns);
 
             OpDebug* const nullOpDebug = nullptr;
-            ASSERT_OK(coll->insertDocument(&_txn,
-                                           BSON("_id" << 1 << "a"
-                                                      << "dup"),
+            ASSERT_OK(coll->insertDocument(&_opCtx,
+                                           InsertStatement(BSON("_id" << 1 << "a"
+                                                                      << "dup")),
                                            nullOpDebug,
                                            true));
-            ASSERT_OK(coll->insertDocument(&_txn,
-                                           BSON("_id" << 2 << "a"
-                                                      << "dup"),
+            ASSERT_OK(coll->insertDocument(&_opCtx,
+                                           InsertStatement(BSON("_id" << 2 << "a"
+                                                                      << "dup")),
                                            nullOpDebug,
                                            true));
             wunit.commit();
         }
 
-        MultiIndexBlock indexer(&_txn, coll);
+        MultiIndexBlock indexer(&_opCtx, coll);
         indexer.allowBackgroundBuilding();
         indexer.allowInterruption();
         // indexer.ignoreUniqueConstraint(); // not calling this
@@ -259,7 +265,7 @@ public:
         ASSERT_EQUALS(dups.size(), 1U);
         for (auto recordId : dups) {
             ASSERT_NOT_EQUALS(recordId, RecordId());
-            BSONObj obj = coll->docFor(&_txn, recordId).value();
+            BSONObj obj = coll->docFor(&_opCtx, recordId).value();
             int id = obj["_id"].Int();
             ASSERT(id == 1 || id == 2);
         }
@@ -274,16 +280,17 @@ public:
         Database* db = _ctx.db();
         Collection* coll;
         {
-            WriteUnitOfWork wunit(&_txn);
-            db->dropCollection(&_txn, _ns);
-            coll = db->createCollection(&_txn, _ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            db->dropCollection(&_opCtx, _ns).transitional_ignore();
+            coll = db->createCollection(&_opCtx, _ns);
             // Drop all indexes including id index.
-            coll->getIndexCatalog()->dropAllIndexes(&_txn, true);
+            coll->getIndexCatalog()->dropAllIndexes(&_opCtx, true);
             // Insert some documents with enforceQuota=true.
             int32_t nDocs = 1000;
             OpDebug* const nullOpDebug = nullptr;
             for (int32_t i = 0; i < nDocs; ++i) {
-                coll->insertDocument(&_txn, BSON("a" << i), nullOpDebug, true);
+                coll->insertDocument(&_opCtx, InsertStatement(BSON("a" << i)), nullOpDebug, true)
+                    .transitional_ignore();
             }
             wunit.commit();
         }
@@ -298,7 +305,7 @@ public:
         // only want to interrupt the index build
         getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is not listed in the index catalog because the index build failed.
-        ASSERT(!coll->getIndexCatalog()->findIndexByName(&_txn, "a_1"));
+        ASSERT(!coll->getIndexCatalog()->findIndexByName(&_opCtx, "a_1"));
     }
 };
 
@@ -310,15 +317,16 @@ public:
         Database* db = _ctx.db();
         Collection* coll;
         {
-            WriteUnitOfWork wunit(&_txn);
-            db->dropCollection(&_txn, _ns);
-            coll = db->createCollection(&_txn, _ns);
-            coll->getIndexCatalog()->dropAllIndexes(&_txn, true);
+            WriteUnitOfWork wunit(&_opCtx);
+            db->dropCollection(&_opCtx, _ns).transitional_ignore();
+            coll = db->createCollection(&_opCtx, _ns);
+            coll->getIndexCatalog()->dropAllIndexes(&_opCtx, true);
             // Insert some documents.
             int32_t nDocs = 1000;
             OpDebug* const nullOpDebug = nullptr;
             for (int32_t i = 0; i < nDocs; ++i) {
-                coll->insertDocument(&_txn, BSON("a" << i), nullOpDebug, true);
+                coll->insertDocument(&_opCtx, InsertStatement(BSON("a" << i)), nullOpDebug, true)
+                    .transitional_ignore();
             }
             wunit.commit();
         }
@@ -333,7 +341,7 @@ public:
         // only want to interrupt the index build
         getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is listed in the index catalog because the index build completed.
-        ASSERT(coll->getIndexCatalog()->findIndexByName(&_txn, "a_1"));
+        ASSERT(coll->getIndexCatalog()->findIndexByName(&_opCtx, "a_1"));
     }
 };
 
@@ -341,22 +349,28 @@ public:
 class InsertBuildIdIndexInterrupt : public IndexBuildBase {
 public:
     void run() {
+        // Skip the test if the storage engine doesn't support capped collections.
+        if (!getGlobalServiceContext()->getStorageEngine()->supportsCappedCollections()) {
+            return;
+        }
+
         // Recreate the collection as capped, without an _id index.
         Database* db = _ctx.db();
         Collection* coll;
         {
-            WriteUnitOfWork wunit(&_txn);
-            db->dropCollection(&_txn, _ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            db->dropCollection(&_opCtx, _ns).transitional_ignore();
             CollectionOptions options;
             options.capped = true;
             options.cappedSize = 10 * 1024;
-            coll = db->createCollection(&_txn, _ns, options);
-            coll->getIndexCatalog()->dropAllIndexes(&_txn, true);
+            coll = db->createCollection(&_opCtx, _ns, options);
+            coll->getIndexCatalog()->dropAllIndexes(&_opCtx, true);
             // Insert some documents.
             int32_t nDocs = 1000;
             OpDebug* const nullOpDebug = nullptr;
             for (int32_t i = 0; i < nDocs; ++i) {
-                coll->insertDocument(&_txn, BSON("_id" << i), nullOpDebug, true);
+                coll->insertDocument(&_opCtx, InsertStatement(BSON("_id" << i)), nullOpDebug, true)
+                    .transitional_ignore();
             }
             wunit.commit();
         }
@@ -371,7 +385,7 @@ public:
         // only want to interrupt the index build
         getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is not listed in the index catalog because the index build failed.
-        ASSERT(!coll->getIndexCatalog()->findIndexByName(&_txn, "_id_"));
+        ASSERT(!coll->getIndexCatalog()->findIndexByName(&_opCtx, "_id_"));
     }
 };
 
@@ -379,22 +393,28 @@ public:
 class InsertBuildIdIndexInterruptDisallowed : public IndexBuildBase {
 public:
     void run() {
+        // Skip the test if the storage engine doesn't support capped collections.
+        if (!getGlobalServiceContext()->getStorageEngine()->supportsCappedCollections()) {
+            return;
+        }
+
         // Recreate the collection as capped, without an _id index.
         Database* db = _ctx.db();
         Collection* coll;
         {
-            WriteUnitOfWork wunit(&_txn);
-            db->dropCollection(&_txn, _ns);
+            WriteUnitOfWork wunit(&_opCtx);
+            db->dropCollection(&_opCtx, _ns).transitional_ignore();
             CollectionOptions options;
             options.capped = true;
             options.cappedSize = 10 * 1024;
-            coll = db->createCollection(&_txn, _ns, options);
-            coll->getIndexCatalog()->dropAllIndexes(&_txn, true);
+            coll = db->createCollection(&_opCtx, _ns, options);
+            coll->getIndexCatalog()->dropAllIndexes(&_opCtx, true);
             // Insert some documents.
             int32_t nDocs = 1000;
             OpDebug* const nullOpDebug = nullptr;
             for (int32_t i = 0; i < nDocs; ++i) {
-                coll->insertDocument(&_txn, BSON("_id" << i), nullOpDebug, true);
+                coll->insertDocument(&_opCtx, InsertStatement(BSON("_id" << i)), nullOpDebug, true)
+                    .transitional_ignore();
             }
             wunit.commit();
         }
@@ -409,12 +429,12 @@ public:
         // only want to interrupt the index build
         getGlobalServiceContext()->unsetKillAllOperations();
         // The new index is listed in the index catalog because the index build succeeded.
-        ASSERT(coll->getIndexCatalog()->findIndexByName(&_txn, "_id_"));
+        ASSERT(coll->getIndexCatalog()->findIndexByName(&_opCtx, "_id_"));
     }
 };
 
 Status IndexBuildBase::createIndex(const std::string& dbname, const BSONObj& indexSpec) {
-    MultiIndexBlock indexer(&_txn, collection());
+    MultiIndexBlock indexer(&_opCtx, collection());
     Status status = indexer.init(indexSpec).getStatus();
     if (status == ErrorCodes::IndexAlreadyExists) {
         return Status::OK();
@@ -426,7 +446,7 @@ Status IndexBuildBase::createIndex(const std::string& dbname, const BSONObj& ind
     if (!status.isOK()) {
         return status;
     }
-    WriteUnitOfWork wunit(&_txn);
+    WriteUnitOfWork wunit(&_opCtx);
     indexer.commit();
     wunit.commit();
     return Status::OK();
@@ -641,7 +661,7 @@ public:
         const std::string storageEngineName = "wiredTiger";
 
         // Run 'wiredTiger' tests if the storage engine is supported.
-        if (getGlobalServiceContext()->isRegisteredStorageEngine(storageEngineName)) {
+        if (isRegisteredStorageEngine(getGlobalServiceContext(), storageEngineName)) {
             // Every field under "storageEngine" has to be an object.
             ASSERT_NOT_OK(createIndex("unittest", _createSpec(BSON(storageEngineName << 1))));
 
@@ -766,8 +786,9 @@ public:
         IndexSpec indexSpec;
         indexSpec.addKey("a").addOptions(BSON("collation" << BSON("locale"
                                                                   << "fr")));
-        ASSERT_THROWS_CODE(
-            client.createIndex(_ns, indexSpec), UserException, ErrorCodes::CannotBuildIndexKeys);
+        ASSERT_THROWS_CODE(client.createIndex(_ns, indexSpec),
+                           AssertionException,
+                           ErrorCodes::CannotBuildIndexKeys);
     }
 };
 
@@ -799,8 +820,14 @@ public:
     IndexUpdateTests() : Suite("indexupdate") {}
 
     void setupTests() {
-        add<InsertBuildIgnoreUnique<true>>();
-        add<InsertBuildIgnoreUnique<false>>();
+
+        if (mongo::storageGlobalParams.engine != "mobile") {
+            // These tests check that index creation ignores the unique constraint when told to.
+            // The mobile storage engine does not support duplicate keys in unique indexes so these
+            // tests are disabled.
+            add<InsertBuildIgnoreUnique<true>>();
+            add<InsertBuildIgnoreUnique<false>>();
+        }
         add<InsertBuildEnforceUnique<true>>();
         add<InsertBuildEnforceUnique<false>>();
         add<InsertBuildFillDups<true>>();

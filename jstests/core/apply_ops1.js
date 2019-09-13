@@ -1,3 +1,11 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   requires_fastcount,
+//   requires_non_retryable_commands,
+//   # applyOps uses the oplog that require replication support
+//   requires_replication,
+// ]
+
 (function() {
     "use strict";
 
@@ -289,7 +297,8 @@
 
     /**
      * Test function for running CRUD operations on non-existent namespaces using various
-     * combinations of invalid namespaces (collection/database), allowAtomic and alwaysUpsert.
+     * combinations of invalid namespaces (collection/database), allowAtomic and alwaysUpsert,
+     * and nesting.
      *
      * Leave 'expectedErrorCode' undefined if this command is expected to run successfully.
      */
@@ -298,19 +307,23 @@
         const t2 = db.getSiblingDB('apply_ops1_no_such_db').getCollection('t');
         [t, t2].forEach(coll => {
             const op = {op: optype, ns: coll.getFullName(), o: o, o2: o2};
-            [false, true].forEach(allowAtomic => {
-                [false, true].forEach(alwaysUpsert => {
-                    const cmd = {
-                        applyOps: [op],
-                        allowAtomic: allowAtomic,
-                        alwaysUpsert: alwaysUpsert
-                    };
-                    jsTestLog('Testing applyOps on non-existent namespace: ' + tojson(cmd));
-                    if (expectedErrorCode === ErrorCodes.OK) {
-                        assert.commandWorked(db.adminCommand(cmd));
-                    } else {
-                        assert.commandFailedWithCode(db.adminCommand(cmd), expectedErrorCode);
-                    }
+            [false, true].forEach(nested => {
+                const opToRun =
+                    nested ? {op: 'c', ns: 'test.$cmd', o: {applyOps: [op]}, o2: {}} : op;
+                [false, true].forEach(allowAtomic => {
+                    [false, true].forEach(alwaysUpsert => {
+                        const cmd = {
+                            applyOps: [opToRun],
+                            allowAtomic: allowAtomic,
+                            alwaysUpsert: alwaysUpsert
+                        };
+                        jsTestLog('Testing applyOps on non-existent namespace: ' + tojson(cmd));
+                        if (expectedErrorCode === ErrorCodes.OK) {
+                            assert.commandWorked(db.adminCommand(cmd));
+                        } else {
+                            assert.commandFailedWithCode(db.adminCommand(cmd), expectedErrorCode);
+                        }
+                    });
                 });
             });
         });
@@ -324,16 +337,6 @@
     // Delete operations on non-existent collections/databases should return OK for idempotency
     // reasons.
     testCrudOperationOnNonExistentNamespace('d', {_id: 0}, {});
-
-    assert.commandFailed(
-        db.adminCommand({
-            applyOps: [{
-                "op": "c",
-                "ns": "admin.$cmd",
-                "o": {applyOps: [{"op": "i", "ns": t.getFullName(), "o": {_id: 5, x: 17}}]}
-            }]
-        }),
-        "Applying a nested insert operation on a non-existent collection should fail");
 
     assert.commandWorked(db.createCollection(t.getName()));
     var a = assert.commandWorked(
@@ -355,8 +358,8 @@
 
     var res = assert.commandWorked(db.runCommand({
         applyOps: [
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}},
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}}
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 18}}},
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 19}}}
         ]
     }));
 
@@ -371,11 +374,31 @@
     // preCondition fully matches
     res = db.runCommand({
         applyOps: [
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}},
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}}
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 20}}},
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 21}}}
         ],
         preCondition: [{ns: t.getFullName(), q: {_id: 5}, res: {x: 19}}]
     });
+
+    // The use of preCondition requires applyOps to run atomically. Therefore, it is incompatible
+    // with {allowAtomic: false}.
+    assert.commandFailedWithCode(
+        db.runCommand({
+            applyOps: [{op: 'u', ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 22}}}],
+            preCondition: [{ns: t.getFullName(), q: {_id: 5}, res: {x: 21}}],
+            allowAtomic: false,
+        }),
+        ErrorCodes.InvalidOptions,
+        'applyOps should fail when preCondition is present and atomicAllowed is false.');
+
+    // The use of preCondition is also incompatible with operations that include commands.
+    assert.commandFailedWithCode(
+        db.runCommand({
+            applyOps: [{op: 'c', ns: t.getCollection('$cmd').getFullName(), o: {applyOps: []}}],
+            preCondition: [{ns: t.getFullName(), q: {_id: 5}, res: {x: 21}}],
+        }),
+        ErrorCodes.InvalidOptions,
+        'applyOps should fail when preCondition is present and operations includes commands.');
 
     o.x++;
     o.x++;
@@ -388,8 +411,8 @@
     // preCondition doesn't match ns
     res = db.runCommand({
         applyOps: [
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}},
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}}
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 22}}},
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 23}}}
         ],
         preCondition: [{ns: "foo.otherName", q: {_id: 5}, res: {x: 21}}]
     });
@@ -399,8 +422,8 @@
     // preCondition doesn't match query
     res = db.runCommand({
         applyOps: [
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}},
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}}
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 22}}},
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 23}}}
         ],
         preCondition: [{ns: t.getFullName(), q: {_id: 5}, res: {x: 19}}]
     });
@@ -409,13 +432,49 @@
 
     res = db.runCommand({
         applyOps: [
-            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$inc: {x: 1}}},
-            {op: "u", ns: t.getFullName(), o2: {_id: 6}, o: {$inc: {x: 1}}}
+            {op: "u", ns: t.getFullName(), o2: {_id: 5}, o: {$set: {x: 22}}},
+            {op: "u", ns: t.getFullName(), o2: {_id: 6}, o: {$set: {x: 23}}}
         ]
     });
 
     assert.eq(true, res.results[0], "Valid update failed");
     assert.eq(true, res.results[1], "Valid update failed");
+
+    // Ops with transaction numbers are valid.
+    var lsid = {id: UUID()};
+    res = db.runCommand({
+        applyOps: [
+            {
+              op: "i",
+              ns: t.getFullName(),
+              o: {_id: 7, x: 24},
+              lsid: lsid,
+              txnNumber: NumberLong(1),
+              stmdId: 0
+            },
+            {
+              op: "u",
+              ns: t.getFullName(),
+              o2: {_id: 8},
+              o: {$set: {x: 25}},
+              lsid: lsid,
+              txnNumber: NumberLong(1),
+              stmdId: 1
+            },
+            {
+              op: "d",
+              ns: t.getFullName(),
+              o: {_id: 7},
+              lsid: lsid,
+              txnNumber: NumberLong(2),
+              stmdId: 0
+            },
+        ]
+    });
+
+    assert.eq(true, res.results[0], "Valid insert with transaction number failed");
+    assert.eq(true, res.results[1], "Valid update with transaction number failed");
+    assert.eq(true, res.results[2], "Valid delete with transaction number failed");
 
     // Foreground index build.
     res = assert.commandWorked(db.adminCommand({
@@ -475,4 +534,43 @@
     spec = GetIndexHelpers.findByName(allIndexes, "c_1");
     assert.neq(null, spec, "Foreground index 'c_1' not found: " + tojson(allIndexes));
     assert.eq(2, spec.v, "Expected v=2 index to be built");
+
+    // When applying a "u" (update) op, we default to 'UpdateNode' update semantics, and $set
+    // operations add new fields in lexicographic order.
+    res = assert.commandWorked(db.adminCommand({
+        applyOps: [
+            {"op": "i", "ns": t.getFullName(), "o": {_id: 6}},
+            {"op": "u", "ns": t.getFullName(), "o2": {_id: 6}, "o": {$set: {z: 1, a: 2}}}
+        ]
+    }));
+    assert.eq(t.findOne({_id: 6}), {_id: 6, a: 2, z: 1});  // Note: 'a' and 'z' have been sorted.
+
+    // 'ModifierInterface' semantics are not supported, so an update with {$v: 0} should fail.
+    res = assert.commandFailed(db.adminCommand({
+        applyOps: [
+            {"op": "i", "ns": t.getFullName(), "o": {_id: 7}},
+            {
+              "op": "u",
+              "ns": t.getFullName(),
+              "o2": {_id: 7},
+              "o": {$v: NumberLong(0), $set: {z: 1, a: 2}}
+            }
+        ]
+    }));
+    assert.eq(res.code, 40682);
+
+    // When we explicitly specify {$v: 1}, we should get 'UpdateNode' update semantics, and $set
+    // operations get performed in lexicographic order.
+    res = assert.commandWorked(db.adminCommand({
+        applyOps: [
+            {"op": "i", "ns": t.getFullName(), "o": {_id: 8}},
+            {
+              "op": "u",
+              "ns": t.getFullName(),
+              "o2": {_id: 8},
+              "o": {$v: NumberLong(1), $set: {z: 1, a: 2}}
+            }
+        ]
+    }));
+    assert.eq(t.findOne({_id: 8}), {_id: 8, a: 2, z: 1});  // Note: 'a' and 'z' have been sorted.
 })();

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -101,7 +103,7 @@ bool SortStage::isEOF() {
 }
 
 PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
-    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
+    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes.load());
     if (_memUsage > maxBytes) {
         mongoutils::str::stream ss;
         ss << "Sort operation used more than the maximum " << maxBytes
@@ -159,16 +161,10 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
             _sorted = true;
             return PlanStage::NEED_TIME;
         } else if (PlanStage::FAILURE == code || PlanStage::DEAD == code) {
+            // The stage which produces a failure is responsible for allocating a working set member
+            // with error details.
+            invariant(WorkingSet::INVALID_ID != id);
             *out = id;
-            // If a stage fails, it may create a status WSM to indicate why it
-            // failed, in which case 'id' is valid.  If ID is invalid, we
-            // create our own error message.
-            if (WorkingSet::INVALID_ID == id) {
-                mongoutils::str::stream ss;
-                ss << "sort stage failed to read in results to sort from child";
-                Status status(ErrorCodes::InternalError, ss);
-                *out = WorkingSetCommon::allocateStatusMember(_ws, status);
-            }
             return code;
         } else if (PlanStage::NEED_YIELD == code) {
             *out = id;
@@ -193,7 +189,7 @@ PlanStage::StageState SortStage::doWork(WorkingSetID* out) {
     return PlanStage::ADVANCED;
 }
 
-void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, InvalidationType type) {
+void SortStage::doInvalidate(OperationContext* opCtx, const RecordId& dl, InvalidationType type) {
     // If we have a deletion, we can fetch and carry on.
     // If we have a mutation, it's easier to fetch and use the previous document.
     // So, no matter what, fetch and keep the doc in play.
@@ -209,7 +205,7 @@ void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalida
         WorkingSetMember* member = _ws->get(it->second);
         verify(member->recordId == dl);
 
-        WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, _collection);
+        WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, _collection);
 
         // Remove the RecordId from our set of active DLs.
         _wsidByRecordId.erase(it);
@@ -219,7 +215,7 @@ void SortStage::doInvalidate(OperationContext* txn, const RecordId& dl, Invalida
 
 unique_ptr<PlanStageStats> SortStage::getStats() {
     _commonStats.isEOF = isEOF();
-    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes);
+    const size_t maxBytes = static_cast<size_t>(internalQueryExecMaxBlockingSortBytes.load());
     _specificStats.memLimit = maxBytes;
     _specificStats.memUsage = _memUsage;
     _specificStats.limit = _limit;

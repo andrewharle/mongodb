@@ -14,7 +14,7 @@
         {shards: 2, verbose: 1, mongos: 1, other: {chunkSize: 1, enableBalancer: true}});
 
     st.adminCommand({enablesharding: "mrShard"});
-    st.ensurePrimaryShard('mrShard', 'shard0001');
+    st.ensurePrimaryShard('mrShard', st.shard1.shardName);
     st.adminCommand({shardcollection: "mrShard.srcSharded", key: {"_id": 1}});
 
     var db = st.getDB("mrShard");
@@ -82,4 +82,5 @@
         {out: {inline: 1}, query: {str: "foo"}, collation: {locale: "en_US", strength: 2}});
     assert.commandWorked(out);
     assert.eq(out.counts.input, 1);
+    st.stop();
 })();

@@ -1,5 +1,11 @@
-// Test bulk inserts running alonside the auto-balancer. Ensures that they do not conflict with each
-// other.
+/**
+ * Test bulk inserts running alonside the auto-balancer. Ensures that they do not conflict with each
+ * other.
+ *
+ * This test is labeled resource intensive because its total io_write is 106MB compared to a median
+ * of 5MB across all sharding tests in wiredTiger.
+ * @tags: [resource_intensive]
+ */
 (function() {
     'use strict';
 
@@ -76,11 +82,12 @@
 
         if (docsInserted % 10000 == 0) {
             print("Inserted " + docsInserted + " documents.");
-            checkDocuments();
             st.printShardingStatus();
         }
 
         if (docsInserted > numDocs / 3 && !balancerOn) {
+            // Do one check before we turn balancer on
+            checkDocuments();
             print('Turning on balancer after ' + docsInserted + ' documents inserted.');
             st.startBalancer();
             balancerOn = true;

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -41,7 +43,6 @@
 #include <sys/types.h>
 #include <unistd.h>
 
-#include "mongo/db/storage/paths.h"
 #include "mongo/platform/process_id.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -51,7 +52,50 @@ namespace mongo {
 namespace {
 
 const std::string kLockFileBasename = "mongod.lock";
+void flushMyDirectory(const boost::filesystem::path& file) {
+#ifdef __linux__  // this isn't needed elsewhere
+    static bool _warnedAboutFilesystem = false;
+    // if called without a fully qualified path it asserts; that makes mongoperf fail.
+    // so make a warning. need a better solution longer term.
+    // massert(40389, str::stream() << "Couldn't find parent dir for file: " << file.string(),);
+    if (!file.has_branch_path()) {
+        log() << "warning flushMyDirectory couldn't find parent dir for file: " << file.string();
+        return;
+    }
 
+
+    boost::filesystem::path dir = file.branch_path();  // parent_path in new boosts
+
+    LOG(1) << "flushing directory " << dir.string();
+
+    int fd = ::open(dir.string().c_str(), O_RDONLY);  // DO NOT THROW OR ASSERT BEFORE CLOSING
+    massert(40387,
+            str::stream() << "Couldn't open directory '" << dir.string() << "' for flushing: "
+                          << errnoWithDescription(),
+            fd >= 0);
+    if (fsync(fd) != 0) {
+        int e = errno;
+        if (e == EINVAL) {  // indicates filesystem does not support synchronization
+            if (!_warnedAboutFilesystem) {
+                log() << "\tWARNING: This file system is not supported. For further information"
+                      << " see:" << startupWarningsLog;
+                log() << "\t\t\thttp://dochub.mongodb.org/core/unsupported-filesystems"
+                      << startupWarningsLog;
+                log() << "\t\tPlease notify MongoDB, Inc. if an unlisted filesystem generated "
+                      << "this warning." << startupWarningsLog;
+                _warnedAboutFilesystem = true;
+            }
+        } else {
+            close(fd);
+            massert(40388,
+                    str::stream() << "Couldn't fsync directory '" << dir.string() << "': "
+                                  << errnoWithDescription(e),
+                    false);
+        }
+    }
+    close(fd);
+#endif
+}
 }  // namespace
 
 class StorageEngineLockFile::LockFileHandle {
@@ -109,9 +153,14 @@ Status StorageEngineLockFile::open() {
                               << _dbpath);
         }
         return Status(ErrorCodes::DBPathInUse,
-                      str::stream() << "Unable to create/open lock file: " << _filespec << ' '
+                      str::stream() << "Unable to create/open the lock file: " << _filespec << " ("
                                     << errnoWithDescription(errorcode)
-                                    << " Is a mongod instance already running?");
+                                    << ")."
+                                    << " Ensure the user executing mongod is the owner of the lock "
+                                       "file and has the appropriate permissions. Also make sure "
+                                       "that another mongod instance is not already running on the "
+                                    << _dbpath
+                                    << " directory");
     }
 #if !defined(__sun)
     int ret = ::flock(lockFile, LOCK_EX | LOCK_NB);
@@ -125,9 +174,12 @@ Status StorageEngineLockFile::open() {
         int errorcode = errno;
         ::close(lockFile);
         return Status(ErrorCodes::DBPathInUse,
-                      str::stream() << "Unable to lock file: " << _filespec << ' '
+                      str::stream() << "Unable to lock the lock file: " << _filespec << " ("
                                     << errnoWithDescription(errorcode)
-                                    << ". Is a mongod instance already running?");
+                                    << ")."
+                                    << " Another mongod instance is already running on the "
+                                    << _dbpath
+                                    << " directory");
     }
     _lockFileHandle->_fd = lockFile;
     return Status::OK();

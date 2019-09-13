@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -72,8 +72,8 @@ json_column_group_index(WT_SESSION *session,
     JSON_INPUT_STATE *ins, CONFIG_LIST *clp, int idx)
 {
 	WT_DECL_RET;
-	bool isconfig;
 	char *config, *p, *uri;
+	bool isconfig;
 
 	uri = NULL;
 	config = NULL;
@@ -173,10 +173,10 @@ static int
 json_strdup(WT_SESSION *session, JSON_INPUT_STATE *ins, char **resultp)
 {
 	WT_DECL_RET;
+	size_t srclen;
+	ssize_t resultlen;
 	char *result, *resultcpy;
 	const char *src;
-	ssize_t resultlen;
-	size_t srclen;
 
 	result = NULL;
 	src = ins->tokstart + 1;  /*strip "" from token */
@@ -221,9 +221,9 @@ json_data(WT_SESSION *session,
 	size_t gotnolen, keystrlen;
 	uint64_t gotno, recno;
 	int nfield, nkeys, toktype, tret;
-	bool isrec;
 	char config[64], *endp, *uri;
 	const char *keyformat;
+	bool isrec;
 
 	cursor = NULL;
 	uri = NULL;
@@ -254,7 +254,7 @@ json_data(WT_SESSION *session,
 		goto err;
 	}
 	keyformat = cursor->key_format;
-	isrec = strcmp(keyformat, "r") == 0;
+	isrec = WT_STREQ(keyformat, "r");
 	for (nkeys = 0; *keyformat; keyformat++)
 		if (!__wt_isdigit((u_char)*keyformat))
 			nkeys++;
@@ -354,8 +354,9 @@ json_top_level(WT_SESSION *session, JSON_INPUT_STATE *ins, uint32_t flags)
 	WT_DECL_RET;
 	static const char *json_markers[] = {
 	    "\"config\"", "\"colgroups\"", "\"indices\"", "\"data\"", NULL };
+	uint64_t curversion;
+	int toktype;
 	char *config, *tableuri;
-	int curversion, toktype;
 	bool hasversion;
 
 	memset(&cl, 0, sizeof(cl));
@@ -380,8 +381,10 @@ json_top_level(WT_SESSION *session, JSON_INPUT_STATE *ins, uint32_t flags)
 			}
 			hasversion = true;
 			JSON_EXPECT(session, ins, 's');
-			if ((curversion = atoi(ins->tokstart + 1)) <= 0 ||
-			    curversion > DUMP_JSON_SUPPORTED_VERSION) {
+			if ((ret = util_str2num(session,
+			    ins->tokstart + 1, false, &curversion)) != 0)
+				goto err;
+			if (curversion > DUMP_JSON_SUPPORTED_VERSION) {
 				ret = util_err(session, ENOTSUP,
 				    "unsupported JSON dump version \"%.*s\"",
 				    (int)(ins->toklen - 1), ins->tokstart + 1);
@@ -596,16 +599,16 @@ util_load_json(WT_SESSION *session, const char *filename, uint32_t flags)
 
 	memset(&instate, 0, sizeof(instate));
 	instate.session = session;
-	if (util_read_line(session, &instate.line, false, &instate.ateof))
-		return (1);
-	instate.p = (const char *)instate.line.mem;
-	instate.linenum = 1;
-	instate.filename = filename;
+	if ((ret = util_read_line(
+	    session, &instate.line, false, &instate.ateof)) == 0) {
+		instate.p = (const char *)instate.line.mem;
+		instate.linenum = 1;
+		instate.filename = filename;
 
-	if ((ret = json_top_level(session, &instate, flags)) != 0)
-		goto err;
+		ret = json_top_level(session, &instate, flags);
+	}
 
-err:	free(instate.line.mem);
+	free(instate.line.mem);
 	free(instate.kvraw);
 	return (ret);
 }

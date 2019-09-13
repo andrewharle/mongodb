@@ -1,4 +1,7 @@
 // Test that opcounters get incremented properly.
+// @tags: [
+//   uses_multiple_connections,
+// ]
 // Legacy write mode test also available at jstests/gle.
 
 var mongo = new Mongo(db.getMongo().host);
@@ -144,6 +147,10 @@ assert.eq(opCounters.getmore + 1, newdb.serverStatus().opcounters.getmore);
 
 t.drop();
 t.insert({_id: 0});
+
+// Send a command that attaches a databaseVersion to ensure the shard refreshes its cached database
+// version before starting to record opcounters.
+assert.commandWorked(newdb.runCommand({listCollections: 1}));
 
 // Command, recognized, no error.
 serverStatus = newdb.runCommand({serverStatus: 1});

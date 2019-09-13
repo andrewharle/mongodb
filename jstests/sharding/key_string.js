@@ -3,13 +3,13 @@
     var s = new ShardingTest({name: "keystring", shards: 2});
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
     s.adminCommand({shardcollection: "test.foo", key: {name: 1}});
 
     primary = s.getPrimaryShard("test").getDB("test");
     seconday = s.getOther(primary).getDB("test");
 
-    assert.eq(1, s.config.chunks.count(), "sanity check A");
+    assert.eq(1, s.config.chunks.count({"ns": "test.foo"}), "sanity check A");
 
     var db = s.getDB("test");
 

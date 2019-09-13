@@ -1,25 +1,27 @@
 // sorted_data_interface_test_insert.cpp
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,10 +38,11 @@
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
+namespace {
 
 // Insert a key and verify that the number of entries in the index equals 1.
 TEST(SortedDataInterface, Insert) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -64,7 +67,7 @@ TEST(SortedDataInterface, Insert) {
 
 // Insert a compound key and verify that the number of entries in the index equals 1.
 TEST(SortedDataInterface, InsertCompoundKey) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -91,7 +94,7 @@ TEST(SortedDataInterface, InsertCompoundKey) {
 // number of entries in the index equals the number that were inserted, even
 // when duplicates are not allowed.
 TEST(SortedDataInterface, InsertSameDiskLoc) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -133,7 +136,7 @@ TEST(SortedDataInterface, InsertSameDiskLoc) {
 // number of entries in the index equals the number that were inserted, even
 // when duplicates are allowed.
 TEST(SortedDataInterface, InsertSameDiskLocWithDupsAllowed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
 
     {
@@ -174,7 +177,7 @@ TEST(SortedDataInterface, InsertSameDiskLocWithDupsAllowed) {
 // Insert the same key multiple times and verify that only 1 entry exists
 // in the index when duplicates are not allowed.
 TEST(SortedDataInterface, InsertSameKey) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
 
     {
@@ -220,7 +223,7 @@ namespace {
 // removing all but one loc each time and verifying the correct loc remains.
 void _testInsertSameKeyWithDupsAllowed(const RecordId locs[3]) {
     for (int keeper = 0; keeper < 3; keeper++) {
-        const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+        const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
         const std::unique_ptr<SortedDataInterface> sorted(
             harnessHelper->newSortedDataInterface(true));
 
@@ -283,7 +286,7 @@ TEST(SortedDataInterface, InsertSameKeyWithDupsAllowedLocsDescending) {
 // Insert multiple keys and verify that the number of entries
 // in the index equals the number that were inserted.
 TEST(SortedDataInterface, InsertMultiple) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
 
     {
@@ -324,7 +327,7 @@ TEST(SortedDataInterface, InsertMultiple) {
 // Insert multiple compound keys and verify that the number of entries
 // in the index equals the number that were inserted.
 TEST(SortedDataInterface, InsertMultipleCompoundKeys) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
 
     {
@@ -364,4 +367,5 @@ TEST(SortedDataInterface, InsertMultipleCompoundKeys) {
     }
 }
 
+}  // namespace
 }  // namespace mongo

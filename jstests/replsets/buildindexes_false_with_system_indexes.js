@@ -72,15 +72,10 @@
     jsTestLog("Now restarting primary; indexes should be created.");
     rst.restart(primary);
     primary = rst.getPrimary();
-    adminDb = primary.getDB("admin");
-    assert.soonNoExcept(() => {
-        assert.eq(["_id_", "user_1_db_1"],
-                  adminDb.system.users.getIndexes().map(x => x.name).sort());
-        assert.eq(["_id_", "role_1_db_1"],
-                  adminDb.system.roles.getIndexes().map(x => x.name).sort());
-        return true;
-    });
     rst.awaitReplication();
+    adminDb = primary.getDB("admin");
+    assert.eq(["_id_", "user_1_db_1"], adminDb.system.users.getIndexes().map(x => x.name).sort());
+    assert.eq(["_id_", "role_1_db_1"], adminDb.system.roles.getIndexes().map(x => x.name).sort());
     assert.eq(["_id_", "user_1_db_1"],
               secondaryAdminDb.system.users.getIndexes().map(x => x.name).sort());
     assert.eq(["_id_", "role_1_db_1"],

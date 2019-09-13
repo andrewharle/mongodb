@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -136,7 +136,6 @@ main(int argc, char *argv[])
 		}
 
 	argc -= __wt_optind;
-	argv += __wt_optind;
 	if (argc != 0)
 		return (usage());
 
@@ -160,8 +159,7 @@ main(int argc, char *argv[])
 
 		wt_connect(config_open);	/* WiredTiger connection */
 
-		if (rw_start(readers, writers))	/* Loop operations */
-			return (EXIT_FAILURE);
+		rw_start(readers, writers);	/* Loop operations */
 
 		stats();			/* Statistics */
 
@@ -183,7 +181,6 @@ wt_connect(char *config_open)
 		NULL,
 		NULL	/* Close handler. */
 	};
-	int ret;
 	char config[512];
 
 	testutil_clean_work_dir(home);
@@ -195,8 +192,7 @@ wt_connect(char *config_open)
 	    config_open == NULL ? "" : ",",
 	    config_open == NULL ? "" : config_open));
 
-	if ((ret = wiredtiger_open(home, &event_handler, config, &conn)) != 0)
-		testutil_die(ret, "wiredtiger_open");
+	testutil_check(wiredtiger_open(home, &event_handler, config, &conn));
 }
 
 /*
@@ -207,16 +203,12 @@ static void
 wt_shutdown(void)
 {
 	WT_SESSION *session;
-	int ret;
 
-	if ((ret = conn->open_session(conn, NULL, NULL, &session)) != 0)
-		testutil_die(ret, "conn.session");
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
 
-	if ((ret = session->checkpoint(session, NULL)) != 0)
-		testutil_die(ret, "session.checkpoint");
+	testutil_check(session->checkpoint(session, NULL));
 
-	if ((ret = conn->close(conn, NULL)) != 0)
-		testutil_die(ret, "conn.close");
+	testutil_check(conn->close(conn, NULL));
 }
 
 /*

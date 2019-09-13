@@ -2,7 +2,12 @@
 // Tests that zero results are correctly returned with returnPartial and shards down
 //
 
-var st = new ShardingTest({shards: 3, mongos: 1, other: {mongosOptions: {verbose: 2}}});
+// Checking UUID consistency involves talking to shards, but this test shuts down shards.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
+// TODO: SERVER-33597 remove shardAsReplicaSet: false
+var st = new ShardingTest(
+    {shards: 3, mongos: 1, other: {mongosOptions: {verbose: 2}, shardAsReplicaSet: false}});
 
 // Stop balancer, we're doing our own manual chunk distribution
 st.stopBalancer();

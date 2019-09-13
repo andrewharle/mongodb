@@ -1,6 +1,7 @@
 
 // this tests that members will stay in RECOVERING state on startup if they have not reached
 // their stored minvalid
+// @tags: [requires_replication]
 
 var name = "minvalid";
 var replTest = new ReplSetTest({name: name, nodes: 1, oplogSize: 1});
@@ -22,9 +23,7 @@ printjson(lastOp);
 
 print("3: change minvalid");
 assert.writeOK(local.replset.minvalid.update(
-    {},
-    {$set: {ts: new Timestamp(lastOp.ts.t, lastOp.ts.i + 1), h: new NumberLong("1234567890")}},
-    {upsert: true}));
+    {}, {$set: {ts: new Timestamp(lastOp.ts.t, lastOp.ts.i + 1)}}, {upsert: true}));
 printjson(local.replset.minvalid.findOne());
 
 print("4: restart");

@@ -5,6 +5,8 @@
  *
  * Exercises the concurrent moveChunk operations, with each thread operating on its own set of
  * chunks.
+ *
+ * @tags: [requires_sharding, assumes_balancer_off, assumes_autosplit_off]
  */
 
 load('jstests/concurrency/fsm_libs/extend_workload.js');                // for extendWorkload
@@ -58,13 +60,16 @@ var $config = extendWorkload($config, function($config, $super) {
     $config.states.init = function init(db, collName, connCache) {
         // Inform this thread about its partition.
         // Each thread has tid in range 0..(n-1) where n is the number of threads.
-        this.partition = this.makePartition(this.tid, this.partitionSize);
+        this.partition =
+            this.makePartition(db[collName].getFullName(), this.tid, this.partitionSize);
         Object.freeze(this.partition);
 
         var config = ChunkHelper.getPrimary(connCache.config);
 
-        var numChunksInPartition =
-            ChunkHelper.getNumChunks(config, this.partition.chunkLower, this.partition.chunkUpper);
+        var numChunksInPartition = ChunkHelper.getNumChunks(config,
+                                                            db[collName].getFullName(),
+                                                            this.partition.chunkLower,
+                                                            this.partition.chunkUpper);
 
         // Verify that there is at least one chunk in our partition and that
         // there are at least as many chunks in our partition as iterations.
@@ -88,6 +93,7 @@ var $config = extendWorkload($config, function($config, $super) {
         // Skip this iteration if our data partition contains less than 2 chunks.
         if (configDB.chunks
                 .find({
+                    ns: ns,
                     'min._id': {$gte: this.partition.lower},
                     'max._id': {$lte: this.partition.upper}
                 })
@@ -99,9 +105,9 @@ var $config = extendWorkload($config, function($config, $super) {
         chunk1 = this.getRandomChunkInPartition(config);
         // If we randomly chose the last chunk, choose the one before it.
         if (chunk1.max._id === this.partition.chunkUpper) {
-            chunk1 = configDB.chunks.findOne({'max._id': chunk1.min._id});
+            chunk1 = configDB.chunks.findOne({ns: ns, 'max._id': chunk1.min._id});
         }
-        chunk2 = configDB.chunks.findOne({'min._id': chunk1.max._id});
+        chunk2 = configDB.chunks.findOne({ns: ns, 'min._id': chunk1.max._id});
 
         // Save the number of documents found in these two chunks' ranges before the mergeChunks
         // operation. This will be used to verify that the same number of documents in that
@@ -126,15 +132,15 @@ var $config = extendWorkload($config, function($config, $super) {
         // Save the number of chunks before the mergeChunks operation. This will be used
         // to verify that the number of chunks after a successful mergeChunks decreases
         // by one, or after a failed mergeChunks stays the same.
-        var numChunksBefore =
-            ChunkHelper.getNumChunks(config, this.partition.chunkLower, this.partition.chunkUpper);
+        var numChunksBefore = ChunkHelper.getNumChunks(
+            config, ns, this.partition.chunkLower, this.partition.chunkUpper);
 
         // Use chunk_helper.js's mergeChunks wrapper to tolerate acceptable failures
         // and to use a limited number of retries with exponential backoff.
         var bounds = [{_id: chunk1.min._id}, {_id: chunk2.max._id}];
         var mergeChunksRes = ChunkHelper.mergeChunks(db, collName, bounds);
         var chunks =
-            ChunkHelper.getChunks(config, this.partition.chunkLower, this.partition.chunkUpper);
+            ChunkHelper.getChunks(config, ns, this.partition.chunkLower, this.partition.chunkUpper);
         var msgBase = tojson({
             mergeChunksResult: mergeChunksRes,
             chunksInPartition: chunks,
@@ -161,7 +167,7 @@ var $config = extendWorkload($config, function($config, $super) {
                 // verify that there are still two chunks between the original chunks' lower and
                 // upper bounds.
                 var numChunksBetweenOldChunksBounds =
-                    ChunkHelper.getNumChunks(conn, chunk1.min._id, chunk2.max._id);
+                    ChunkHelper.getNumChunks(conn, ns, chunk1.min._id, chunk2.max._id);
                 if (mergeChunksRes.ok) {
                     msg = 'mergeChunks succeeded but config does not see exactly 1 chunk between ' +
                         'the chunk bounds.\n' + msgBase;
@@ -176,7 +182,7 @@ var $config = extendWorkload($config, function($config, $super) {
                 // of chunks in our partition has decreased by 1. If it failed, verify
                 // that it has stayed the same.
                 var numChunksAfter = ChunkHelper.getNumChunks(
-                    config, this.partition.chunkLower, this.partition.chunkUpper);
+                    config, ns, this.partition.chunkLower, this.partition.chunkUpper);
                 if (mergeChunksRes.ok) {
                     msg = 'mergeChunks succeeded but config does not see exactly 1 fewer chunks ' +
                         'between the chunk bounds than before.\n' + msgBase;
@@ -218,7 +224,7 @@ var $config = extendWorkload($config, function($config, $super) {
             // the original chunks' lower and upper bounds. If the operation failed, verify that the
             // mongos still sees two chunks between the original chunks' lower and upper bounds.
             var numChunksBetweenOldChunksBounds =
-                ChunkHelper.getNumChunks(mongos, chunk1.min._id, chunk2.max._id);
+                ChunkHelper.getNumChunks(mongos, ns, chunk1.min._id, chunk2.max._id);
             if (mergeChunksRes.ok) {
                 msg = 'mergeChunks succeeded but mongos does not see exactly 1 chunk between ' +
                     'the chunk bounds.\n' + msgBase;
@@ -233,7 +239,7 @@ var $config = extendWorkload($config, function($config, $super) {
             // number of chunks in our partition has decreased by 1. If it failed, verify that it
             // has stayed the same.
             var numChunksAfter = ChunkHelper.getNumChunks(
-                mongos, this.partition.chunkLower, this.partition.chunkUpper);
+                mongos, ns, this.partition.chunkLower, this.partition.chunkUpper);
             if (mergeChunksRes.ok) {
                 msg = 'mergeChunks succeeded but mongos does not see exactly 1 fewer chunks ' +
                     'between the chunk bounds.\n' + msgBase;

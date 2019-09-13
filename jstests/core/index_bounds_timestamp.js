@@ -7,13 +7,6 @@
 
     load("jstests/libs/analyze_plan.js");
 
-    // Helper function to get the nCounted from the COUNT stage in an explain plan's executionStats.
-    function getCountFromExecutionStats(executionStats) {
-        let stages = getPlanStages(executionStats.executionStages, "COUNT");
-        assert.eq(1, stages.length, "executionStats should have 1 COUNT stage");
-        return stages[0].nCounted;
-    }
-
     // Setup the test collection.
     let coll = db.index_bounds_timestamp;
     coll.drop();
@@ -38,116 +31,119 @@
 
     // Check that count over (Timestamp(0, 0), Timestamp(2^32 - 1, 2^32 - 1)] is a covered query.
     plan = coll.explain("executionStats").find({ts: {$gt: Timestamp(0, 0)}}).count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan), "ts $gt count should be a covered query");
-    assert.eq(5, getCountFromExecutionStats(plan.executionStats), "ts $gt count should be 5");
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
+           "ts $gt count should be a covered query");
+    assertExplainCount({explainResults: plan, expectedCount: 5});
 
     // Check that find over (Timestamp(0, 0), Timestamp(2^32 - 1, 2^32 - 1)] does not require a
     // FETCH stage when the query is covered by an index.
     plan =
         coll.explain("executionStats").find({ts: {$gt: Timestamp(0, 0)}}, {ts: 1, _id: 0}).finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gt find with project should be a covered query");
 
     // Check that count over [Timestamp(0, 0), Timestamp(2^32 - 1, 2^32 - 1)] is a covered query.
     plan = coll.explain("executionStats").find({ts: {$gte: Timestamp(0, 0)}}).count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan), "ts $gte count should be a covered query");
-    assert.eq(5, getCountFromExecutionStats(plan.executionStats), "ts $gte count should be 5");
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
+           "ts $gte count should be a covered query");
+    assertExplainCount({explainResults: plan, expectedCount: 5});
 
     // Check that find over [Timestamp(0, 0), Timestamp(2^32 - 1, 2^32 - 1)] does not require a
     // FETCH stage when the query is covered by an index.
     plan = coll.explain("executionStats")
                .find({ts: {$gte: Timestamp(0, 0)}}, {ts: 1, _id: 0})
                .finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gte find with project should be a covered query");
 
     // Check that count over [Timestamp(0, 0), Timestamp(1, 0)) is a covered query.
     plan = coll.explain("executionStats").find({ts: {$lt: Timestamp(1, 0)}}).count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan), "ts $lt count should be a covered query");
-    assert.eq(3, getCountFromExecutionStats(plan.executionStats), "ts $lt count should be 3");
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
+           "ts $lt count should be a covered query");
+    assertExplainCount({explainResults: plan, expectedCount: 3});
 
     // Check that find over [Timestamp(0, 0), Timestamp(1, 0)) does not require a FETCH stage when
     // the query is covered by an index.
     plan =
         coll.explain("executionStats").find({ts: {$lt: Timestamp(1, 0)}}, {ts: 1, _id: 0}).finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $lt find with project should be a covered query");
 
     // Check that count over [Timestamp(0, 0), Timestamp(1, 0)] is a covered query.
     plan = coll.explain("executionStats").find({ts: {$lte: Timestamp(1, 0)}}).count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan), "ts $lte count should be a covered query");
-    assert.eq(4, getCountFromExecutionStats(plan.executionStats), "ts $lte count should be 4");
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
+           "ts $lte count should be a covered query");
+    assertExplainCount({explainResults: plan, expectedCount: 4});
 
     // Check that find over [Timestamp(0, 0), Timestamp(1, 0)] does not require a FETCH stage when
     // the query is covered by an index.
     plan = coll.explain("executionStats")
                .find({ts: {$lte: Timestamp(1, 0)}}, {ts: 1, _id: 0})
                .finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $lte find with project should be a covered query");
 
     // Check that count over (Timestamp(0, 1), Timestamp(1, 0)) is a covered query.
     plan = coll.explain("executionStats")
                .find({ts: {$gt: Timestamp(0, 1), $lt: Timestamp(1, 0)}})
                .count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gt, $lt count should be a covered query");
-    assert.eq(2, getCountFromExecutionStats(plan.executionStats), "ts $gt, $lt count should be 2");
+    assertExplainCount({explainResults: plan, expectedCount: 2});
 
     // Check that find over (Timestamp(0, 1), Timestamp(1, 0)) does not require a FETCH stage when
     // the query is covered by an index.
     plan = coll.explain("executionStats")
                .find({ts: {$gt: Timestamp(0, 1), $lt: Timestamp(1, 0)}}, {ts: 1, _id: 0})
                .finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gt, $lt find with project should be a covered query");
 
     // Check that count over (Timestamp(0, 1), Timestamp(1, 0)] is a covered query.
     plan = coll.explain("executionStats")
                .find({ts: {$gt: Timestamp(0, 1), $lte: Timestamp(1, 0)}})
                .count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gt, $lte count should be a covered query");
-    assert.eq(3, getCountFromExecutionStats(plan.executionStats), "ts $gt, $lte count should be 3");
+    assertExplainCount({explainResults: plan, expectedCount: 3});
 
     // Check that find over (Timestamp(0, 1), Timestamp(1, 0)] does not require a FETCH stage when
     // the query is covered by an index.
     plan = coll.explain("executionStats")
                .find({ts: {$gt: Timestamp(0, 1), $lte: Timestamp(1, 0)}}, {ts: 1, _id: 0})
                .finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gt, $lte find with project should be a covered query");
 
     // Check that count over [Timestamp(0, 1), Timestamp(1, 0)) is a covered query.
     plan = coll.explain("executionStats")
                .find({ts: {$gte: Timestamp(0, 1), $lt: Timestamp(1, 0)}})
                .count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gte, $lt count should be a covered query");
-    assert.eq(3, getCountFromExecutionStats(plan.executionStats), "ts $gte, $lt count should be 3");
+    assertExplainCount({explainResults: plan, expectedCount: 3});
 
     // Check that find over [Timestamp(0, 1), Timestamp(1, 0)) does not require a FETCH stage when
     // the query is covered by an index.
     plan = coll.explain("executionStats")
                .find({ts: {$gte: Timestamp(0, 1), $lt: Timestamp(1, 0)}}, {ts: 1, _id: 0})
                .finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gte, $lt find with project should be a covered query");
 
     // Check that count over [Timestamp(0, 1), Timestamp(1, 0)] is a covered query.
     plan = coll.explain("executionStats")
                .find({ts: {$gte: Timestamp(0, 1), $lte: Timestamp(1, 0)}})
                .count();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gte, $lte count should be a covered query");
-    assert.eq(
-        4, getCountFromExecutionStats(plan.executionStats), "ts $gte, $lte count should be 4");
+    assertExplainCount({explainResults: plan, expectedCount: 4});
 
     // Check that find over [Timestamp(0, 1), Timestamp(1, 0)] does not require a FETCH stage when
     // the query is covered by an index.
     plan = coll.explain("executionStats")
                .find({ts: {$gte: Timestamp(0, 1), $lte: Timestamp(1, 0)}}, {ts: 1, _id: 0})
                .finish();
-    assert(isIndexOnly(plan.queryPlanner.winningPlan),
+    assert(isIndexOnly(db, plan.queryPlanner.winningPlan),
            "ts $gte, $lte find with project should be a covered query");
 })();

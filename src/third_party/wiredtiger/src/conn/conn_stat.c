@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -80,12 +80,12 @@ __wt_conn_stat_init(WT_SESSION_IMPL *session)
 
 	WT_STAT_SET(session, stats, file_open, conn->open_file_count);
 	WT_STAT_SET(session,
-	    stats, session_cursor_open, conn->open_cursor_count);
+	    stats, cursor_open_count, conn->open_cursor_count);
 	WT_STAT_SET(session, stats, dh_conn_handle_count, conn->dhandle_count);
 	WT_STAT_SET(session,
-	    stats, rec_split_stashed_objects, conn->split_stashed_objects);
+	    stats, rec_split_stashed_objects, conn->stashed_objects);
 	WT_STAT_SET(session,
-	    stats, rec_split_stashed_bytes, conn->split_stashed_bytes);
+	    stats, rec_split_stashed_bytes, conn->stashed_bytes);
 }
 
 /*
@@ -128,8 +128,12 @@ __statlog_config(WT_SESSION_IMPL *session, const char **cfg, bool *runp)
 	*runp = cval.val != 0;
 	conn->stat_usecs = (uint64_t)cval.val * WT_MILLION;
 
+	/*
+	 * Only set the JSON flag when stats are enabled, otherwise setting
+	 * this flag can implicitly enable statistics gathering.
+	 */
 	WT_RET(__wt_config_gets(session, cfg, "statistics_log.json", &cval));
-	if (cval.val != 0)
+	if (cval.val != 0 && WT_STAT_ENABLED(session))
 		FLD_SET(conn->stat_flags, WT_STAT_JSON);
 
 	WT_RET(__wt_config_gets(
@@ -221,6 +225,104 @@ err:	__stat_sources_free(session, &sources);
 }
 
 /*
+ * __statlog_print_header --
+ *	Write the header for statistics when running in JSON mode.
+ */
+static int
+__statlog_print_header(WT_SESSION_IMPL *session)
+{
+	WT_CONNECTION_IMPL *conn;
+
+	conn = S2C(session);
+
+	if (!FLD_ISSET(conn->stat_flags, WT_STAT_JSON))
+		return (0);
+
+	/*
+	 * This flag is required in order to generate correct JSON when printing
+	 * out stats for individual tables. When we are about to print the first
+	 * table's stats we must print out the wiredTigerTables header once
+	 * only and add a correct closing brace when we finish the tables
+	 * section. To do this we maintain a flag variable to note when we have
+	 * printed the first table. Unfortunately, the mechanism which we use
+	 * to print stats for each table does not allow passing of variables
+	 * by reference, this necessitates the use of a variable on the
+	 * connection. The variable is safe as the JSON printing logic is only
+	 * performed by the single threaded stat server.
+	 */
+	conn->stat_json_tables = false;
+	WT_RET(__wt_fprintf(session, conn->stat_fs,
+	    "{\"version\":\"%s\",\"localTime\":\"%s\"",
+	    WIREDTIGER_VERSION_STRING, conn->stat_stamp));
+	return (0);
+}
+
+/*
+ * __statlog_print_table_name --
+ *	Write the header for the wiredTigerTables section of statistics if
+ *	running in JSON mode and the header has not been written this round,
+ *	then print the name of the table.
+ */
+static int
+__statlog_print_table_name(
+    WT_SESSION_IMPL *session, const char *name, bool conn_stats)
+{
+	WT_CONNECTION_IMPL *conn;
+
+	conn = S2C(session);
+
+	if (!FLD_ISSET(conn->stat_flags, WT_STAT_JSON))
+		return (0);
+
+	/*
+	 * If printing the connection stats, write that header and we are done.
+	 */
+	if (conn_stats) {
+		WT_RET(__wt_fprintf(
+		    session, conn->stat_fs, ",\"wiredTiger\":{"));
+		return (0);
+	}
+
+	/*
+	 * If this is the first table we are printing stats for print the header
+	 * for the wiredTigerTables section. Otherwise print a comma as this is
+	 * a subsequent table.
+	 */
+	if (conn->stat_json_tables)
+		WT_RET(__wt_fprintf(session, conn->stat_fs,","));
+	else  {
+		conn->stat_json_tables = true;
+		WT_RET(__wt_fprintf(session,
+		    conn->stat_fs,",\"wiredTigerTables\":{"));
+	}
+	WT_RET(__wt_fprintf(session, conn->stat_fs, "\"%s\":{", name));
+	return (0);
+}
+
+/*
+ * __statlog_print_footer --
+ *	Write the footer for statistics when running in JSON mode.
+ */
+static int
+__statlog_print_footer(WT_SESSION_IMPL *session)
+{
+	WT_CONNECTION_IMPL *conn;
+
+	conn = S2C(session);
+
+	if (!FLD_ISSET(conn->stat_flags, WT_STAT_JSON))
+		return (0);
+
+	/* If we have printed a tables stats, then close that section. */
+	if (conn->stat_json_tables) {
+		WT_RET(__wt_fprintf(session, conn->stat_fs, "}"));
+		conn->stat_json_tables = false;
+	}
+	WT_RET(__wt_fprintf(session, conn->stat_fs, "}\n"));
+	return (0);
+}
+
+/*
  * __statlog_dump --
  *	Dump out handle/connection statistics.
  */
@@ -231,8 +333,8 @@ __statlog_dump(WT_SESSION_IMPL *session, const char *name, bool conn_stats)
 	WT_CURSOR *cursor;
 	WT_DECL_ITEM(tmp);
 	WT_DECL_RET;
-	int64_t val;
 	size_t prefixlen;
+	int64_t val;
 	const char *desc, *endprefix, *valstr, *uri;
 	const char *cfg[] = {
 	    WT_CONFIG_BASE(session, WT_SESSION_open_cursor), NULL };
@@ -264,14 +366,10 @@ __statlog_dump(WT_SESSION_IMPL *session, const char *name, bool conn_stats)
 		goto err;
 	}
 
-	if (FLD_ISSET(conn->stat_flags, WT_STAT_JSON)) {
-		WT_ERR(__wt_fprintf(session, conn->stat_fs,
-		     "{\"version\":\"%s\",\"localTime\":\"%s\"",
-		     WIREDTIGER_VERSION_STRING, conn->stat_stamp));
-		WT_ERR(__wt_fprintf(
-		    session, conn->stat_fs, ",\"wiredTiger\":{"));
-		while ((ret = cursor->next(cursor)) == 0) {
-			WT_ERR(cursor->get_value(cursor, &desc, &valstr, &val));
+	WT_ERR(__statlog_print_table_name(session, name, conn_stats));
+	while ((ret = cursor->next(cursor)) == 0) {
+		WT_ERR(cursor->get_value(cursor, &desc, &valstr, &val));
+		if (FLD_ISSET(conn->stat_flags, WT_STAT_JSON)) {
 			/* Check if we are starting a new section. */
 			endprefix = strchr(desc, ':');
 			prefixlen = WT_PTRDIFF(endprefix, desc);
@@ -291,18 +389,14 @@ __statlog_dump(WT_SESSION_IMPL *session, const char *name, bool conn_stats)
 			    "%s\"%s\":%" PRId64,
 			    groupfirst ? "" : ",", endprefix + 2, val));
 			groupfirst = false;
-		}
-		WT_ERR_NOTFOUND_OK(ret);
-		WT_ERR(__wt_fprintf(session, conn->stat_fs, "}}}\n"));
-	} else {
-		while ((ret = cursor->next(cursor)) == 0) {
-			WT_ERR(cursor->get_value(cursor, &desc, &valstr, &val));
+		} else
 			WT_ERR(__wt_fprintf(session, conn->stat_fs,
 			    "%s %" PRId64 " %s %s\n",
 			    conn->stat_stamp, val, name, desc));
-		}
-		WT_ERR_NOTFOUND_OK(ret);
 	}
+	WT_ERR_NOTFOUND_OK(ret);
+	if (FLD_ISSET(conn->stat_flags, WT_STAT_JSON))
+		WT_ERR(__wt_fprintf(session, conn->stat_fs, "}}"));
 
 err:	__wt_scr_free(session, &tmp);
 	if (cursor != NULL)
@@ -407,36 +501,36 @@ static int
 __statlog_log_one(WT_SESSION_IMPL *session, WT_ITEM *path, WT_ITEM *tmp)
 {
 	struct timespec ts;
-	struct tm *tm, _tm;
+	struct tm localt;
 	WT_CONNECTION_IMPL *conn;
-	WT_FSTREAM *log_stream;
 
 	conn = S2C(session);
 
 	/* Get the current local time of day. */
 	__wt_epoch(session, &ts);
-	tm = localtime_r(&ts.tv_sec, &_tm);
+	WT_RET(__wt_localtime(session, &ts.tv_sec, &localt));
 
 	/* Create the logging path name for this time of day. */
-	if (strftime(tmp->mem, tmp->memsize, conn->stat_path, tm) == 0)
+	if (strftime(tmp->mem, tmp->memsize, conn->stat_path, &localt) == 0)
 		WT_RET_MSG(session, ENOMEM, "strftime path conversion");
 
 	/* If the path has changed, cycle the log file. */
-	if ((log_stream = conn->stat_fs) == NULL ||
+	if (conn->stat_fs == NULL ||
 	    path == NULL || strcmp(tmp->mem, path->mem) != 0) {
 		WT_RET(__wt_fclose(session, &conn->stat_fs));
-		if (path != NULL)
-			(void)strcpy(path->mem, tmp->mem);
 		WT_RET(__wt_fopen(session, tmp->mem,
 		    WT_FS_OPEN_CREATE | WT_FS_OPEN_FIXED, WT_STREAM_APPEND,
-		    &log_stream));
+		    &conn->stat_fs));
+
+		if (path != NULL)
+			WT_RET(__wt_buf_setstr(session, path, tmp->mem));
 	}
-	conn->stat_fs = log_stream;
 
 	/* Create the entry prefix for this time of day. */
-	if (strftime(tmp->mem, tmp->memsize, conn->stat_format, tm) == 0)
+	if (strftime(tmp->mem, tmp->memsize, conn->stat_format, &localt) == 0)
 		WT_RET_MSG(session, ENOMEM, "strftime timestamp conversion");
 	conn->stat_stamp = tmp->mem;
+	WT_RET(__statlog_print_header(session));
 
 	/* Dump the connection statistics. */
 	WT_RET(__statlog_dump(session, conn->home, true));
@@ -459,6 +553,7 @@ __statlog_log_one(WT_SESSION_IMPL *session, WT_ITEM *path, WT_ITEM *tmp)
 	 */
 	if (conn->stat_sources != NULL)
 		WT_RET(__statlog_lsm_apply(session));
+	WT_RET(__statlog_print_footer(session));
 
 	/* Flush. */
 	return (__wt_fflush(session, conn->stat_fs));
@@ -473,8 +568,8 @@ static int
 __statlog_on_close(WT_SESSION_IMPL *session)
 {
 	WT_CONNECTION_IMPL *conn;
-	WT_DECL_RET;
 	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
 
 	conn = S2C(session);
 
@@ -486,6 +581,7 @@ __statlog_on_close(WT_SESSION_IMPL *session)
 		    "Attempt to log statistics while a server is running");
 
 	WT_RET(__wt_scr_alloc(session, strlen(conn->stat_path) + 128, &tmp));
+	WT_ERR(__wt_buf_setstr(session, tmp, ""));
 	WT_ERR(__statlog_log_one(session, NULL, tmp));
 
 err:	__wt_scr_free(session, &tmp);
@@ -528,7 +624,9 @@ __statlog_server(void *arg)
 	 * how we know when to close/re-open the file.
 	 */
 	WT_ERR(__wt_buf_init(session, &path, strlen(conn->stat_path) + 128));
+	WT_ERR(__wt_buf_setstr(session, &path, ""));
 	WT_ERR(__wt_buf_init(session, &tmp, strlen(conn->stat_path) + 128));
+	WT_ERR(__wt_buf_setstr(session, &tmp, ""));
 
 	for (;;) {
 		/* Wait until the next event. */
@@ -645,7 +743,7 @@ __wt_statlog_destroy(WT_SESSION_IMPL *session, bool is_close)
 	F_CLR(conn, WT_CONN_SERVER_STATISTICS);
 	if (conn->stat_tid_set) {
 		__wt_cond_signal(session, conn->stat_cond);
-		WT_TRET(__wt_thread_join(session, conn->stat_tid));
+		WT_TRET(__wt_thread_join(session, &conn->stat_tid));
 		conn->stat_tid_set = false;
 	}
 	__wt_cond_destroy(session, &conn->stat_cond);

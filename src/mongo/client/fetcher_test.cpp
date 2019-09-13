@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -42,6 +44,7 @@ namespace {
 
 using namespace mongo;
 using executor::NetworkInterfaceMock;
+using executor::RemoteCommandRequest;
 using executor::TaskExecutor;
 
 using ResponseStatus = TaskExecutor::ResponseStatus;
@@ -101,11 +104,7 @@ FetcherTest::FetcherTest()
     : status(getDetectableErrorStatus()), cursorId(-1), nextAction(Fetcher::NextAction::kInvalid) {}
 
 Fetcher::CallbackFn FetcherTest::makeCallback() {
-    return stdx::bind(&FetcherTest::_callback,
-                      this,
-                      stdx::placeholders::_1,
-                      stdx::placeholders::_2,
-                      stdx::placeholders::_3);
+    return [this](const auto& x, const auto& y, const auto& z) { return this->_callback(x, y, z); };
 }
 
 void FetcherTest::setUp() {
@@ -117,7 +116,8 @@ void FetcherTest::setUp() {
 }
 
 void FetcherTest::tearDown() {
-    executor::ThreadPoolExecutorTest::tearDown();
+    getExecutor().shutdown();
+    getExecutor().join();
     // Executor may still invoke fetcher's callback before shutting down.
     fetcher.reset();
 }
@@ -204,32 +204,32 @@ TEST_F(FetcherTest, InvalidConstruction) {
 
     // Null executor.
     ASSERT_THROWS_CODE_AND_WHAT(Fetcher(nullptr, source, "db", findCmdObj, unreachableCallback),
-                                UserException,
+                                AssertionException,
                                 ErrorCodes::BadValue,
                                 "task executor cannot be null");
 
     // Empty source.
     ASSERT_THROWS_CODE_AND_WHAT(
         Fetcher(&executor, HostAndPort(), "db", findCmdObj, unreachableCallback),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "source in remote command request cannot be empty");
 
     // Empty database name.
     ASSERT_THROWS_CODE_AND_WHAT(Fetcher(&executor, source, "", findCmdObj, unreachableCallback),
-                                UserException,
+                                AssertionException,
                                 ErrorCodes::BadValue,
                                 "database name in remote command request cannot be empty");
 
     // Empty command object.
     ASSERT_THROWS_CODE_AND_WHAT(Fetcher(&executor, source, "db", BSONObj(), unreachableCallback),
-                                UserException,
+                                AssertionException,
                                 ErrorCodes::BadValue,
                                 "command object in remote command request cannot be empty");
 
     // Callback function cannot be null.
     ASSERT_THROWS_CODE_AND_WHAT(Fetcher(&executor, source, "db", findCmdObj, Fetcher::CallbackFn()),
-                                UserException,
+                                AssertionException,
                                 ErrorCodes::BadValue,
                                 "callback function cannot be null");
 
@@ -244,7 +244,7 @@ TEST_F(FetcherTest, InvalidConstruction) {
                 RemoteCommandRequest::kNoTimeout,
                 RemoteCommandRequest::kNoTimeout,
                 std::unique_ptr<RemoteCommandRetryScheduler::RetryPolicy>()),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue,
         "retry policy cannot be null");
 }
@@ -758,7 +758,7 @@ TEST_F(FetcherTest, CancelDuringCallbackPutsFetcherInShutdown) {
         fetchStatus1 = fetchResult.getStatus();
         fetcher->shutdown();
     };
-    fetcher->schedule();
+    fetcher->schedule().transitional_ignore();
     const BSONObj doc = BSON("_id" << 1);
     processNetworkResponse(BSON("cursor" << BSON("id" << 1LL << "ns"
                                                       << "db.coll"
@@ -1011,13 +1011,9 @@ TEST_F(FetcherTest, ShutdownDuringSecondBatch) {
     const BSONObj doc2 = BSON("_id" << 2);
 
     bool isShutdownCalled = false;
-    callbackHook = stdx::bind(shutdownDuringSecondBatch,
-                              stdx::placeholders::_1,
-                              stdx::placeholders::_2,
-                              stdx::placeholders::_3,
-                              doc2,
-                              &getExecutor(),
-                              &isShutdownCalled);
+    callbackHook = [this, doc2, &isShutdownCalled](const auto& x, const auto& y, const auto& z) {
+        return shutdownDuringSecondBatch(x, y, z, doc2, &this->getExecutor(), &isShutdownCalled);
+    };
 
     processNetworkResponse(BSON("cursor" << BSON("id" << 1LL << "ns"
                                                       << "db.coll"

@@ -1,7 +1,9 @@
 // Check that buildIndexes config option is working
 
 (function() {
-
+    // Skip db hash check because secondary will have different number of indexes due to
+    // buildIndexes=false on the secondary.
+    TestData.skipCheckDBHashes = true;
     var name = "buildIndexes";
     var host = getHostName();
 
@@ -16,7 +18,7 @@
     replTest.initiate(config);
 
     var master = replTest.getPrimary().getDB(name);
-    var slaveConns = replTest.liveNodes.slaves;
+    var slaveConns = replTest._slaves;
     var slave = [];
     for (var i in slaveConns) {
         slaveConns[i].setSlaveOk();

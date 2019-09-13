@@ -45,8 +45,14 @@ load('./jstests/libs/chunk_manipulation_util.js');
     // Ensure a new primary is found promptly
     st.configRS.getPrimary(30000);
 
-    assert.eq(1, mongos.getDB('config').chunks.find({shard: st.shard0.shardName}).itcount());
-    assert.eq(0, mongos.getDB('config').chunks.find({shard: st.shard1.shardName}).itcount());
+    assert.eq(1,
+              mongos.getDB('config')
+                  .chunks.find({ns: 'TestDB.TestColl', shard: st.shard0.shardName})
+                  .itcount());
+    assert.eq(0,
+              mongos.getDB('config')
+                  .chunks.find({ns: 'TestDB.TestColl', shard: st.shard1.shardName})
+                  .itcount());
 
     // At this point, the balancer is in recovery mode. Ensure that stepdown can be done again and
     // the recovery mode interrupted.
@@ -63,37 +69,15 @@ load('./jstests/libs/chunk_manipulation_util.js');
     // Ensure that migration succeeded
     joinMoveChunk();
 
-    assert.eq(0, mongos.getDB('config').chunks.find({shard: st.shard0.shardName}).itcount());
-    assert.eq(1, mongos.getDB('config').chunks.find({shard: st.shard1.shardName}).itcount());
-
-    // migrationCommitError -- tell the shard that the migration cannot be committed because the
-    // collection distlock was lost during the migration because the balancer was interrupted and
-    // the collection could be incompatible now with this migration.
-    assert.commandWorked(st.configRS.getPrimary().getDB("admin").runCommand(
-        {configureFailPoint: 'migrationCommitError', mode: 'alwaysOn'}));
-
-    assert.commandFailedWithCode(
-        mongos.getDB("admin").runCommand(
-            {moveChunk: coll + "", find: {Key: 0}, to: st.shard0.shardName}),
-        ErrorCodes.BalancerLostDistributedLock);
-
-    assert.commandWorked(st.configRS.getPrimary().getDB("admin").runCommand(
-        {configureFailPoint: 'migrationCommitError', mode: 'off'}));
-
-    // migrationCommitVersionError -- tell the shard that the migration cannot be committed
-    // because the collection version epochs do not match, meaning the collection has been dropped
-    // since the migration began, which means the Balancer must have lost the distributed lock for
-    // a time.
-    assert.commandWorked(st.configRS.getPrimary().getDB("admin").runCommand(
-        {configureFailPoint: 'migrationCommitVersionError', mode: 'alwaysOn'}));
-
-    assert.commandFailedWithCode(
-        mongos.getDB("admin").runCommand(
-            {moveChunk: coll + "", find: {Key: 0}, to: st.shard0.shardName}),
-        ErrorCodes.StaleEpoch);
-
-    assert.commandWorked(st.configRS.getPrimary().getDB("admin").runCommand(
-        {configureFailPoint: 'migrationCommitVersionError', mode: 'off'}));
+    assert.eq(0,
+              mongos.getDB('config')
+                  .chunks.find({ns: 'TestDB.TestColl', shard: st.shard0.shardName})
+                  .itcount());
+    assert.eq(1,
+              mongos.getDB('config')
+                  .chunks.find({ns: 'TestDB.TestColl', shard: st.shard1.shardName})
+                  .itcount());
 
     st.stop();
+    MongoRunner.stopMongod(staticMongod);
 })();

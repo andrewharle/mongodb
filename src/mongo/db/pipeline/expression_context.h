@@ -1,34 +1,37 @@
+
 /**
- * Copyright (c) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
 
 #include <boost/intrusive_ptr.hpp>
+#include <boost/optional.hpp>
 #include <memory>
 #include <string>
 #include <vector>
@@ -38,10 +41,16 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/pipeline/aggregation_request.h"
 #include "mongo/db/pipeline/document_comparator.h"
+#include "mongo/db/pipeline/mongo_process_interface.h"
 #include "mongo/db/pipeline/value_comparator.h"
+#include "mongo/db/pipeline/variables.h"
 #include "mongo/db/query/collation/collator_interface.h"
+#include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/query/explain_options.h"
+#include "mongo/db/query/tailable_mode.h"
 #include "mongo/util/intrusive_counter.h"
 #include "mongo/util/string_map.h"
+#include "mongo/util/uuid.h"
 
 namespace mongo {
 
@@ -56,13 +65,53 @@ public:
     };
 
     /**
+     * An RAII type that will temporarily change the ExpressionContext's collator. Resets the
+     * collator to the previous value upon destruction.
+     */
+    class CollatorStash {
+    public:
+        /**
+         * Resets the collator on '_expCtx' to the original collator present at the time this
+         * CollatorStash was constructed.
+         */
+        ~CollatorStash();
+
+    private:
+        /**
+         * Temporarily changes the collator on 'expCtx' to be 'newCollator'. The collator will be
+         * set back to the original value when this CollatorStash is deleted.
+         *
+         * This constructor is private, all CollatorStashes should be created by calling
+         * ExpressionContext::temporarilyChangeCollator().
+         */
+        CollatorStash(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                      std::unique_ptr<CollatorInterface> newCollator);
+
+        friend class ExpressionContext;
+
+        boost::intrusive_ptr<ExpressionContext> _expCtx;
+
+        BSONObj _originalCollation;
+        std::unique_ptr<CollatorInterface> _originalCollatorOwned;
+        const CollatorInterface* _originalCollatorUnowned{nullptr};
+    };
+
+    /**
      * Constructs an ExpressionContext to be used for Pipeline parsing and evaluation.
      * 'resolvedNamespaces' maps collection names (not full namespaces) to ResolvedNamespaces.
      */
     ExpressionContext(OperationContext* opCtx,
                       const AggregationRequest& request,
                       std::unique_ptr<CollatorInterface> collator,
-                      StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces);
+                      std::shared_ptr<MongoProcessInterface> mongoProcessInterface,
+                      StringMap<ExpressionContext::ResolvedNamespace> resolvedNamespaces,
+                      boost::optional<UUID> collUUID);
+
+    /**
+     * Constructs an ExpressionContext to be used for MatchExpression parsing outside of the context
+     * of aggregation.
+     */
+    ExpressionContext(OperationContext* opCtx, const CollatorInterface* collator);
 
     /**
      * Used by a pipeline to check for interrupts so that killOp() works. Throws a UserAssertion if
@@ -70,9 +119,32 @@ public:
      */
     void checkForInterrupt();
 
-    const CollatorInterface* getCollator() const {
-        return _collator.get();
+    /**
+     * Returns true if this is a collectionless aggregation on the specified database.
+     */
+    bool isDBAggregation(StringData dbName) const {
+        return ns.db() == dbName && ns.isCollectionlessAggregateNS();
     }
+
+    /**
+     * Returns true if this is a collectionless aggregation on the 'admin' database.
+     */
+    bool isClusterAggregation() const {
+        return ns.isAdminDB() && ns.isCollectionlessAggregateNS();
+    }
+
+    /**
+     * Returns true if this aggregation is running on a single, specific namespace.
+     */
+    bool isSingleNamespaceAggregation() const {
+        return !ns.isCollectionlessAggregateNS();
+    }
+
+    const CollatorInterface* getCollator() const {
+        return _collator;
+    }
+
+    void setCollator(const CollatorInterface* collator);
 
     const DocumentComparator& getDocumentComparator() const {
         return _documentComparator;
@@ -83,10 +155,20 @@ public:
     }
 
     /**
-     * Returns an ExpressionContext that is identical to 'this' that can be used to execute a
-     * separate aggregation pipeline on 'ns'.
+     * Temporarily resets the collator to be 'newCollator'. Returns a CollatorStash which will reset
+     * the collator back to the old value upon destruction.
      */
-    boost::intrusive_ptr<ExpressionContext> copyWith(NamespaceString ns) const;
+    std::unique_ptr<CollatorStash> temporarilyChangeCollator(
+        std::unique_ptr<CollatorInterface> newCollator);
+
+    /**
+     * Returns an ExpressionContext that is identical to 'this' that can be used to execute a
+     * separate aggregation pipeline on 'ns' with the optional 'uuid'.
+     */
+    boost::intrusive_ptr<ExpressionContext> copyWith(
+        NamespaceString ns,
+        boost::optional<UUID> uuid = boost::none,
+        boost::optional<std::unique_ptr<CollatorInterface>> collator = boost::none) const;
 
     /**
      * Returns the ResolvedNamespace corresponding to 'nss'. It is an error to call this method on a
@@ -98,39 +180,99 @@ public:
         return it->second;
     };
 
-    bool isExplain = false;
-    bool inShard = false;
-    bool inRouter = false;
-    bool extSortAllowed = false;
+    /**
+     * Convenience call that returns true if the tailableMode indicates a tailable and awaitData
+     * query.
+     */
+    bool isTailableAwaitData() const {
+        return tailableMode == TailableModeEnum::kTailableAndAwaitData;
+    }
+
+    /**
+     * Sets the resolved definition for an involved namespace.
+     */
+    void setResolvedNamespace_forTest(const NamespaceString& nss,
+                                      ResolvedNamespace resolvedNamespace) {
+        _resolvedNamespaces[nss.coll()] = std::move(resolvedNamespace);
+    }
+
+    // The explain verbosity requested by the user, or boost::none if no explain was requested.
+    boost::optional<ExplainOptions::Verbosity> explain;
+
+    // The comment provided by the user, or the empty string if no comment was provided.
+    std::string comment;
+
+    bool fromMongos = false;
+    bool needsMerge = false;
+    bool mergeByPBRT = false;
+    bool inMongos = false;
+    bool allowDiskUse = false;
     bool bypassDocumentValidation = false;
+    bool inMultiDocumentTransaction = false;
 
     NamespaceString ns;
+
+    // If known, the UUID of the execution namespace for this aggregation command.
+    boost::optional<UUID> uuid;
+
     std::string tempDir;  // Defaults to empty to prevent external sorting in mongos.
 
     OperationContext* opCtx;
+
+    // An interface for accessing information or performing operations that have different
+    // implementations on mongod and mongos, or that only make sense on one of the two.
+    // Additionally, putting some of this functionality behind an interface prevents aggregation
+    // libraries from having large numbers of dependencies. This pointer is always non-null.
+    std::shared_ptr<MongoProcessInterface> mongoProcessInterface;
+
+    const TimeZoneDatabase* timeZoneDatabase;
 
     // Collation requested by the user for this pipeline. Empty if the user did not request a
     // collation.
     BSONObj collation;
 
+    Variables variables;
+    VariablesParseState variablesParseState;
+
+    TailableModeEnum tailableMode = TailableModeEnum::kNormal;
+
+    // For a changeStream aggregation, this is the starting postBatchResumeToken. Empty otherwise.
+    BSONObj initialPostBatchResumeToken;
+
+    // Tracks the depth of nested aggregation sub-pipelines. Used to enforce depth limits.
+    size_t subPipelineDepth = 0;
+
+    // If set, this will disallow use of features introduced in versions above the provided version.
+    boost::optional<ServerGlobalParams::FeatureCompatibility::Version>
+        maxFeatureCompatibilityVersion;
+
 protected:
     static const int kInterruptCheckPeriod = 128;
 
-    /**
-     * Should only be used by 'ExpressionContextForTest'.
-     */
-    ExpressionContext() = default;
+    ExpressionContext(NamespaceString nss,
+                      std::shared_ptr<MongoProcessInterface>,
+                      const TimeZoneDatabase* tzDb);
 
     /**
-     * Sets '_collator' and resets '_documentComparator' and '_valueComparator'.
+     * Sets '_ownedCollator' and resets '_collator', 'documentComparator' and 'valueComparator'.
      *
-     * Use with caution - it is illegal to change the collation once a Pipeline has been parsed with
-     * this ExpressionContext.
+     * Use with caution - '_ownedCollator' is used in the context of a Pipeline, and it is illegal
+     * to change the collation once a Pipeline has been parsed with this ExpressionContext.
      */
-    void setCollator(std::unique_ptr<CollatorInterface> collator);
+    void setCollator(std::unique_ptr<CollatorInterface> collator) {
+        _ownedCollator = std::move(collator);
+        setCollator(_ownedCollator.get());
+    }
 
-    // Collator used for comparisons.
-    std::unique_ptr<CollatorInterface> _collator;
+    friend class CollatorStash;
+
+    // Collator used for comparisons. This is owned in the context of a Pipeline.
+    // TODO SERVER-31294: Move ownership of an aggregation's collator elsewhere.
+    std::unique_ptr<CollatorInterface> _ownedCollator;
+
+    // Collator used for comparisons. If '_ownedCollator' is non-null, then this must point to the
+    // same collator object.
+    const CollatorInterface* _collator = nullptr;
 
     // Used for all comparisons of Document/Value during execution of the aggregation operation.
     // Must not be changed after parsing a Pipeline with this ExpressionContext.

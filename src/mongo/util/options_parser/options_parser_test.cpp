@@ -1,35 +1,42 @@
-/* Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
+#include <array>
+#include <boost/filesystem.hpp>
+#include <fstream>
 #include <map>
 #include <ostream>
 #include <sstream>
 
 #include "mongo/bson/util/builder.h"
+#include "mongo/unittest/temp_dir.h"
 #include "mongo/unittest/unittest.h"
 #include "mongo/util/options_parser/constraints.h"
 #include "mongo/util/options_parser/environment.h"
@@ -302,7 +309,7 @@ TEST(Parsing, SubSection) {
     moe::OptionSection subSection("Section Name");
 
     subSection.addOptionChaining("port", "port", moe::Int, "Port");
-    testOpts.addSection(subSection);
+    testOpts.addSection(subSection).transitional_ignore();
 
     std::vector<std::string> argv;
     argv.push_back("binaryname");
@@ -1971,6 +1978,64 @@ TEST(ConfigFromFilesystem, Empty) {
     ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
 }
 
+TEST(ConfigFromFilesystem, NullByte) {
+
+    moe::OptionsParser parser;
+    moe::Environment environment;
+
+    moe::OptionSection testOpts;
+    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back(TEST_CONFIG_PATH("nullByte.conf"));
+    std::map<std::string, std::string> env_map;
+
+    moe::Value value;
+    ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
+}
+
+TEST(ConfigFromFilesystem, NullSubDir) {
+
+    moe::OptionsParser parser;
+    moe::Environment environment;
+
+    moe::OptionSection testOpts;
+    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining("storage.dbPath", "dbPath", moe::String, "path");
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back(TEST_CONFIG_PATH("dirNullByte.conf"));
+    std::map<std::string, std::string> env_map;
+
+    moe::Value value;
+    ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
+}
+
+
+TEST(ConfigFromFilesystem, NullTerminated) {
+
+    moe::OptionsParser parser;
+    moe::Environment environment;
+
+    moe::OptionSection testOpts;
+    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining("storage.dbPath", "dbPath", moe::String, "path");
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back(TEST_CONFIG_PATH("endStringNull.conf"));
+    std::map<std::string, std::string> env_map;
+
+    moe::Value value;
+    ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
+}
+
 TEST(JSONConfigFile, ComposingStringVector) {
     OptionsParserTester parser;
     moe::Environment environment;
@@ -2265,7 +2330,7 @@ TEST(LegacyInterface, BadType) {
     try {
         port = environment["port"].as<std::string>();
         FAIL("Expected exception trying to convert int to type string");
-    } catch (std::exception& e) {
+    } catch (std::exception&) {
     }
 }
 
@@ -2723,9 +2788,6 @@ TEST(ChainingInterface, PositionalHoleInRange) {
     argv.push_back("binaryname");
     std::map<std::string, std::string> env_map;
 
-    moe::Value value;
-    std::vector<std::string>::iterator positionalit;
-
     ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
 }
 
@@ -2743,9 +2805,6 @@ TEST(ChainingInterface, PositionalOverlappingRange) {
     std::vector<std::string> argv;
     argv.push_back("binaryname");
     std::map<std::string, std::string> env_map;
-
-    moe::Value value;
-    std::vector<std::string>::iterator positionalit;
 
     ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
 }
@@ -2765,9 +2824,6 @@ TEST(ChainingInterface, PositionalOverlappingRangeInfinite) {
     argv.push_back("binaryname");
     std::map<std::string, std::string> env_map;
 
-    moe::Value value;
-    std::vector<std::string>::iterator positionalit;
-
     ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
 }
 
@@ -2785,9 +2841,6 @@ TEST(ChainingInterface, PositionalMultipleInfinite) {
     std::vector<std::string> argv;
     argv.push_back("binaryname");
     std::map<std::string, std::string> env_map;
-
-    moe::Value value;
-    std::vector<std::string>::iterator positionalit;
 
     ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
 }
@@ -4096,7 +4149,7 @@ TEST(OptionCount, Basic) {
     moe::OptionSection subSection("Section Name");
     subSection.addOptionChaining("port", "port", moe::Int, "Port")
         .setSources(moe::SourceYAMLConfig);
-    testOpts.addSection(subSection);
+    testOpts.addSection(subSection).transitional_ignore();
 
     int numOptions;
     ASSERT_OK(testOpts.countOptions(&numOptions, true /*visibleOnly*/, moe::SourceCommandLine));
@@ -4572,5 +4625,75 @@ TEST(NumericalBaseParsing, YAMLConfigFile) {
     ASSERT_OK(value.get(&unsignedVal));
     ASSERT_EQUALS(unsignedVal, 0x10U);
 }
+
+void TestFile(std::vector<unsigned char> contents, bool valid) {
+    mongo::unittest::TempDir tempdir("options_testpath");
+    boost::filesystem::path p(tempdir.path());
+    p /= "config.yaml";
+
+    {
+        std::ofstream ofs(p.generic_string(), std::ios::binary);
+        ofs.write(reinterpret_cast<char*>(contents.data()), contents.size());
+    }
+
+    moe::OptionsParser parser;
+    moe::Environment environment;
+
+    moe::OptionSection testOpts;
+    testOpts.addOptionChaining("config", "config", moe::String, "Config file to parse");
+    testOpts.addOptionChaining("port", "port", moe::Int, "Port");
+
+    std::vector<std::string> argv;
+    argv.push_back("binaryname");
+    argv.push_back("--config");
+    argv.push_back(p.generic_string());
+    std::map<std::string, std::string> env_map;
+
+    if (valid) {
+        ASSERT_OK(parser.run(testOpts, argv, env_map, &environment));
+
+        moe::Value value;
+        ASSERT_OK(environment.get(moe::Key("port"), &value));
+        int port;
+        ASSERT_OK(value.get(&port));
+        ASSERT_EQUALS(port, 1234);
+    } else {
+        ASSERT_NOT_OK(parser.run(testOpts, argv, env_map, &environment));
+    }
+}
+
+#if defined(_WIN32)
+// Positive: Validate a UTF-16 file with a BOM can be parsed
+TEST(YAMLConfigFile, UTF16WithBOMFile) {
+    // This array represents a file with a UTF-16 LE BOM and the contents:
+    // port: 1234
+    // <blank line>
+    std::vector<unsigned char> data{0xff, 0xfe, 0x70, 0x00, 0x6f, 0x00, 0x72, 0x00, 0x74,
+                                    0x00, 0x3a, 0x00, 0x20, 0x00, 0x31, 0x00, 0x32, 0x00,
+                                    0x33, 0x00, 0x34, 0x00, 0x0d, 0x00, 0x0a, 0x00};
+    TestFile(data, true);
+}
+
+// Negative: Validate a UTF-16 file without a BOM cannot be parsed
+TEST(YAMLConfigFile, UTF16WithoutBOMFile) {
+    // This array represents a file with a UTF-16 with a BOM and the contents:
+    // port: 1234
+    // <blank line>
+    std::vector<unsigned char> data{0x70, 0x00, 0x6f, 0x00, 0x72, 0x00, 0x74, 0x00,
+                                    0x3a, 0x00, 0x20, 0x00, 0x31, 0x00, 0x32, 0x00,
+                                    0x33, 0x00, 0x34, 0x00, 0x0d, 0x00, 0x0a, 0x00};
+    TestFile(data, false);
+}
+
+// Positive: Validate a UTF-8 file with a BOM can be parsed
+TEST(YAMLConfigFile, UTF8WithBOMFile) {
+    // This array represents a file with a UTF-8 BOM and the contents:
+    // port: 1234
+    // <blank line>
+    std::vector<unsigned char> data{
+        0xef, 0xbb, 0xbf, 0x70, 0x6f, 0x72, 0x74, 0x3a, 0x20, 0x31, 0x32, 0x33, 0x34, 0x0d, 0x0a};
+    TestFile(data, true);
+}
+#endif
 
 }  // unnamed namespace

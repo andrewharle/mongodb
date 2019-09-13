@@ -4,6 +4,8 @@ Import("env")
 Import("has_option")
 Import("debugBuild")
 
+env = env.Clone()
+
 files = [
     'src/base/dynamic_annotations.c',
     'src/base/elf_mem_image.cc',
@@ -84,7 +86,9 @@ env = conf.Finish()
 
 env.Append(CPPPATH=["build_" + env["TARGET_OS"] + "_" + env["TARGET_ARCH"]])
 
-env.Append( CPPDEFINES=[ "NO_TCMALLOC_SAMPLES", "NO_HEAP_CHECK"] )
+env.Append(
+    CPPDEFINES=["NO_HEAP_CHECK"],
+)
 
 # The build system doesn't define NDEBUG globally for historical reasons, however, TCMalloc
 # expects that NDEBUG is used to select between preferring the mmap or the sbrk allocator. For
@@ -94,6 +98,15 @@ env.Append( CPPDEFINES=[ "NO_TCMALLOC_SAMPLES", "NO_HEAP_CHECK"] )
 if not debugBuild:
     env.Append( CPPDEFINES=["NDEBUG"] )
 
+# For debug builds we want to capture stacks during (de)allocations,
+# but we don't want to pay that cost for release builds. For non-debug
+# builds we use NO_TCMALLOC_SAMPLES to disable the stack trace
+# collection. For debug builds we enable stack capture, but only on
+# intel targets, since tcmalloc's unwinder is very slow on other
+# platforms (see SERVER-28502).
+if (not debugBuild) or (not env['TARGET_ARCH'] in ['x86_64', 'i386']):
+    env.Append(CPPDEFINES=["NO_TCMALLOC_SAMPLES"])
+
 env.Prepend( CPPPATH=["src/"] )
 
 def removeIfPresent(lst, item):
@@ -102,7 +115,7 @@ def removeIfPresent(lst, item):
     except ValueError:
         pass
 
-for to_remove in ['-Werror', "-Wsign-compare","-Wall"]:
+for to_remove in ['-Werror', "-Wsign-compare","-Wall","-Werror=unused-result"]:
     removeIfPresent(env['CCFLAGS'], to_remove)
 
 # GCC on PowerPC under C++11 mode does not define __linux which gperftools depends on

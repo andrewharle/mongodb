@@ -2,13 +2,17 @@
  * Tests various update scenarios on capped collections:
  *  -- SERVER-20529: Ensure capped document sizes do not change
  *  -- SERVER-11983: Don't create _id field on capped updates
+ * @tags: [
+ *   requires_capped,
+ *   uses_testing_only_commands,
+ * ]
  */
 (function() {
     'use strict';
-    var t = db.cannot_change_capped_size;
+    var t = db.getSiblingDB("local").cannot_change_capped_size;
     t.drop();
     assert.commandWorked(
-        db.createCollection(t.getName(), {capped: true, size: 1024, autoIndexId: false}));
+        t.getDB().createCollection(t.getName(), {capped: true, size: 1024, autoIndexId: false}));
     assert.eq(0, t.getIndexes().length, "the capped collection has indexes");
 
     for (var j = 1; j <= 10; j++) {

@@ -44,9 +44,9 @@
 
     // Now we're going to shut down all nodes
     var mId = replTest.getNodeId(master);
-    var s1 = replTest.liveNodes.slaves[0];
+    var s1 = replTest._slaves[0];
     var s1Id = replTest.getNodeId(s1);
-    var s2 = replTest.liveNodes.slaves[1];
+    var s2 = replTest._slaves[1];
     var s2Id = replTest.getNodeId(s2);
 
     replTest.stop(s1Id);
@@ -66,4 +66,5 @@
     replTest.awaitSecondaryNodes();
     var config2 = master.getDB("local").system.replset.findOne();
     compare_configs(config1, config2);
+    replTest.stopSet();
 }());

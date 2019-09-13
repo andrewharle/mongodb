@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -22,8 +22,9 @@ __async_op_dequeue(WT_CONNECTION_IMPL *conn, WT_SESSION_IMPL *session,
 	uint64_t sleep_usec;
 	uint32_t tries;
 
-	async = conn->async;
 	*op = NULL;
+
+	async = conn->async;
 	/*
 	 * Wait for work to do.  Work is available when async->head moves.
 	 * Then grab the slot containing the work.  If we lose, try again.
@@ -57,7 +58,6 @@ retry:
 			return (0);
 		if (!F_ISSET(conn, WT_CONN_SERVER_ASYNC))
 			return (0);
-		WT_RET(WT_SESSION_CHECK_PANIC(session));
 		WT_ORDERED_READ(last_consume, async->alloc_tail);
 	}
 	if (async->flush_state == WT_ASYNC_FLUSHING)
@@ -106,8 +106,10 @@ static void
 __async_flush_wait(WT_SESSION_IMPL *session, WT_ASYNC *async, uint64_t my_gen)
 {
 	while (async->flush_state == WT_ASYNC_FLUSHING &&
-	    async->flush_gen == my_gen)
+	    async->flush_gen == my_gen) {
 		__wt_cond_wait(session, async->flush_cond, 10000, NULL);
+		WT_BARRIER();
+	}
 }
 
 /*
@@ -126,8 +128,9 @@ __async_worker_cursor(WT_SESSION_IMPL *session, WT_ASYNC_OP_IMPL *op,
 	WT_DECL_RET;
 	WT_SESSION *wt_session;
 
-	wt_session = (WT_SESSION *)session;
 	*cursorp = NULL;
+
+	wt_session = (WT_SESSION *)session;
 	/*
 	 * Compact doesn't need a cursor.
 	 */
@@ -216,7 +219,7 @@ __async_worker_execop(WT_SESSION_IMPL *session, WT_ASYNC_OP_IMPL *op,
 			break;
 		case WT_AOP_NONE:
 			WT_RET_MSG(session, EINVAL,
-			    "Unknown async optype %d", op->optype);
+			    "Unknown async optype %d", (int)op->optype);
 	}
 	return (0);
 }
@@ -282,7 +285,7 @@ WT_THREAD_RET
 __wt_async_worker(void *arg)
 {
 	WT_ASYNC *async;
-	WT_ASYNC_CURSOR *ac, *acnext;
+	WT_ASYNC_CURSOR *ac;
 	WT_ASYNC_OP_IMPL *op;
 	WT_ASYNC_WORKER_STATE worker;
 	WT_CONNECTION_IMPL *conn;
@@ -341,12 +344,10 @@ err:		WT_PANIC_MSG(session, ret, "async worker error");
 	 * Worker thread cleanup, close our cached cursors and free all the
 	 * WT_ASYNC_CURSOR structures.
 	 */
-	ac = TAILQ_FIRST(&worker.cursorqh);
-	while (ac != NULL) {
-		acnext = TAILQ_NEXT(ac, q);
+	while ((ac = TAILQ_FIRST(&worker.cursorqh)) != NULL) {
+		TAILQ_REMOVE(&worker.cursorqh, ac, q);
 		WT_TRET(ac->c->close(ac->c));
 		__wt_free(session, ac);
-		ac = acnext;
 	}
 	return (WT_THREAD_RET_VALUE);
 }

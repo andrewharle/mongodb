@@ -5,6 +5,10 @@
 //   # from the "system.profile" collection. The former operation must be routed to the primary in
 //   # a replica set, whereas the latter may be routed to a secondary.
 //   assumes_read_preference_unchanged,
+//   does_not_support_stepdowns,
+//   requires_getmore,
+//   requires_capped,
+//   requires_profiling,
 // ]
 
 var testDB = db.getSiblingDB("geo_s2cursorlimitskip");

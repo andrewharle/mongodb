@@ -1,10 +1,12 @@
+// Cannot implicitly shard accessed collections because of following errmsg: A single
+// update/delete on a sharded collection must contain an exact match on _id or contain the shard
+// key.
+// @tags: [assumes_unsharded_collection]
+
 /**
  * Tests that using the $set update modifier to change only the type of a field will actually update
  * the document, including any relevant indices.
  */
-
-load("jstests/libs/analyze_plan.js");  // For 'isIndexOnly'.
-
 (function() {
     "use strict";
 

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,11 +34,13 @@
 
 #include "mongo/db/exec/subplan.h"
 
+#include <memory>
+#include <vector>
+
 #include "mongo/client/dbclientinterface.h"
 #include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/matcher/extensions_callback_real.h"
-#include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/plan_executor.h"
 #include "mongo/db/query/planner_access.h"
 #include "mongo/db/query/planner_analysis.h"
@@ -46,6 +50,7 @@
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 #include "mongo/util/scopeguard.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 
 namespace mongo {
 
@@ -56,40 +61,21 @@ using stdx::make_unique;
 
 const char* SubplanStage::kStageType = "SUBPLAN";
 
-SubplanStage::SubplanStage(OperationContext* txn,
+SubplanStage::SubplanStage(OperationContext* opCtx,
                            Collection* collection,
                            WorkingSet* ws,
                            const QueryPlannerParams& params,
                            CanonicalQuery* cq)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _ws(ws),
       _plannerParams(params),
       _query(cq) {
     invariant(_collection);
+    invariant(_query->root()->matchType() == MatchExpression::OR);
+    invariant(_query->root()->numChildren(),
+              "Cannot use a SUBPLAN stage for an $or with no children");
 }
-
-namespace {
-
-/**
- * Returns true if 'expr' is an AND that contains a single OR child.
- */
-bool isContainedOr(const MatchExpression* expr) {
-    if (MatchExpression::AND != expr->matchType()) {
-        return false;
-    }
-
-    size_t numOrs = 0;
-    for (size_t i = 0; i < expr->numChildren(); ++i) {
-        if (MatchExpression::OR == expr->getChild(i)->matchType()) {
-            ++numOrs;
-        }
-    }
-
-    return (numOrs == 1U);
-}
-
-}  // namespace
 
 bool SubplanStage::canUseSubplanning(const CanonicalQuery& query) {
     const QueryRequest& qr = query.getQueryRequest();
@@ -117,77 +103,27 @@ bool SubplanStage::canUseSubplanning(const CanonicalQuery& query) {
         return false;
     }
 
-    // Snapshot is really a hint.
-    if (query.getQueryRequest().isSnapshot()) {
-        return false;
-    }
-
-    // TODO: For now we only allow rooted OR. We should consider also allowing contained OR that
-    // does not have a TEXT or GEO_NEAR node.
-    return MatchExpression::OR == expr->matchType();
-}
-
-std::unique_ptr<MatchExpression> SubplanStage::rewriteToRootedOr(
-    std::unique_ptr<MatchExpression> root) {
-    dassert(isContainedOr(root.get()));
-
-    // Detach the OR from the root.
-    std::vector<MatchExpression*>& rootChildren = *root->getChildVector();
-    std::unique_ptr<MatchExpression> orChild;
-    for (size_t i = 0; i < rootChildren.size(); ++i) {
-        if (MatchExpression::OR == rootChildren[i]->matchType()) {
-            orChild.reset(rootChildren[i]);
-            rootChildren.erase(rootChildren.begin() + i);
-            break;
-        }
-    }
-
-    // We should have found an OR, and the OR should have at least 2 children.
-    invariant(orChild);
-    invariant(orChild->getChildVector());
-    invariant(orChild->getChildVector()->size() > 1U);
-
-    // AND the existing root with each OR child.
-    std::vector<MatchExpression*>& orChildren = *orChild->getChildVector();
-    for (size_t i = 0; i < orChildren.size(); ++i) {
-        std::unique_ptr<AndMatchExpression> ama = stdx::make_unique<AndMatchExpression>();
-        ama->add(orChildren[i]);
-        ama->add(root->shallowClone().release());
-        orChildren[i] = ama.release();
-    }
-
-    // Normalize and sort the resulting match expression.
-    orChild = std::unique_ptr<MatchExpression>(CanonicalQuery::normalizeTree(orChild.release()));
-    CanonicalQuery::sortTree(orChild.get());
-
-    return orChild;
+    // We can only subplan rooted $or queries, and only if they have at least one clause.
+    return MatchExpression::OR == expr->matchType() && expr->numChildren() > 0;
 }
 
 Status SubplanStage::planSubqueries() {
     _orExpression = _query->root()->shallowClone();
-    if (isContainedOr(_orExpression.get())) {
-        _orExpression = rewriteToRootedOr(std::move(_orExpression));
-        invariant(CanonicalQuery::isValid(_orExpression.get(), _query->getQueryRequest()).isOK());
-    }
-
     for (size_t i = 0; i < _plannerParams.indices.size(); ++i) {
         const IndexEntry& ie = _plannerParams.indices[i];
         _indexMap[ie.name] = i;
         LOG(5) << "Subplanner: index " << i << " is " << ie;
     }
 
-    const ExtensionsCallbackReal extensionsCallback(getOpCtx(), &_collection->ns());
-
     for (size_t i = 0; i < _orExpression->numChildren(); ++i) {
         // We need a place to shove the results from planning this branch.
-        _branchResults.push_back(new BranchPlanningResult());
-        BranchPlanningResult* branchResult = _branchResults.back();
+        _branchResults.push_back(stdx::make_unique<BranchPlanningResult>());
+        BranchPlanningResult* branchResult = _branchResults.back().get();
 
         MatchExpression* orChild = _orExpression->getChild(i);
 
         // Turn the i-th child into its own query.
-        auto statusWithCQ =
-            CanonicalQuery::canonicalize(getOpCtx(), *_query, orChild, extensionsCallback);
+        auto statusWithCQ = CanonicalQuery::canonicalize(getOpCtx(), *_query, orChild);
         if (!statusWithCQ.isOK()) {
             mongoutils::str::stream ss;
             ss << "Can't canonicalize subchild " << orChild->toString() << " "
@@ -216,16 +152,16 @@ Status SubplanStage::planSubqueries() {
 
             // We don't set NO_TABLE_SCAN because peeking at the cache data will keep us from
             // considering any plan that's a collscan.
-            Status status = QueryPlanner::plan(*branchResult->canonicalQuery,
-                                               _plannerParams,
-                                               &branchResult->solutions.mutableVector());
-
-            if (!status.isOK()) {
+            invariant(branchResult->solutions.empty());
+            auto solutions = QueryPlanner::plan(*branchResult->canonicalQuery, _plannerParams);
+            if (!solutions.isOK()) {
                 mongoutils::str::stream ss;
                 ss << "Can't plan for subchild " << branchResult->canonicalQuery->toString() << " "
-                   << status.reason();
+                   << solutions.getStatus().reason();
                 return Status(ErrorCodes::BadValue, ss);
             }
+            branchResult->solutions = std::move(solutions.getValue());
+
             LOG(5) << "Subplanner: got " << branchResult->solutions.size() << " solutions";
 
             if (0 == branchResult->solutions.size()) {
@@ -290,7 +226,7 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
 
     for (size_t i = 0; i < _orExpression->numChildren(); ++i) {
         MatchExpression* orChild = _orExpression->getChild(i);
-        BranchPlanningResult* branchResult = _branchResults[i];
+        BranchPlanningResult* branchResult = _branchResults[i].get();
 
         if (branchResult->cachedSolution.get()) {
             // We can get the index tags we need out of the cache.
@@ -300,7 +236,7 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
                 return tagStatus;
             }
         } else if (1 == branchResult->solutions.size()) {
-            QuerySolution* soln = branchResult->solutions.front();
+            QuerySolution* soln = branchResult->solutions.front().get();
             Status tagStatus = tagOrChildAccordingToCache(
                 cacheData.get(), soln->cacheData.get(), orChild, _indexMap);
             if (!tagStatus.isOK()) {
@@ -341,8 +277,8 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
                                               _ws,
                                               &nextPlanRoot));
 
-                // Takes ownership of solution with index 'ix' and 'nextPlanRoot'.
-                multiPlanStage->addPlan(branchResult->solutions.releaseAt(ix), nextPlanRoot, _ws);
+                // Takes ownership of 'nextPlanRoot'.
+                multiPlanStage->addPlan(std::move(branchResult->solutions[ix]), nextPlanRoot, _ws);
             }
 
             Status planSelectStat = multiPlanStage->pickBestPlan(yieldPolicy);
@@ -388,13 +324,13 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
     }
 
     // Must do this before using the planner functionality.
-    sortUsingTags(_orExpression.get());
+    prepareForAccessPlanning(_orExpression.get());
 
     // Use the cached index assignments to build solnRoot. Takes ownership of '_orExpression'.
-    QuerySolutionNode* solnRoot = QueryPlannerAccess::buildIndexedDataAccess(
-        *_query, _orExpression.release(), false, _plannerParams.indices, _plannerParams);
+    std::unique_ptr<QuerySolutionNode> solnRoot(QueryPlannerAccess::buildIndexedDataAccess(
+        *_query, std::move(_orExpression), _plannerParams.indices, _plannerParams));
 
-    if (NULL == solnRoot) {
+    if (!solnRoot) {
         mongoutils::str::stream ss;
         ss << "Failed to build indexed data path for subplanned query\n";
         return Status(ErrorCodes::BadValue, ss);
@@ -403,8 +339,8 @@ Status SubplanStage::choosePlanForSubqueries(PlanYieldPolicy* yieldPolicy) {
     LOG(5) << "Subplanner: fully tagged tree is " << redact(solnRoot->toString());
 
     // Takes ownership of 'solnRoot'
-    _compositeSolution.reset(
-        QueryPlannerAnalysis::analyzeDataAccess(*_query, _plannerParams, solnRoot));
+    _compositeSolution =
+        QueryPlannerAnalysis::analyzeDataAccess(*_query, _plannerParams, std::move(solnRoot));
 
     if (NULL == _compositeSolution.get()) {
         mongoutils::str::stream ss;
@@ -431,15 +367,14 @@ Status SubplanStage::choosePlanWholeQuery(PlanYieldPolicy* yieldPolicy) {
     _ws->clear();
 
     // Use the query planning module to plan the whole query.
-    std::vector<QuerySolution*> rawSolutions;
-    Status status = QueryPlanner::plan(*_query, _plannerParams, &rawSolutions);
-    if (!status.isOK()) {
+    auto statusWithSolutions = QueryPlanner::plan(*_query, _plannerParams);
+    if (!statusWithSolutions.isOK()) {
         return Status(ErrorCodes::BadValue,
                       "error processing query: " + _query->toString() +
-                          " planner returned error: " + status.reason());
+                          " planner returned error: " + statusWithSolutions.getStatus().reason());
     }
 
-    OwnedPointerVector<QuerySolution> solutions(rawSolutions);
+    auto solutions = std::move(statusWithSolutions.getValue());
 
     // We cannot figure out how to answer the query.  Perhaps it requires an index
     // we do not have?
@@ -457,7 +392,8 @@ Status SubplanStage::choosePlanWholeQuery(PlanYieldPolicy* yieldPolicy) {
         _children.emplace_back(root);
 
         // This SubplanStage takes ownership of the query solution.
-        _compositeSolution.reset(solutions.popAndReleaseBack());
+        _compositeSolution = std::move(solutions.back());
+        solutions.pop_back();
 
         return Status::OK();
     } else {
@@ -477,8 +413,8 @@ Status SubplanStage::choosePlanWholeQuery(PlanYieldPolicy* yieldPolicy) {
             verify(StageBuilder::build(
                 getOpCtx(), _collection, *_query, *solutions[ix], _ws, &nextPlanRoot));
 
-            // Takes ownership of 'solutions[ix]' and 'nextPlanRoot'.
-            multiPlanStage->addPlan(solutions.releaseAt(ix), nextPlanRoot, _ws);
+            // Takes ownership of 'nextPlanRoot'.
+            multiPlanStage->addPlan(std::move(solutions[ix]), nextPlanRoot, _ws);
         }
 
         // Delegate the the MultiPlanStage's plan selection facility.
@@ -499,11 +435,6 @@ Status SubplanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
     // Plan each branch of the $or.
     Status subplanningStatus = planSubqueries();
     if (!subplanningStatus.isOK()) {
-        if (subplanningStatus == ErrorCodes::QueryPlanKilled) {
-            // Query planning cannot continue if the plan for one of the subqueries was killed
-            // because the collection or a candidate index may have been dropped.
-            return subplanningStatus;
-        }
         return choosePlanWholeQuery(yieldPolicy);
     }
 
@@ -511,9 +442,11 @@ Status SubplanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
     // the overall winning plan from the resulting index tags.
     Status subplanSelectStat = choosePlanForSubqueries(yieldPolicy);
     if (!subplanSelectStat.isOK()) {
-        if (subplanSelectStat == ErrorCodes::QueryPlanKilled) {
-            // Query planning cannot continue if the plan was killed because the collection or a
-            // candidate index may have been dropped.
+        if (subplanSelectStat == ErrorCodes::QueryPlanKilled ||
+            subplanSelectStat == ErrorCodes::MaxTimeMSExpired) {
+            // Query planning cannot continue if the plan for one of the subqueries was killed
+            // because the collection or a candidate index may have been dropped, or if we've
+            // exceeded the operation's time limit.
             return subplanSelectStat;
         }
         return choosePlanWholeQuery(yieldPolicy);

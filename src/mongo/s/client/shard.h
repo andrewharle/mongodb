@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -33,9 +35,11 @@
 #include "mongo/bson/bsonobj.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/read_concern_args.h"
+#include "mongo/executor/remote_command_response.h"
 #include "mongo/s/shard_id.h"
 
 namespace mongo {
@@ -52,14 +56,16 @@ class RemoteCommandTargeter;
 class Shard {
 public:
     struct CommandResponse {
-        CommandResponse(BSONObj _response,
-                        BSONObj _metadata,
-                        Status _commandStatus,
-                        Status _writeConcernStatus)
-            : response(std::move(_response)),
-              metadata(std::move(_metadata)),
-              commandStatus(std::move(_commandStatus)),
-              writeConcernStatus(std::move(_writeConcernStatus)) {}
+        CommandResponse(boost::optional<HostAndPort> hostAndPort,
+                        BSONObj response,
+                        BSONObj metadata,
+                        Status commandStatus,
+                        Status writeConcernStatus)
+            : hostAndPort(std::move(hostAndPort)),
+              response(std::move(response)),
+              metadata(std::move(metadata)),
+              commandStatus(std::move(commandStatus)),
+              writeConcernStatus(std::move(writeConcernStatus)) {}
 
         /**
          * Takes the response from running a batch write command and writes the appropriate response
@@ -68,6 +74,12 @@ public:
         static Status processBatchWriteResponse(StatusWith<CommandResponse> response,
                                                 BatchedCommandResponse* batchResponse);
 
+        /**
+         * Returns an error status if either commandStatus or writeConcernStatus has an error.
+         */
+        static Status getEffectiveStatus(const StatusWith<CommandResponse>& swResponse);
+
+        boost::optional<HostAndPort> hostAndPort;
         BSONObj response;
         BSONObj metadata;
         Status commandStatus;
@@ -87,7 +99,9 @@ public:
 
     virtual ~Shard() = default;
 
-    const ShardId getId() const;
+    const ShardId& getId() const {
+        return _id;
+    }
 
     /**
      * Returns true if this shard object represents the config server.
@@ -142,7 +156,7 @@ public:
      * given "retryPolicy".  Retries indefinitely until/unless a non-retriable error is encountered,
      * the maxTimeMs on the OperationContext expires, or the operation is interrupted.
      */
-    StatusWith<CommandResponse> runCommand(OperationContext* txn,
+    StatusWith<CommandResponse> runCommand(OperationContext* opCtx,
                                            const ReadPreferenceSetting& readPref,
                                            const std::string& dbName,
                                            const BSONObj& cmdObj,
@@ -153,7 +167,7 @@ public:
      * Runs for the lesser of the remaining time on the operation context or the specified maxTimeMS
      * override.
      */
-    StatusWith<CommandResponse> runCommand(OperationContext* txn,
+    StatusWith<CommandResponse> runCommand(OperationContext* opCtx,
                                            const ReadPreferenceSetting& readPref,
                                            const std::string& dbName,
                                            const BSONObj& cmdObj,
@@ -166,7 +180,7 @@ public:
      * Wherever possible this method should be avoided in favor of runCommand.
      */
     StatusWith<CommandResponse> runCommandWithFixedRetryAttempts(
-        OperationContext* txn,
+        OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
         const std::string& dbName,
         const BSONObj& cmdObj,
@@ -178,7 +192,7 @@ public:
      * Wherever possible this method should be avoided in favor of runCommand.
      */
     StatusWith<CommandResponse> runCommandWithFixedRetryAttempts(
-        OperationContext* txn,
+        OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
         const std::string& dbName,
         const BSONObj& cmdObj,
@@ -186,12 +200,24 @@ public:
         RetryPolicy retryPolicy);
 
     /**
-     * Expects a single-entry batch wrtie command and runs it on the config server's primary using
-     * the specified retry policy.
+    * Runs a cursor command, exhausts the cursor, and pulls all data into memory. Performs retries
+    * if the command fails in accordance with the kIdempotent RetryPolicy.
+    */
+    StatusWith<QueryResponse> runExhaustiveCursorCommand(OperationContext* opCtx,
+                                                         const ReadPreferenceSetting& readPref,
+                                                         const std::string& dbName,
+                                                         const BSONObj& cmdObj,
+                                                         Milliseconds maxTimeMSOverride);
+
+    /**
+     * Runs a write command against a shard. This is separate from runCommand, because write
+     * commands return errors in a different format than regular commands do, so checking for
+     * retriable errors must be done differently.
      */
-    BatchedCommandResponse runBatchWriteCommandOnConfig(OperationContext* txn,
-                                                        const BatchedCommandRequest& batchRequest,
-                                                        RetryPolicy retryPolicy);
+    BatchedCommandResponse runBatchWriteCommand(OperationContext* opCtx,
+                                                const Milliseconds maxTimeMS,
+                                                const BatchedCommandRequest& batchRequest,
+                                                RetryPolicy retryPolicy);
 
     /**
     * Warning: This method exhausts the cursor and pulls all data into memory.
@@ -201,7 +227,7 @@ public:
     * ShardRemote instances expect "readConcernLevel" to always be kMajorityReadConcern, whereas
     * ShardLocal instances expect either kLocalReadConcern or kMajorityReadConcern.
     */
-    StatusWith<QueryResponse> exhaustiveFindOnConfig(OperationContext* txn,
+    StatusWith<QueryResponse> exhaustiveFindOnConfig(OperationContext* opCtx,
                                                      const ReadPreferenceSetting& readPref,
                                                      const repl::ReadConcernLevel& readConcernLevel,
                                                      const NamespaceString& nss,
@@ -214,7 +240,7 @@ public:
      * so long as the options are the same.
      * NOTE: Currently only supported for LocalShard.
      */
-    virtual Status createIndexOnConfig(OperationContext* txn,
+    virtual Status createIndexOnConfig(OperationContext* opCtx,
                                        const NamespaceString& ns,
                                        const BSONObj& keys,
                                        bool unique) = 0;
@@ -231,16 +257,24 @@ public:
      */
     static bool shouldErrorBePropagated(ErrorCodes::Error code);
 
+    /**
+     * Updates this shard's lastCommittedOpTime timestamp, if the given value is greater than the
+     * currently stored value.
+     *
+     * This is only valid to call on ShardRemote instances.
+     */
+    virtual void updateLastCommittedOpTime(LogicalTime lastCommittedOpTime) = 0;
+
+    /**
+     * Returns the latest lastCommittedOpTime timestamp returned by the underlying shard. This
+     * represents the latest opTime timestamp known to be in this shard's majority committed
+     * snapshot.
+     *
+     * This is only valid to call on ShardRemote instances.
+     */
+    virtual LogicalTime getLastCommittedOpTime() const = 0;
+
 protected:
-    struct HostWithResponse {
-        HostWithResponse(boost::optional<HostAndPort> _host,
-                         StatusWith<CommandResponse> _commandResponse)
-            : host(std::move(_host)), commandResponse(std::move(_commandResponse)) {}
-
-        boost::optional<HostAndPort> host;
-        StatusWith<CommandResponse> commandResponse;
-    };
-
     Shard(const ShardId& id);
 
 private:
@@ -252,14 +286,21 @@ private:
      *
      * NOTE: LocalShard implementation will not return a valid host and so should be ignored.
      */
-    virtual HostWithResponse _runCommand(OperationContext* txn,
-                                         const ReadPreferenceSetting& readPref,
-                                         const std::string& dbname,
-                                         Milliseconds maxTimeMSOverride,
-                                         const BSONObj& cmdObj) = 0;
+    virtual StatusWith<CommandResponse> _runCommand(OperationContext* opCtx,
+                                                    const ReadPreferenceSetting& readPref,
+                                                    const std::string& dbname,
+                                                    Milliseconds maxTimeMSOverride,
+                                                    const BSONObj& cmdObj) = 0;
+
+    virtual StatusWith<QueryResponse> _runExhaustiveCursorCommand(
+        OperationContext* opCtx,
+        const ReadPreferenceSetting& readPref,
+        const std::string& dbName,
+        Milliseconds maxTimeMSOverride,
+        const BSONObj& cmdObj) = 0;
 
     virtual StatusWith<QueryResponse> _exhaustiveFindOnConfig(
-        OperationContext* txn,
+        OperationContext* opCtx,
         const ReadPreferenceSetting& readPref,
         const repl::ReadConcernLevel& readConcernLevel,
         const NamespaceString& nss,

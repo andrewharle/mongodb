@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2008-2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -36,121 +38,27 @@
 #include "mongo/client/mongo_uri.h"
 #include "mongo/client/query.h"
 #include "mongo/client/read_preference.h"
+#include "mongo/db/dbmessage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/write_concern_options.h"
+#include "mongo/logger/log_severity.h"
 #include "mongo/platform/atomic_word.h"
+#include "mongo/rpc/message.h"
 #include "mongo/rpc/metadata.h"
+#include "mongo/rpc/op_msg.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/rpc/unique_message.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/transport/message_compressor_manager.h"
+#include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/abstract_message_port.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 
 namespace executor {
 struct RemoteCommandResponse;
 }
-
-/** the query field 'options' can have these bits set: */
-enum QueryOptions {
-    /** Tailable means cursor is not closed when the last data is retrieved.  rather, the cursor
-     * marks the final object's position.  you can resume using the cursor later, from where it was
-       located, if more data were received.  Set on dbQuery and dbGetMore.
-
-       like any "latent cursor", the cursor may become invalid at some point -- for example if that
-       final object it references were deleted.  Thus, you should be prepared to requery if you get
-       back ResultFlag_CursorNotFound.
-    */
-    QueryOption_CursorTailable = 1 << 1,
-
-    /** allow query of replica slave.  normally these return an error except for namespace "local".
-    */
-    QueryOption_SlaveOk = 1 << 2,
-
-    // findingStart mode is used to find the first operation of interest when
-    // we are scanning through a repl log.  For efficiency in the common case,
-    // where the first operation of interest is closer to the tail than the head,
-    // we start from the tail of the log and work backwards until we find the
-    // first operation of interest.  Then we scan forward from that first operation,
-    // actually returning results to the client.  During the findingStart phase,
-    // we release the db mutex occasionally to avoid blocking the db process for
-    // an extended period of time.
-    QueryOption_OplogReplay = 1 << 3,
-
-    /** The server normally times out idle cursors after an inactivity period to prevent excess
-     * memory uses
-        Set this option to prevent that.
-    */
-    QueryOption_NoCursorTimeout = 1 << 4,
-
-    /** Use with QueryOption_CursorTailable.  If we are at the end of the data, block for a while
-     * rather than returning no data. After a timeout period, we do return as normal.
-    */
-    QueryOption_AwaitData = 1 << 5,
-
-    /** Stream the data down full blast in multiple "more" packages, on the assumption that the
-     * client will fully read all data queried.  Faster when you are pulling a lot of data and know
-     * you want to pull it all down.  Note: it is not allowed to not read all the data unless you
-     * close the connection.
-
-        Use the query( stdx::function<void(const BSONObj&)> f, ... ) version of the connection's
-        query()
-        method, and it will take care of all the details for you.
-    */
-    QueryOption_Exhaust = 1 << 6,
-
-    /** When sharded, this means its ok to return partial results
-        Usually we will fail a query if all required shards aren't up
-        If this is set, it'll be a partial result set
-     */
-    QueryOption_PartialResults = 1 << 7,
-
-    QueryOption_AllSupported = QueryOption_CursorTailable | QueryOption_SlaveOk |
-        QueryOption_OplogReplay | QueryOption_NoCursorTimeout | QueryOption_AwaitData |
-        QueryOption_Exhaust | QueryOption_PartialResults,
-
-    QueryOption_AllSupportedForSharding = QueryOption_CursorTailable | QueryOption_SlaveOk |
-        QueryOption_OplogReplay | QueryOption_NoCursorTimeout | QueryOption_AwaitData |
-        QueryOption_PartialResults,
-};
-
-enum UpdateOptions {
-    /** Upsert - that is, insert the item if no matching item is found. */
-    UpdateOption_Upsert = 1 << 0,
-
-    /** Update multiple documents (if multiple documents match query expression).
-       (Default is update a single document and stop.) */
-    UpdateOption_Multi = 1 << 1,
-
-    /** flag from mongo saying this update went everywhere */
-    UpdateOption_Broadcast = 1 << 2
-};
-
-enum RemoveOptions {
-    /** only delete one option */
-    RemoveOption_JustOne = 1 << 0,
-
-    /** flag from mongo saying this update went everywhere */
-    RemoveOption_Broadcast = 1 << 1
-};
-
-enum InsertOptions {
-    /** With muli-insert keep processing inserts if one fails */
-    InsertOption_ContinueOnError = 1 << 0
-};
-
-//
-// For legacy reasons, the reserved field pre-namespace of certain types of messages is used
-// to store options as opposed to the flags after the namespace.  This should be transparent to
-// the api user, but we need these constants to disassemble/reassemble the messages correctly.
-//
-
-enum ReservedOptions {
-    Reserved_InsertOption_ContinueOnError = 1 << 0,
-};
 
 class DBClientCursor;
 class DBClientCursorBatchIterator;
@@ -260,35 +168,19 @@ std::string nsGetDB(const std::string& ns);
 std::string nsGetCollection(const std::string& ns);
 
 /**
-   The interface that any db connection should implement
+ abstract class that implements the core db operations
  */
-class DBClientInterface {
-    MONGO_DISALLOW_COPYING(DBClientInterface);
+class DBClientBase {
+    MONGO_DISALLOW_COPYING(DBClientBase);
 
 public:
-    virtual std::unique_ptr<DBClientCursor> query(const std::string& ns,
-                                                  Query query,
-                                                  int nToReturn = 0,
-                                                  int nToSkip = 0,
-                                                  const BSONObj* fieldsToReturn = 0,
-                                                  int queryOptions = 0,
-                                                  int batchSize = 0) = 0;
+    DBClientBase()
+        : _logLevel(logger::LogSeverity::Log()),
+          _connectionId(ConnectionIdSequence.fetchAndAdd(1)),
+          _cachedAvailableOptions((enum QueryOptions)0),
+          _haveCachedAvailableOptions(false) {}
 
-    virtual void insert(const std::string& ns, BSONObj obj, int flags = 0) = 0;
-
-    virtual void insert(const std::string& ns, const std::vector<BSONObj>& v, int flags = 0) = 0;
-
-    virtual void remove(const std::string& ns, Query query, int flags) = 0;
-
-    virtual void update(const std::string& ns,
-                        Query query,
-                        BSONObj obj,
-                        bool upsert = false,
-                        bool multi = false) = 0;
-
-    virtual void update(const std::string& ns, Query query, BSONObj obj, int flags) = 0;
-
-    virtual ~DBClientInterface() {}
+    virtual ~DBClientBase() {}
 
     /**
        @return a single object that matches the query.  if none do, then the object is empty
@@ -310,31 +202,19 @@ public:
                const BSONObj* fieldsToReturn = 0,
                int queryOptions = 0);
 
+    /**
+     * @return a pair with a single object that matches the filter within the collection specified
+     * by the UUID and the namespace of that collection on the queried node.
+     *
+     * If the command fails, an assertion error is thrown. Otherwise, if no document matches
+     * the query, an empty BSONObj is returned.
+     * @throws AssertionException
+     */
+    virtual std::pair<BSONObj, NamespaceString> findOneByUUID(const std::string& db,
+                                                              UUID uuid,
+                                                              const BSONObj& filter);
+
     virtual std::string getServerAddress() const = 0;
-
-    /** don't use this - called automatically by DBClientCursor for you */
-    virtual std::unique_ptr<DBClientCursor> getMore(const std::string& ns,
-                                                    long long cursorId,
-                                                    int nToReturn = 0,
-                                                    int options = 0) = 0;
-
-protected:
-    DBClientInterface() = default;
-};
-
-/**
-   DB "commands"
-   Basically just invocations of connection.$cmd.findOne({...});
-*/
-class DBClientWithCommands : public DBClientInterface {
-public:
-    /** controls how chatty the client is about network errors & such.  See log.h */
-    logger::LogSeverity _logLevel;
-
-    DBClientWithCommands()
-        : _logLevel(logger::LogSeverity::Log()),
-          _cachedAvailableOptions((enum QueryOptions)0),
-          _haveCachedAvailableOptions(false) {}
 
     /** helper function.  run a simple command where the command expression is simply
           { command : 1 }
@@ -363,14 +243,14 @@ public:
                      std::string* actualServer = nullptr) = 0;
 
     /* used by QueryOption_Exhaust.  To use that your subclass must implement this. */
-    virtual bool recv(Message& m) {
+    virtual bool recv(Message& m, int lastRequestId) {
         verify(false);
         return false;
     }
 
     // In general, for lazy queries, we'll need to say, recv, then checkResponse
-    virtual void checkResponse(const char* data,
-                               int nReturned,
+    virtual void checkResponse(const std::vector<BSONObj>& batch,
+                               bool networkError,
                                bool* retry = nullptr,
                                std::string* targetHost = nullptr) {
         if (retry)
@@ -410,28 +290,40 @@ public:
     const rpc::ReplyMetadataReader& getReplyMetadataReader();
 
     /**
-     * Runs a database command. This variant allows the caller to manually specify the metadata
-     * for the request, and receive it for the reply.
-     *
-     * TODO: rename this to runCommand, and change the old one to runCommandLegacy.
+     * Runs the specified command request.
      */
-    virtual rpc::UniqueReply runCommandWithMetadata(StringData database,
-                                                    StringData command,
-                                                    const BSONObj& metadata,
-                                                    const BSONObj& commandArgs);
+    virtual std::pair<rpc::UniqueReply, DBClientBase*> runCommandWithTarget(OpMsgRequest request);
 
-    /*
-     * This wraps up the runCommandWithMetadata function above, but returns the DBClient that
-     * actually ran the command. When called against a replica set, this will return the specific
-     * replica set member the command ran against.
+    /**
+     * This shared_ptr overload is used to possibly return a shared_ptr to the replica set member
+     * that the command was dispatched to.  It's needed if the caller needs a lifetime for that
+     * connection that extends beyond the lifetime, or subsequent calls, against the top level
+     * client.
      *
-     * This is used in the shell so that cursors can send getMore through the correct connection.
+     * It has this slightly insane api because:
+     * + we don't want to thread enable_shared_from_this pervasively through the dbclient tree
+     * + we use this from places we don't want to know about dbclient_rs (and so don't know if we'll
+     *   get our own ptr back).
+     * + the only caller who needs this is the shell (because other callers have more control over
+     *   lifetime).
      */
-    virtual std::tuple<rpc::UniqueReply, DBClientWithCommands*> runCommandWithMetadataAndTarget(
-        StringData database,
-        StringData command,
-        const BSONObj& metadata,
-        const BSONObj& commandArgs);
+    virtual std::pair<rpc::UniqueReply, std::shared_ptr<DBClientBase>> runCommandWithTarget(
+        OpMsgRequest request, std::shared_ptr<DBClientBase> me);
+
+    /**
+     * Runs the specified command request. This thin wrapper just unwraps the reply and ignores the
+     * target connection from the above runCommandWithTarget().
+     */
+    rpc::UniqueReply runCommand(OpMsgRequest request) {
+        return runCommandWithTarget(std::move(request)).first;
+    }
+
+    /**
+     * Runs the specified command request in fire-and-forget mode and returns the connection that
+     * the command was actually sent on. If the connection doesn't support OP_MSG, the request will
+     * be run as a normal two-way command and the reply will be ignored after parsing.
+     */
+    virtual DBClientBase* runFireAndForgetCommand(OpMsgRequest request);
 
     /** Run a database command.  Database commands are represented as BSON objects.  Common database
         commands have prebuilt helper functions -- see below.  If a helper is not available you can
@@ -446,10 +338,7 @@ public:
 
         @return true if the command returned "ok".
     */
-    virtual bool runCommand(const std::string& dbname,
-                            const BSONObj& cmd,
-                            BSONObj& info,
-                            int options = 0);
+    bool runCommand(const std::string& dbname, BSONObj cmd, BSONObj& info, int options = 0);
 
     /*
      * This wraps up the runCommand function avove, but returns the DBClient that actually ran
@@ -458,10 +347,20 @@ public:
      *
      * This is used in the shell so that cursors can send getMore through the correct connection.
      */
-    virtual std::tuple<bool, DBClientWithCommands*> runCommandWithTarget(const std::string& dbname,
-                                                                         const BSONObj& cmd,
-                                                                         BSONObj& info,
-                                                                         int options = 0);
+    std::tuple<bool, DBClientBase*> runCommandWithTarget(const std::string& dbname,
+                                                         BSONObj cmd,
+                                                         BSONObj& info,
+                                                         int options = 0);
+
+    /**
+     * See the opMsg overload comment for why this function takes a shared_ptr ostensibly to this.
+     */
+    std::tuple<bool, std::shared_ptr<DBClientBase>> runCommandWithTarget(
+        const std::string& dbname,
+        BSONObj cmd,
+        BSONObj& info,
+        std::shared_ptr<DBClientBase> me,
+        int options = 0);
 
     /**
     * Authenticates to another cluster member using appropriate authentication data.
@@ -711,13 +610,6 @@ public:
     }
 
     /**
-       get a list of all the current databases
-       uses the { listDatabases : 1 } command.
-       throws on error
-     */
-    std::list<std::string> getDatabaseNames();
-
-    /**
      * { name : "<short collection name>",
      *   options : { }
      * }
@@ -729,7 +621,7 @@ public:
     /** Create an index on the collection 'ns' as described by the given keys. If you wish
      *  to specify options, see the more flexible overload of 'createIndex' which takes an
      *  IndexSpec object. Failure to construct the index is reported by throwing a
-     *  UserException.
+     *  AssertionException.
      *
      *  @param ns Namespace on which to create the index
      *  @param keys Document describing keys and index types. You must provide at least one
@@ -741,13 +633,19 @@ public:
 
     /** Create an index on the collection 'ns' as described by the given
      *  descriptor. Failure to construct the index is reported by throwing a
-     *  UserException.
+     *  AssertionException.
      *
      *  @param ns Namespace on which to create the index
      *  @param descriptor Configuration object describing the index to create. The
      *  descriptor must describe at least one key and index type.
      */
-    virtual void createIndex(StringData ns, const IndexSpec& descriptor);
+    virtual void createIndex(StringData ns, const IndexSpec& descriptor) {
+        std::vector<const IndexSpec*> toBuild;
+        toBuild.push_back(&descriptor);
+        createIndexes(ns, toBuild);
+    }
+
+    virtual void createIndexes(StringData ns, const std::vector<const IndexSpec*>& descriptor);
 
     virtual std::list<BSONObj> getIndexSpecs(const std::string& ns, int options = 0);
 
@@ -795,63 +693,12 @@ public:
                                   BSONObj& info,
                                   int options = 0);
 
-protected:
-    /** if the result of a command is ok*/
-    bool isOk(const BSONObj&);
-
-    /** if the element contains a not master error */
-    bool isNotMasterErrorString(const BSONElement& e);
-
-    BSONObj _countCmd(
-        const std::string& ns, const BSONObj& query, int options, int limit, int skip);
-
     /**
-     * Look up the options available on this client.  Caches the answer from
-     * _lookupAvailableOptions(), below.
+     * Reconnect if needed and allowed.
      */
-    QueryOptions availableOptions();
+    virtual void checkConnection() {}
 
-    virtual QueryOptions _lookupAvailableOptions();
-
-    virtual void _auth(const BSONObj& params);
-
-    // should be set by subclasses during connection.
-    void _setServerRPCProtocols(rpc::ProtocolSet serverProtocols);
-
-private:
-    /**
-     * The rpc protocols this client supports.
-     *
-     */
-    rpc::ProtocolSet _clientRPCProtocols{rpc::supports::kAll};
-
-    /**
-     * The rpc protocol the remote server(s) support. We support 'opQueryOnly' by default unless
-     * we detect support for OP_COMMAND at connection time.
-     */
-    rpc::ProtocolSet _serverRPCProtocols{rpc::supports::kOpQueryOnly};
-
-    rpc::RequestMetadataWriter _metadataWriter;
-    rpc::ReplyMetadataReader _metadataReader;
-
-    enum QueryOptions _cachedAvailableOptions;
-    bool _haveCachedAvailableOptions;
-};
-
-/**
- abstract class that implements the core db operations
- */
-class DBClientBase : public DBClientWithCommands {
-protected:
-    static AtomicInt64 ConnectionIdSequence;
-    long long _connectionId;  // unique connection id for this connection
-
-public:
     static const uint64_t INVALID_SOCK_CREATION_TIME;
-
-    DBClientBase() {
-        _connectionId = ConnectionIdSequence.fetchAndAdd(1);
-    }
 
     long long getConnectionId() const {
         return _connectionId;
@@ -859,6 +706,10 @@ public:
 
     virtual int getMinWireVersion() = 0;
     virtual int getMaxWireVersion() = 0;
+
+    const std::vector<std::string>& getIsMasterSaslMechanisms() const {
+        return _saslMechsForAuth;
+    }
 
     /** send a query to the database.
      @param ns namespace to query, format is <dbname>.<collectname>[.<collectname>]*
@@ -942,7 +793,7 @@ public:
      */
     virtual bool isStillConnected() = 0;
 
-    virtual void killCursor(long long cursorID);
+    virtual void killCursor(const NamespaceString& ns, long long cursorID);
 
     virtual ConnectionString::ConnectionType type() const = 0;
 
@@ -954,6 +805,69 @@ public:
 
     virtual void reset() {}
 
+    virtual bool isReplicaSetMember() const = 0;
+
+    virtual bool isMongos() const = 0;
+
+    /**
+     * Parses command replies and runs them through the metadata reader.
+     * This is virtual and non-const to allow subclasses to act on failures.
+     */
+    virtual rpc::UniqueReply parseCommandReplyMessage(const std::string& host,
+                                                      const Message& replyMsg);
+
+    // This is only for DBClientCursor.
+    static void (*withConnection_do_not_use)(std::string host, std::function<void(DBClientBase*)>);
+
+protected:
+    /** if the result of a command is ok*/
+    bool isOk(const BSONObj&);
+
+    /** if the element contains a not master error */
+    bool isNotMasterErrorString(const BSONElement& e);
+
+    BSONObj _countCmd(
+        const std::string& ns, const BSONObj& query, int options, int limit, int skip);
+
+    /**
+     * Look up the options available on this client.  Caches the answer from
+     * _lookupAvailableOptions(), below.
+     */
+    QueryOptions availableOptions();
+
+    virtual QueryOptions _lookupAvailableOptions();
+
+    virtual void _auth(const BSONObj& params);
+
+    // should be set by subclasses during connection.
+    void _setServerRPCProtocols(rpc::ProtocolSet serverProtocols);
+
+    std::vector<std::string> _saslMechsForAuth;
+
+    /** controls how chatty the client is about network errors & such.  See log.h */
+    const logger::LogSeverity _logLevel;
+
+    static AtomicInt64 ConnectionIdSequence;
+    long long _connectionId;  // unique connection id for this connection
+
+private:
+    /**
+     * The rpc protocols this client supports.
+     *
+     */
+    rpc::ProtocolSet _clientRPCProtocols{rpc::supports::kAll};
+
+    /**
+     * The rpc protocol the remote server(s) support. We support 'opQueryOnly' by default unless
+     * we detect support for OP_COMMAND at connection time.
+     */
+    rpc::ProtocolSet _serverRPCProtocols{rpc::supports::kOpQueryOnly};
+
+    rpc::RequestMetadataWriter _metadataWriter;
+    rpc::ReplyMetadataReader _metadataReader;
+
+    enum QueryOptions _cachedAvailableOptions;
+    bool _haveCachedAvailableOptions;
 };  // DBClientBase
 
 /**
@@ -1022,7 +936,7 @@ public:
     Status connectSocketOnly(const HostAndPort& server);
 
     /** Connect to a Mongo database server.  Exception throwing version.
-        Throws a UserException if cannot connect.
+        Throws a AssertionException if cannot connect.
 
        If autoReconnect is true, you can try to use the DBClientConnection even when
        false was returned -- it will try to connect again.
@@ -1058,10 +972,13 @@ public:
                                      const BSONObj* fieldsToReturn,
                                      int queryOptions);
 
-    virtual bool runCommand(const std::string& dbname,
-                            const BSONObj& cmd,
-                            BSONObj& info,
-                            int options = 0);
+    using DBClientBase::runCommandWithTarget;
+    std::pair<rpc::UniqueReply, DBClientBase*> runCommandWithTarget(OpMsgRequest request) override;
+    std::pair<rpc::UniqueReply, std::shared_ptr<DBClientBase>> runCommandWithTarget(
+        OpMsgRequest request, std::shared_ptr<DBClientBase> me) override;
+
+    rpc::UniqueReply parseCommandReplyMessage(const std::string& host,
+                                              const Message& replyMsg) override;
 
     /**
        @return true if this connection is currently in a failed state.  When autoreconnect is on,
@@ -1071,9 +988,11 @@ public:
         return _failed;
     }
 
-    bool isStillConnected() {
-        return _port ? _port->isStillConnected() : true;
-    }
+    bool isStillConnected();
+
+    void setTags(transport::Session::TagMask tag);
+
+    void shutdown();
 
     void setWireVersions(int minWireVersion, int maxWireVersion) {
         _minWireVersion = minWireVersion;
@@ -1086,11 +1005,6 @@ public:
 
     int getMaxWireVersion() final {
         return _maxWireVersion;
-    }
-
-    AbstractMessagingPort& port() {
-        verify(_port);
-        return *_port;
     }
 
     std::string toString() const {
@@ -1111,9 +1025,9 @@ public:
     }
 
     virtual void say(Message& toSend, bool isRetry = false, std::string* actualServer = 0);
-    virtual bool recv(Message& m);
-    virtual void checkResponse(const char* data,
-                               int nReturned,
+    virtual bool recv(Message& m, int lastRequestId);
+    virtual void checkResponse(const std::vector<BSONObj>& batch,
+                               bool networkError,
                                bool* retry = NULL,
                                std::string* host = NULL);
     virtual bool call(Message& toSend, Message& response, bool assertOk, std::string* actualServer);
@@ -1122,7 +1036,7 @@ public:
     }
     void setSoTimeout(double timeout);
     double getSoTimeout() const {
-        return _so_timeout;
+        return _socketTimeout.value_or(Milliseconds{0}).count() / 1000.0;
     }
 
     virtual bool lazySupported() const {
@@ -1139,21 +1053,41 @@ public:
      */
     void setParentReplSetName(const std::string& replSetName);
 
-    uint64_t getSockCreationMicroSec() const;
+    uint64_t getSockCreationMicroSec() const override;
 
     MessageCompressorManager& getCompressorManager() {
         return _compressorManager;
     }
 
+    // throws a NetworkException if in failed state and not reconnecting or if waiting to reconnect
+    void checkConnection() override {
+        if (_failed)
+            _checkConnection();
+    }
+
+    bool isReplicaSetMember() const override {
+        return _isReplicaSetMember;
+    }
+
+    bool isMongos() const override {
+        return _isMongos;
+    }
+
 protected:
     int _minWireVersion{0};
     int _maxWireVersion{0};
+    bool _isReplicaSetMember = false;
+    bool _isMongos = false;
 
     virtual void _auth(const BSONObj& params);
 
-    std::unique_ptr<AbstractMessagingPort> _port;
+    transport::SessionHandle _session;
+    boost::optional<Milliseconds> _socketTimeout;
+    transport::Session::TagMask _tagMask = transport::Session::kEmptyTagMask;
+    uint64_t _sessionCreationMicros = INVALID_SOCK_CREATION_TIME;
+    Date_t _lastConnectivityCheck;
 
-    bool _failed;
+    bool _failed = false;
     const bool autoReconnect;
     Backoff autoReconnectBackoff;
 
@@ -1163,24 +1097,19 @@ protected:
 
     void _checkConnection();
 
-    // throws SocketException if in failed state and not reconnecting or if waiting to reconnect
-    void checkConnection() {
-        if (_failed)
-            _checkConnection();
-    }
-
     std::map<std::string, BSONObj> authCache;
-    double _so_timeout;
 
     static AtomicInt32 _numConnections;
 
 private:
     /**
-     * Checks the BSONElement for the 'not master' keyword and if it does exist,
-     * try to inform the replica set monitor that the host this connects to is
-     * no longer primary.
+     * Inspects the contents of 'replyBody' and informs the replica set monitor that the host 'this'
+     * is connected with is no longer the primary if a "not master" error message or error code was
+     * returned.
      */
-    void handleNotMasterResponse(const BSONElement& elemToCheck);
+    void handleNotMasterResponse(const BSONObj& replyBody, StringData errorMsgFieldName);
+    enum FailAction { kSetFlag, kEndSession, kReleaseSession };
+    void _markFailed(FailAction action);
 
     // Contains the string for the replica set name of the host this is connected to.
     // Should be empty if this connection is not pointing to a replica set member.

@@ -1,3 +1,6 @@
+// Cannot implicitly shard accessed collections because single updates are not targeted.
+// @tags: [assumes_unsharded_collection, requires_non_retryable_writes]
+
 // Test that updates with geo queries which match
 // the same document multiple times only apply
 // the update once

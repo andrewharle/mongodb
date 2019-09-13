@@ -11,6 +11,22 @@
 // (connection connected after shard change).
 //
 
+// Checking UUID consistency involves talking to shard primaries, but by the end of this test, one
+// shard does not have a primary.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
+// Replica set nodes started with --shardsvr do not enable key generation until they are added to a
+// sharded cluster and reject commands with gossiped clusterTime from users without the
+// advanceClusterTime privilege. This causes ShardingTest setup to fail because the shell briefly
+// authenticates as __system and recieves clusterTime metadata then will fail trying to gossip that
+// time later in setup.
+//
+// TODO SERVER-32672: remove this flag.
+TestData.skipGossipingClusterTime = true;
+
+// TODO SERVER-35447: Multiple users cannot be authenticated on one connection within a session.
+TestData.disableImplicitSessions = true;
+
 var options = {rs: true, rsOptions: {nodes: 2}, keyFile: "jstests/libs/key1"};
 
 var st = new ShardingTest({shards: 3, mongos: 1, other: options});
@@ -38,12 +54,13 @@ var collUnsharded = mongos.getCollection("fooUnsharded.barUnsharded");
 // Create the unsharded database with shard0 primary
 assert.writeOK(collUnsharded.insert({some: "doc"}));
 assert.writeOK(collUnsharded.remove({}));
-printjson(
+assert.commandWorked(
     admin.runCommand({movePrimary: collUnsharded.getDB().toString(), to: st.shard0.shardName}));
 
 // Create the sharded database with shard1 primary
 assert.commandWorked(admin.runCommand({enableSharding: collSharded.getDB().toString()}));
-printjson(admin.runCommand({movePrimary: collSharded.getDB().toString(), to: st.shard1.shardName}));
+assert.commandWorked(
+    admin.runCommand({movePrimary: collSharded.getDB().toString(), to: st.shard1.shardName}));
 assert.commandWorked(admin.runCommand({shardCollection: collSharded.toString(), key: {_id: 1}}));
 assert.commandWorked(admin.runCommand({split: collSharded.toString(), middle: {_id: 0}}));
 assert.commandWorked(admin.runCommand(
@@ -66,6 +83,19 @@ function authDBUsers(conn) {
     conn.getDB(collUnsharded.getDB().toString()).auth(unshardedDBUser, password);
     return conn;
 }
+
+// Secondaries do not refresh their in-memory routing table until a request with a higher version
+// is received, and refreshing requires communication with the primary to obtain the newest version.
+// Read from the secondaries once before taking down primaries to ensure they have loaded the
+// routing table into memory.
+// TODO SERVER-30148: replace this with calls to awaitReplication() on each shard owning data for
+// the sharded collection once secondaries refresh proactively.
+var mongosSetupConn = new Mongo(mongos.host);
+authDBUsers(mongosSetupConn);
+mongosSetupConn.setReadPref("secondary");
+assert(!mongosSetupConn.getCollection(collSharded.toString()).find({}).hasNext());
+
+gc();  // Clean up connections
 
 //
 // Setup is complete

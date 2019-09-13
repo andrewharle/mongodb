@@ -1,12 +1,15 @@
 // test read/write permissions
 // skip this test on 32-bit platforms
+// @tags: [requires_profiling]
+
+// TODO SERVER-35447: Multiple users cannot be authenticated on one connection within a session.
+TestData.disableImplicitSessions = true;
 
 function setupTest() {
     print("START auth1.js");
     baseName = "jstests_auth_auth1";
 
-    m = MongoRunner.runMongod(
-        {auth: "", nohttpinterface: "", bind_ip: "127.0.0.1", useHostname: false});
+    m = MongoRunner.runMongod({auth: "", bind_ip: "127.0.0.1", useHostname: false});
     return m;
 }
 
@@ -118,3 +121,4 @@ function runTest(m) {
 
 var m = setupTest();
 runTest(m);
+MongoRunner.stopMongod(m, null, {user: "root", pwd: "root"});

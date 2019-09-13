@@ -1,28 +1,31 @@
-/*    Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -40,18 +43,10 @@
 namespace mongo {
 namespace {
 
-/*
- * Theory of operation:
- *
- * At process start, the loader initializes "consoleMutex" to NULL.  At some point during static
- * initialization, the static initialization process, running in the one and only extant thread,
- * allocates a new stdx::mutex on the heap and assigns consoleMutex to point to it.  While
- * consoleMutex is still NULL, we know that there is only one thread extant, so it is safe to
- * skip locking the consoleMutex in the Console constructor.  Once the mutex is initialized,
- * users of Console can start acquiring it.
- */
-
-stdx::mutex* consoleMutex = new stdx::mutex;
+stdx::mutex& consoleMutex() {
+    static stdx::mutex instance;
+    return instance;
+}
 
 #if defined(_WIN32)
 /**
@@ -236,7 +231,7 @@ std::ostream* windowsOutputStream = getWindowsOutputStream();
 // first logging call writing via the Console will happen elsewhere in
 // the initalizer chain.
 MONGO_INITIALIZER(EnsureIosBaseInitConstructed)(InitializerContext*) {
-    Console();
+    Console forInitializationOnly;
     return Status::OK();
 }
 
@@ -252,10 +247,8 @@ Console::Console() : _consoleLock() {
     // single-threaded context via a mongo initializer above.
     static const std::ios_base::Init initializeCout;
 
-    if (consoleMutex) {
-        stdx::unique_lock<stdx::mutex> lk(*consoleMutex);
-        lk.swap(_consoleLock);
-    }
+    stdx::unique_lock<stdx::mutex> lk(consoleMutex());
+    lk.swap(_consoleLock);
 }
 
 std::ostream& Console::out() {

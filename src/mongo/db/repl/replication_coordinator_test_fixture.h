@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,7 +35,9 @@
 #include "mongo/db/client.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_executor.h"
+#include "mongo/db/service_context_d_test_fixture.h"
+#include "mongo/executor/network_interface_mock.h"
+#include "mongo/executor/task_executor.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
@@ -41,42 +45,38 @@ namespace mongo {
 class BSONObj;
 struct HostAndPort;
 
-namespace executor {
-class NetworkInterfaceMock;
-}  // namespace executor
-
 namespace repl {
 
 class ReplSetConfig;
 class ReplicationCoordinatorExternalStateMock;
 class ReplicationCoordinatorImpl;
 class StorageInterfaceMock;
-class TopologyCoordinatorImpl;
+class TopologyCoordinator;
+
+using executor::NetworkInterfaceMock;
 
 /**
  * Fixture for testing ReplicationCoordinatorImpl behaviors.
  */
-class ReplCoordTest : public mongo::unittest::Test {
+class ReplCoordTest : public ServiceContextMongoDTest {
 public:
     /**
-     * Makes a ResponseStatus with the given "doc" response and optional elapsed time "millis".
+     * Makes a command response with the given "doc" response and optional elapsed time "millis".
      */
-    static ResponseStatus makeResponseStatus(const BSONObj& doc,
-                                             Milliseconds millis = Milliseconds(0));
+    static executor::RemoteCommandResponse makeResponseStatus(
+        const BSONObj& doc, Milliseconds millis = Milliseconds(0));
 
     /**
-     * Makes a ResponseStatus with the given "doc" response, metadata and optional elapsed time
+     * Makes a command response with the given "doc" response, metadata and optional elapsed time
      * "millis".
      */
-    static ResponseStatus makeResponseStatus(const BSONObj& doc,
-                                             const BSONObj& metadata,
-                                             Milliseconds millis = Milliseconds(0));
+    static executor::RemoteCommandResponse makeResponseStatus(
+        const BSONObj& doc, const BSONObj& metadata, Milliseconds millis = Milliseconds(0));
 
     /**
      * Constructs a ReplSetConfig from the given BSON, or raises a test failure exception.
      */
     static ReplSetConfig assertMakeRSConfig(const BSONObj& configBSON);
-    static ReplSetConfig assertMakeRSConfigV0(const BSONObj& configBson);
 
     /**
      * Adds { protocolVersion: 0 or 1 } to the config.
@@ -84,8 +84,8 @@ public:
     static BSONObj addProtocolVersion(const BSONObj& configDoc, int protocolVersion);
 
 protected:
-    virtual void setUp();
-    virtual void tearDown();
+    ReplCoordTest();
+    virtual ~ReplCoordTest();
 
     /**
      * Asserts that calling start(configDoc, selfHost) successfully initiates the
@@ -103,9 +103,7 @@ protected:
     /**
      * Gets the replication executor under test.
      */
-    ReplicationExecutor* getReplExec() {
-        return _replExec.get();
-    }
+    executor::TaskExecutor* getReplExec();
 
     /**
      * Gets the replication coordinator under test.
@@ -115,9 +113,16 @@ protected:
     }
 
     /**
+     * Gets the storage interface.
+     */
+    StorageInterfaceMock* getStorageInterface() {
+        return _storageInterface;
+    }
+
+    /**
      * Gets the topology coordinator used by the replication coordinator under test.
      */
-    TopologyCoordinatorImpl& getTopoCoord() {
+    TopologyCoordinator& getTopoCoord() {
         return *_topo;
     }
 
@@ -126,27 +131,6 @@ protected:
      */
     ReplicationCoordinatorExternalStateMock* getExternalState() {
         return _externalState;
-    }
-
-    /**
-     * Makes a new OperationContext on the default Client for this test.
-     */
-    ServiceContext::UniqueOperationContext makeOperationContext() {
-        return _client->makeOperationContext();
-    }
-
-    /**
-     * Returns the ServiceContext for this test.
-     */
-    ServiceContext* getServiceContext() {
-        return getGlobalServiceContext();
-    }
-
-    /**
-     * Returns the default Client for this test.
-     */
-    Client* getClient() {
-        return _client.get();
     }
 
     /**
@@ -222,7 +206,6 @@ protected:
      *
      * Behavior is unspecified if node does not have a clean config, is not in SECONDARY, etc.
      */
-    void simulateSuccessfulElection();
     void simulateSuccessfulV1Election();
 
     /**
@@ -233,25 +216,37 @@ protected:
     void simulateSuccessfulV1ElectionAt(Date_t electionTime);
 
     /**
+     * When the test has been configured with a replica set config with a single member, use this
+     * to put that single member into state PRIMARY.
+     */
+    void runSingleNodeElection(OperationContext* opCtx);
+
+    /**
+     * Same as simulateSuccessfulV1ElectionAt, but stops short of signaling drain completion,
+     * so the node stays in drain mode.
+     */
+    void simulateSuccessfulV1ElectionWithoutExitingDrainMode(Date_t electionTime);
+
+    /**
+     * Transition the ReplicationCoordinator from drain mode to being fully primary/master.
+     */
+    void signalDrainComplete(OperationContext* opCtx);
+
+    /**
      * Shuts down the objects under test.
      */
-    void shutdown(OperationContext* txn);
+    void shutdown(OperationContext* opCtx);
 
     /**
      * Receive the heartbeat request from replication coordinator and reply with a response.
      */
     void replyToReceivedHeartbeat();
     void replyToReceivedHeartbeatV1();
-
     /**
-     * Sets how the test fixture reports the storage engine's durability feature.
+     * Consumes the network operation and responds if it's a heartbeat request.
+     * Returns whether the operation is a heartbeat request.
      */
-    void setStorageEngineDurable(bool val = true) {
-        _isStorageEngineDurable = val;
-    }
-    bool isStorageEngineDurable() const {
-        return _isStorageEngineDurable;
-    }
+    bool consumeHeartbeatV1(const NetworkInterfaceMock::NetworkOperationIterator& noi);
 
     void simulateEnoughHeartbeatsForAllNodesUp();
 
@@ -273,16 +268,18 @@ protected:
 private:
     std::unique_ptr<ReplicationCoordinatorImpl> _repl;
     // Owned by ReplicationCoordinatorImpl
-    TopologyCoordinatorImpl* _topo = nullptr;
-    // Owned by ReplicationExecutor
+    TopologyCoordinator* _topo = nullptr;
+    // Owned by executor
     executor::NetworkInterfaceMock* _net = nullptr;
-    std::unique_ptr<ReplicationExecutor> _replExec;
     // Owned by ReplicationCoordinatorImpl
     ReplicationCoordinatorExternalStateMock* _externalState = nullptr;
+    // Owned by ReplicationCoordinatorImpl
+    executor::TaskExecutor* _replExec = nullptr;
+    // Owned by the ServiceContext
+    StorageInterfaceMock* _storageInterface = nullptr;
+
     ReplSettings _settings;
     bool _callShutdown = false;
-    bool _isStorageEngineDurable = true;
-    ServiceContext::UniqueClient _client = getGlobalServiceContext()->makeClient("testClient");
 };
 
 }  // namespace repl

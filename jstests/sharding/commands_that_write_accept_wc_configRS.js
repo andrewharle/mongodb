@@ -1,6 +1,3 @@
-load('jstests/libs/write_concern_util.js');
-load('jstests/multiVersion/libs/auth_helpers.js');
-
 /**
  * This file tests that commands that do writes accept a write concern in a sharded cluster. This
  * test defines various database commands and what they expect to be true before and after the fact.
@@ -9,14 +6,32 @@ load('jstests/multiVersion/libs/auth_helpers.js');
  * replication between nodes to make sure the write concern is actually being waited for. This only
  * tests commands that get sent to config servers and must have w: majority specified. If these
  * commands fail, they should return an actual error, not just a writeConcernError.
+ *
+ * This test is labeled resource intensive because its total io_write is 70MB compared to a median
+ * of 5MB across all sharding tests in wiredTiger. Its total io_write is 1900MB compared to a median
+ * of 135MB in mmapv1.
+ * @tags: [resource_intensive]
  */
+load('jstests/libs/write_concern_util.js');
+load('jstests/multiVersion/libs/auth_helpers.js');
 
 (function() {
     "use strict";
+
+    // TODO SERVER-35447: Multiple users cannot be authenticated on one connection within a session.
+    TestData.disableImplicitSessions = true;
+
     var st = new ShardingTest({
+        // Set priority of secondaries to zero to prevent spurious elections.
         shards: {
-            rs0: {nodes: 3, settings: {chainingAllowed: false}},
-            rs1: {nodes: 3, settings: {chainingAllowed: false}}
+            rs0: {
+                nodes: [{}, {rsConfig: {priority: 0}}, {rsConfig: {priority: 0}}],
+                settings: {chainingAllowed: false}
+            },
+            rs1: {
+                nodes: [{}, {rsConfig: {priority: 0}}, {rsConfig: {priority: 0}}],
+                settings: {chainingAllowed: false}
+            }
         },
         configReplSetTestOptions: {settings: {chainingAllowed: false}},
         mongos: 1
@@ -53,74 +68,8 @@ load('jstests/multiVersion/libs/auth_helpers.js');
         coll = db[collName];
     }
 
+    // Commands in 'commands' will accept any valid writeConcern.
     var commands = [];
-
-    commands.push({
-        req: {authSchemaUpgrade: 1},
-        setupFunc: function() {
-            shardCollectionWithChunks(st, coll);
-            adminDB.system.version.update(
-                {_id: "authSchema"}, {"currentVersion": 3}, {upsert: true});
-            localDB.getSiblingDB('admin').system.version.update(
-                {_id: "authSchema"}, {"currentVersion": 3}, {upsert: true});
-
-            db.createUser({user: 'user1', pwd: 'pass', roles: jsTest.basicUserRoles});
-            assert(db.auth({mechanism: 'MONGODB-CR', user: 'user1', pwd: 'pass'}));
-            db.logout();
-
-            localDB.createUser({user: 'user2', pwd: 'pass', roles: jsTest.basicUserRoles});
-            assert(localDB.auth({mechanism: 'MONGODB-CR', user: 'user2', pwd: 'pass'}));
-            localDB.logout();
-        },
-        confirmFunc: function() {
-            // All users should only have SCRAM credentials.
-            verifyUserDoc(db, 'user1', false, true);
-            verifyUserDoc(localDB, 'user2', false, true);
-
-            // After authSchemaUpgrade MONGODB-CR no longer works.
-            verifyAuth(db, 'user1', 'pass', false, true);
-            verifyAuth(localDB, 'user2', 'pass', false, true);
-        },
-        requiresMajority: true,
-        runsOnShards: true,
-        failsOnShards: false,
-        admin: true
-    });
-
-    // Drop an unsharded database.
-    commands.push({
-        req: {dropDatabase: 1},
-        setupFunc: function() {
-            coll.insert({type: 'oak'});
-            db.pine_needles.insert({type: 'pine'});
-        },
-        confirmFunc: function() {
-            assert.eq(coll.find().itcount(), 0);
-            assert.eq(db.pine_needles.find().itcount(), 0);
-        },
-        requiresMajority: false,
-        runsOnShards: true,
-        failsOnShards: true,
-        admin: false
-    });
-
-    // Drop a sharded database.
-    commands.push({
-        req: {dropDatabase: 1},
-        setupFunc: function() {
-            shardCollectionWithChunks(st, coll);
-            coll.insert({type: 'oak', x: 11});
-            db.pine_needles.insert({type: 'pine'});
-        },
-        confirmFunc: function() {
-            assert.eq(coll.find().itcount(), 0);
-            assert.eq(db.pine_needles.find().itcount(), 0);
-        },
-        requiresMajority: false,
-        runsOnShards: true,
-        failsOnShards: true,
-        admin: false
-    });
 
     commands.push({
         req: {createUser: 'username', pwd: 'password', roles: jsTest.basicUserRoles},
@@ -162,24 +111,6 @@ load('jstests/multiVersion/libs/auth_helpers.js');
         failsOnShards: false,
         admin: false
     });
-
-    // Sharded dropCollection should return a normal error.
-    commands.push({
-        req: {drop: collName},
-        setupFunc: function() {
-            shardCollectionWithChunks(st, coll);
-        },
-        confirmFunc: function() {
-            assert.eq(coll.count(), 0);
-        },
-        requiresMajority: false,
-        runsOnShards: true,
-        failsOnShards: true,
-        admin: false
-    });
-
-    // Config server commands require w: majority writeConcerns.
-    var invalidWriteConcerns = [{w: 'invalid'}, {w: 2}];
 
     function testInvalidWriteConcern(wc, cmd) {
         if (wc.w === 2 && !cmd.requiresMajority) {
@@ -241,12 +172,12 @@ load('jstests/multiVersion/libs/auth_helpers.js');
         }
     }
 
-    function testMajorityWriteConcern(cmd) {
+    function testValidWriteConcern(wc, cmd) {
         var req = cmd.req;
         var setupFunc = cmd.setupFunc;
         var confirmFunc = cmd.confirmFunc;
 
-        req.writeConcern = {w: 'majority', wtimeout: ReplSetTest.kDefaultTimeoutMS};
+        req.writeConcern = wc;
         jsTest.log("Testing " + tojson(req));
 
         dropTestData();
@@ -285,11 +216,17 @@ load('jstests/multiVersion/libs/auth_helpers.js');
                    tojson(res));
     }
 
+    var majorityWC = {w: 'majority', wtimeout: ReplSetTest.kDefaultTimeoutMS};
+
+    // Config server commands require w: majority writeConcerns.
+    var nonMajorityWCs = [{w: 'invalid'}, {w: 2}];
+
     commands.forEach(function(cmd) {
-        invalidWriteConcerns.forEach(function(wc) {
+        nonMajorityWCs.forEach(function(wc) {
             testInvalidWriteConcern(wc, cmd);
         });
-        testMajorityWriteConcern(cmd);
+        testValidWriteConcern(majorityWC, cmd);
     });
 
+    st.stop();
 })();

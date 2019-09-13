@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -128,7 +130,7 @@ enum LockResult {
     LOCK_DEADLOCK,
 
     /**
-     * This is used as an initialiser value. Should never be returned.
+     * This is used as an initializer value. Should never be returned.
      */
     LOCK_INVALID
 };
@@ -188,8 +190,6 @@ public:
         SINGLETON_PARALLEL_BATCH_WRITER_MODE,
         SINGLETON_GLOBAL,
         SINGLETON_MMAPV1_FLUSH,
-        SINGLETON_CAPPED_IN_FLIGHT_OTHER_DB,
-        SINGLETON_CAPPED_IN_FLIGHT_LOCAL_DB,
     };
 
     ResourceId() : _fullHash(0) {}
@@ -264,18 +264,6 @@ extern const ResourceId resourceIdAdminDB;
 // lock.
 // TODO: Merge this with resourceIdGlobal
 extern const ResourceId resourceIdParallelBatchWriterMode;
-
-// Everywhere that starts in-flight capped inserts which allocate capped collection RecordIds in
-// a way that could trigger hiding of newer records takes this lock in MODE_IX and holds it
-// until the end of their WriteUnitOfWork. The localDb resource is for capped collections in the
-// local database (including the oplog). The otherDb resource is for capped collections in any other
-// database.
-//
-// Threads that need a consistent view of the world can lock both of these in MODE_X to prevent
-// concurrent in-flight capped inserts. The otherDb resource must be acquired before the localDb
-// resource.
-extern const ResourceId resourceCappedInFlightForLocalDb;
-extern const ResourceId resourceCappedInFlightForOtherDb;
 
 /**
  * Interface on which granted lock requests will be notified. See the contract for the notify
@@ -432,6 +420,9 @@ struct LockRequest {
     // Written by LockManager on any thread
     // Read by LockManager on any thread
     // Protected by LockHead bucket's mutex
+    // Read by Locker on Locker thread
+    // It is safe for the Locker to read this without taking the bucket mutex provided that the
+    // LockRequest status is not WAITING or CONVERTING.
     LockMode mode;
 
     // This value is different from MODE_NONE only if a conversion is requested for a lock and that
@@ -441,6 +432,18 @@ struct LockRequest {
     // Read by LockManager on any thread
     // Protected by LockHead bucket's mutex
     LockMode convertMode;
+
+    // This unsigned represents the number of pending unlocks for this LockRequest. It is greater
+    // than 0 when the LockRequest is participating in two-phase lock and unlock() is called on it.
+    // It can be greater than 1 if this lock is participating in two-phase-lock and has been
+    // converted to a different mode that also participates in two-phase-lock. unlock() may be
+    // called multiple times on the same resourceId within the same WriteUnitOfWork in this case, so
+    // the number of unlocks() to execute at the end of this WUOW is tracked with this unsigned.
+    //
+    // Written by Locker on Locker thread
+    // Read by Locker on Locker thread
+    // No synchronization
+    unsigned unlockPending = 0;
 };
 
 /**

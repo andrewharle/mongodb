@@ -1,5 +1,15 @@
-// @tags: [assumes_write_concern_unchanged]
-
+// Cannot implicitly shard accessed collections because of not being able to create unique index
+// using hashed shard key pattern.
+//
+// @tags: [
+//   assumes_write_concern_unchanged,
+//   cannot_create_unique_index_when_using_hashed_shard_key,
+//   requires_fastcount,
+//
+//   # Uses index building in background
+//   requires_background_index,
+// ]
+//
 //
 // Ensures that mongod respects the batch write protocol for inserts
 //
@@ -15,7 +25,7 @@ var request;
 var result;
 var batch;
 
-var maxWriteBatchSize = 1000;
+var maxWriteBatchSize = db.isMaster().maxWriteBatchSize;
 
 function resultOK(result) {
     return result.ok && !('code' in result) && !('errmsg' in result) && !('errInfo' in result) &&
@@ -61,9 +71,8 @@ result = coll.runCommand(request);
 assert(resultOK(result), tojson(result));
 assert.eq(coll.count(), 1);
 
-for (var field in result) {
-    assert.eq('ok', field, 'unexpected field found in result: ' + field);
-}
+var fields = ['ok'];
+assert.hasFields(result, fields, 'fields in result do not match: ' + tojson(fields));
 
 //
 // Single document insert, w:1 write concern specified, ordered:true

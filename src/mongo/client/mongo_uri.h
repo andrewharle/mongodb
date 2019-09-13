@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,11 +41,11 @@
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/connection_string.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/transport/transport_layer.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
 /**
  * Encode a string for embedding in a URI.
  * Replaces reserved bytes with %xx sequences.
@@ -51,6 +53,7 @@ namespace mongo {
  * Optionally allows passthrough characters to remain unescaped.
  */
 void uriEncode(std::ostream& ss, StringData str, StringData passthrough = ""_sd);
+
 inline std::string uriEncode(StringData str, StringData passthrough = ""_sd) {
     std::ostringstream ss;
     uriEncode(ss, str, passthrough);
@@ -66,9 +69,13 @@ StatusWith<std::string> uriDecode(StringData str);
 /**
  * MongoURI handles parsing of URIs for mongodb, and falls back to old-style
  * ConnectionString parsing. It's used primarily by the shell.
- * It parses URIs with the following format:
+ * It parses URIs with the following formats:
  *
  *    mongodb://[usr:pwd@]host1[:port1]...[,hostN[:portN]]][/[db][?options]]
+ *    mongodb+srv://[usr:pwd@]host[/[db][?options]]
+ *
+ * `mongodb+srv://` URIs will perform DNS SRV and TXT lookups and expand per the DNS Seedlist
+ * specification.
  *
  * While this format is generally RFC 3986 compliant, some exceptions do exist:
  *   1. The 'host' field, as defined by section 3.2.2 is expanded in the following ways:
@@ -78,7 +85,7 @@ StatusWith<std::string> uriDecode(StringData str);
  *   2. The 'fragment' field, as defined by section 3.5 is not permitted.
  *
  * For a complete list of URI string options, see
- * https://wiki.mongodb.com/display/DH/Connection+String+Format
+ * https://docs.mongodb.com/manual/reference/connection-string/#connection-string-options
  *
  * Examples:
  *
@@ -96,9 +103,25 @@ StatusWith<std::string> uriDecode(StringData str);
  */
 class MongoURI {
 public:
+    // Note that, because this map is used for DNS TXT record injection on options, there is a
+    // requirement on its behavior for `insert`: insert must not replace or update existing values
+    // -- this gives the desired behavior that user-specified values override TXT record specified
+    // values.  `std::map` and `std::unordered_map` satisfy this requirement.  Make sure that
+    // whichever map type is used provides that guarantee.
     using OptionsMap = std::map<std::string, std::string>;
 
     static StatusWith<MongoURI> parse(const std::string& url);
+
+    /*
+     * Returns true if str starts with one of the uri schemes (e.g. mongodb:// or mongodb+srv://)
+     */
+    static bool isMongoURI(StringData str);
+
+    /*
+     * Returns a copy of the input url as a string with the password and connection options
+     * removed. This may uassert or return a mal-formed string if the input is not a valid URI
+     */
+    static std::string redact(StringData url);
 
     DBClientBase* connect(StringData applicationName,
                           std::string& errmsg,
@@ -108,20 +131,58 @@ public:
         return _user;
     }
 
+    void setUser(std::string newUsername) {
+        _user = std::move(newUsername);
+    }
+
     const std::string& getPassword() const {
         return _password;
+    }
+
+    void setPassword(std::string newPassword) {
+        _password = std::move(newPassword);
     }
 
     const OptionsMap& getOptions() const {
         return _options;
     }
 
+    void setOptionIfNecessary(std::string uriParamKey, std::string value) {
+        const auto key = _options.find(uriParamKey);
+        if (key == end(_options) && !value.empty()) {
+            _options[std::move(uriParamKey)] = std::move(value);
+        }
+    }
+
+    boost::optional<std::string> getOption(const std::string& key) const {
+        const auto optIter = _options.find(key);
+        if (optIter != end(_options)) {
+            return optIter->second;
+        }
+        return boost::none;
+    }
+
     const std::string& getDatabase() const {
         return _database;
     }
 
+    std::string getAuthenticationDatabase() const {
+        auto authDB = _options.find("authSource");
+        if (authDB != _options.end()) {
+            return authDB->second;
+        } else if (!_database.empty()) {
+            return _database;
+        } else {
+            return "admin";
+        }
+    }
+
     bool isValid() const {
         return _connectString.isValid();
+    }
+
+    const ConnectionString& connectionString() const {
+        return _connectString;
     }
 
     const std::string& toString() const {
@@ -136,24 +197,40 @@ public:
         return _connectString.getServers();
     }
 
+
+    const boost::optional<std::string> getAppName() const;
+
+    std::string canonicalizeURIAsString() const;
+
+
+    boost::optional<bool> getRetryWrites() const {
+        return _retryWrites;
+    }
+
+    transport::ConnectSSLMode getSSLMode() const {
+        return _sslMode;
+    }
+
     // If you are trying to clone a URI (including its options/auth information) for a single
     // server (say a member of a replica-set), you can pass in its HostAndPort information to
     // get a new URI with the same info, except type() will be MASTER and getServers() will
     // be the single host you pass in.
-    MongoURI cloneURIForServer(const HostAndPort& hostAndPort) const {
-        return MongoURI(ConnectionString(hostAndPort), _user, _password, _database, _options);
+    MongoURI cloneURIForServer(HostAndPort hostAndPort) const {
+        auto out = *this;
+        out._connectString = ConnectionString(std::move(hostAndPort));
+        return out;
     }
 
     ConnectionString::ConnectionType type() const {
         return _connectString.type();
     }
 
-    explicit MongoURI(const ConnectionString connectString)
-        : _connectString(std::move(connectString)){};
+    explicit MongoURI(const ConnectionString& connectString) : _connectString(connectString) {}
 
     MongoURI() = default;
 
     friend std::ostream& operator<<(std::ostream&, const MongoURI&);
+
     friend StringBuilder& operator<<(StringBuilder&, const MongoURI&);
 
 private:
@@ -161,30 +238,36 @@ private:
              const std::string& user,
              const std::string& password,
              const std::string& database,
+             boost::optional<bool> retryWrites,
+             transport::ConnectSSLMode sslMode,
              OptionsMap options)
         : _connectString(std::move(connectString)),
           _user(user),
           _password(password),
           _database(database),
-          _options(std::move(options)){};
+          _retryWrites(std::move(retryWrites)),
+          _sslMode(sslMode),
+          _options(std::move(options)) {}
 
-    BSONObj _makeAuthObjFromOptions(int maxWireVersion) const;
+    boost::optional<BSONObj> _makeAuthObjFromOptions(
+        int maxWireVersion, const std::vector<std::string>& saslMechsForAuth) const;
+
+    static MongoURI parseImpl(const std::string& url);
 
     ConnectionString _connectString;
     std::string _user;
     std::string _password;
     std::string _database;
+    boost::optional<bool> _retryWrites;
+    transport::ConnectSSLMode _sslMode = transport::kGlobalSSLMode;
     OptionsMap _options;
 };
 
 inline std::ostream& operator<<(std::ostream& ss, const MongoURI& uri) {
-    ss << uri._connectString;
-    return ss;
+    return ss << uri._connectString;
 }
 
 inline StringBuilder& operator<<(StringBuilder& sb, const MongoURI& uri) {
-    sb << uri._connectString;
-    return sb;
+    return sb << uri._connectString;
 }
-
 }  // namespace mongo

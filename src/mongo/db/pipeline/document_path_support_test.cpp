@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -279,6 +281,101 @@ TEST(VisitAllValuesAtPathTest, DoesNotAddMissingValueWithinArrayToResults) {
     ASSERT_EQ(values.size(), 2UL);
     ASSERT_EQ(values.count(Value(1)), 1UL);
     ASSERT_EQ(values.count(Value(2)), 1UL);
+}
+
+TEST(ExtractElementAlongNonArrayPathTest, ReturnsMissingIfPathDoesNotExist) {
+    Document doc{{"a", 1}, {"b", 2}};
+    auto result = extractElementAlongNonArrayPath(doc, FieldPath{"c.d"});
+    ASSERT_OK(result.getStatus());
+    ASSERT_VALUE_EQ(result.getValue(), Value{});
+}
+
+TEST(ExtractElementAlongNonArrayPathTest, ReturnsMissingIfPathPartiallyExists) {
+    Document doc{fromjson("{a: {b: {c: 1}}}")};
+    auto result = extractElementAlongNonArrayPath(doc, FieldPath{"a.b.c.d"});
+    ASSERT_OK(result.getStatus());
+    ASSERT_VALUE_EQ(result.getValue(), Value{});
+}
+
+TEST(ExtractElementAlongNonArrayPathTest, ReturnsValueIfPathExists) {
+    Document doc{fromjson("{a: {b: {c: {d: {e: 1}}}}}")};
+    auto result = extractElementAlongNonArrayPath(doc, FieldPath{"a.b.c.d"});
+    ASSERT_OK(result.getStatus());
+    ASSERT_VALUE_EQ(result.getValue(), Value{BSON("e" << 1)});
+}
+
+TEST(ExtractElementAlongNonArrayPathTest, FailsIfPathTerminatesAtEmptyArray) {
+    Document doc{fromjson("{a: {b: {c: {d: []}}}}}")};
+    auto result = extractElementAlongNonArrayPath(doc, FieldPath{"a.b.c.d"});
+    ASSERT_EQ(result.getStatus(), ErrorCodes::InternalError);
+}
+
+TEST(ExtractElementAlongNonArrayPathTest, FailsIfPathTerminatesAtNonEmptyArray) {
+    Document doc{fromjson("{a: {b: {c: {d: [1, 2, 3]}}}}}")};
+    auto result = extractElementAlongNonArrayPath(doc, FieldPath{"a.b.c.d"});
+    ASSERT_EQ(result.getStatus(), ErrorCodes::InternalError);
+}
+
+TEST(ExtractElementAlongNonArrayPathTest, FailsIfPathContainsArray) {
+    Document doc{fromjson("{a: {b: [{c: {d: 1}}]}}")};
+    auto result = extractElementAlongNonArrayPath(doc, FieldPath{"a.b.c.d"});
+    ASSERT_EQ(result.getStatus(), ErrorCodes::InternalError);
+}
+
+TEST(ExtractElementAlongNonArrayPathTest, FailsIfFirstPathComponentIsArray) {
+    Document doc{fromjson("{a: [1, 2, {b: 1}]}")};
+    auto result = extractElementAlongNonArrayPath(doc, FieldPath{"a.b"});
+    ASSERT_EQ(result.getStatus(), ErrorCodes::InternalError);
+}
+
+TEST(DocumentToBsonWithPathsTest, ShouldExtractTopLevelFieldIfDottedFieldNeeded) {
+    Document input(fromjson("{a: 1, b: {c: 1, d: 1}}"));
+    BSONObj expected = fromjson("{b: {c: 1, d: 1}}");
+    ASSERT_BSONOBJ_EQ(expected, document_path_support::documentToBsonWithPaths(input, {"b.c"}));
+}
+
+TEST(DocumentToBsonWithPathsTest, ShouldExtractEntireArray) {
+    Document input(fromjson("{a: [1, 2, 3], b: 1}"));
+    BSONObj expected = fromjson("{a: [1, 2, 3]}");
+    ASSERT_BSONOBJ_EQ(expected, document_path_support::documentToBsonWithPaths(input, {"a"}));
+}
+
+TEST(DocumentToBsonWithPathsTest, ShouldExtractEntireArrayWithNumericPathComponent) {
+    Document input(fromjson("{a: [1, 2, 3], b: 1}"));
+    BSONObj expected = fromjson("{a: [1, 2, 3]}");
+    ASSERT_BSONOBJ_EQ(expected, document_path_support::documentToBsonWithPaths(input, {"a.0"}));
+}
+
+TEST(DocumentToBsonWithPathsTest, ShouldExtractEntireObjectWithNumericPathComponent) {
+    Document input(fromjson("{a: {'0': 2, c: 3}, b: 1}"));
+    BSONObj expected = fromjson("{a: {'0': 2, c: 3}}");
+    ASSERT_BSONOBJ_EQ(expected, document_path_support::documentToBsonWithPaths(input, {"a.0"}));
+}
+
+TEST(DocumentToBsonWithPathsTest, ShouldOnlyAddPrefixedFieldOnceIfTwoDottedSubfields) {
+    Document input(fromjson("{a: 1, b: {c: 1, f: {d: {e: 1}}}}"));
+    BSONObj expected = fromjson("{b: {c: 1, f: {d: {e: 1}}}}");
+    ASSERT_BSONOBJ_EQ(expected,
+                      document_path_support::documentToBsonWithPaths(input, {"b.f", "b.f.d.e"}));
+}
+
+TEST(DocumentToBsonWithPathsTest, MissingFieldShouldNotAppearInResult) {
+    Document input(fromjson("{a: 1}"));
+    BSONObj expected;
+    ASSERT_BSONOBJ_EQ(expected, document_path_support::documentToBsonWithPaths(input, {"b", "c"}));
+}
+
+TEST(DocumentToBsonWithPathsTest, ShouldSerializeNothingIfNothingIsNeeded) {
+    Document input(fromjson("{a: 1, b: {c: 1}}"));
+    BSONObj expected;
+    ASSERT_BSONOBJ_EQ(
+        expected, document_path_support::documentToBsonWithPaths(input, std::set<std::string>{}));
+}
+
+TEST(DocumentToBsonWithPathsTest, ShouldExtractEntireArrayFromPrefixOfDottedField) {
+    Document input(fromjson("{a: [{b: 1}, {b: 2}], c: 1}"));
+    BSONObj expected = fromjson("{a: [{b: 1}, {b: 2}]}");
+    ASSERT_BSONOBJ_EQ(expected, document_path_support::documentToBsonWithPaths(input, {"a.b"}));
 }
 
 }  // namespace

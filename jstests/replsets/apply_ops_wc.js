@@ -44,7 +44,7 @@
 
     function assertApplyOpsCommandWorked(res) {
         assert.eq(3, res.applied);
-        assert.commandWorked(res);
+        assert.commandWorkedIgnoringWriteConcernErrors(res);
         assert.eq([true, true, true], res.results);
     }
 
@@ -135,4 +135,5 @@
     secondaries[0].getDB('admin').runCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'off'});
     secondaries[1].getDB('admin').runCommand({configureFailPoint: 'rsSyncApplyStop', mode: 'off'});
 
+    replTest.stopSet();
 })();

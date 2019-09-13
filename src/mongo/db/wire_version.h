@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -67,9 +69,18 @@ enum WireVersion {
     // Supports all write commands take a write concern.
     COMMANDS_ACCEPT_WRITE_CONCERN = 5,
 
+    // Supports the new OP_MSG wireprotocol (3.6+).
+    SUPPORTS_OP_MSG = 6,
+
+    // Supports replica set transactions (3.8+).
+    REPLICA_SET_TRANSACTIONS = 7,
+
     // Set this to the highest value in this enum - it will be the default maxWireVersion for
     // the WireSpec values.
-    LATEST_WIRE_VERSION = COMMANDS_ACCEPT_WRITE_CONCERN,
+    LATEST_WIRE_VERSION = REPLICA_SET_TRANSACTIONS,
+
+    // This is used in testing to masquerade as a future binary version node.
+    FUTURE_WIRE_VERSION_FOR_TESTING = 1 << 20,
 };
 
 /**
@@ -104,16 +115,34 @@ struct WireSpec {
     static void appendInternalClientWireVersion(WireVersionInfo wireVersionInfo,
                                                 BSONObjBuilder* builder);
 
-    // incoming.minWireVersion - Minimum version that the server accepts on incoming requests. We
-    // should bump this whenever we don't want to allow incoming connections from clients that are
-    // too old.
+    // incomingExternalClient.minWireVersion - Minimum version that the server accepts on incoming
+    // requests from external clients. We should bump this whenever we don't want to allow incoming
+    // connections from clients that are too old.
 
-    // incoming.maxWireVersion - Latest version that the server accepts on incoming requests. This
-    // should always be at the latest entry in WireVersion.
-    WireVersionInfo incoming = {RELEASE_2_4_AND_BEFORE, LATEST_WIRE_VERSION};
+    // incomingExternalClient.maxWireVersion - Latest version that the server accepts on incoming
+    // requests from external clients. This should always be at the latest entry in WireVersion.
+    WireVersionInfo incomingExternalClient = {RELEASE_2_4_AND_BEFORE, LATEST_WIRE_VERSION};
+
+    // incomingInternalClient.minWireVersion - Minimum version that the server accepts on incoming
+    // requests from internal clients. This should be incomingInternalClient.maxWireVersion - 1,
+    // when the featureCompatibilityVersion is equal to the downgrade version, and
+    // incomingInternalClient.maxWireVersion otherwise. However, in 3.6, this needs to be
+    // RELEASE_2_4_AND_BEFORE when the featureCompatibilityVersion is equal to the downgrade version
+    // due to a bug in 3.4, where if the receiving node says it supports wire version range
+    // [COMMANDS_ACCEPT_WRITE_CONCERN, SUPPORTS_OP_MSG] and it is a mongod, the initiating node will
+    // think it only supports OP_QUERY.
+
+    // incomingInternalClient.maxWireVersion - Latest version that the server accepts on incoming
+    // requests. This should always be at the latest entry in WireVersion.
+    WireVersionInfo incomingInternalClient = {RELEASE_2_4_AND_BEFORE, LATEST_WIRE_VERSION};
 
     // outgoing.minWireVersion - Minimum version allowed on remote nodes when the server sends
-    // requests. We should bump this whenever we don't want to connect to clients that are too old.
+    // requests. This should be outgoing.maxWireVersion - 1, when the featureCompatibilityVersion is
+    // equal to the downgrade version, and outgoing.maxWireVersion otherwise. However, in 3.6, this
+    // needs to be RELEASE_2_4_AND_BEFORE when the featureCompatibilityVersion is equal to the
+    // downgrade version due to a bug in 3.4, where if the receiving node says it supports wire
+    // version range [COMMANDS_ACCEPT_WRITE_CONCERN, SUPPORTS_OP_MSG] and it is a mongod, the
+    // initiating node will think it only supports OP_QUERY.
 
     // outgoing.maxWireVersion - Latest version allowed on remote nodes when the server sends
     // requests.

@@ -94,4 +94,5 @@
         {create: "view1", viewOn: "collection", pipeline: [{$match: {}}]}));
     assert.commandFailedWithCode(primaryTestDB.runCommand({emptycapped: "system.views"}),
                                  ErrorCodes.IllegalOperation);
+    rst.stopSet();
 })();

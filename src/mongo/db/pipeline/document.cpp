@@ -1,29 +1,31 @@
+
 /**
- * Copyright (c) 2011 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -44,6 +46,9 @@ using std::string;
 using std::vector;
 
 const DocumentStorage DocumentStorage::kEmptyDoc;
+
+const std::vector<StringData> Document::allMetadataFieldNames = {
+    Document::metaFieldTextScore, Document::metaFieldRandVal, Document::metaFieldSortKey};
 
 Position DocumentStorage::findField(StringData requested) const {
     int reqSize = requested.size();  // get size calculation out of the way if needed
@@ -201,6 +206,7 @@ intrusive_ptr<DocumentStorage> DocumentStorage::clone() const {
     out->_metaFields = _metaFields;
     out->_textScore = _textScore;
     out->_randVal = _randVal;
+    out->_sortKey = _sortKey.getOwned();
 
     // Tell values that they have been memcpyed (updates ref counts)
     for (DocumentStorageIterator it = out->iteratorAll(); !it.atEnd(); it.advance()) {
@@ -265,8 +271,9 @@ BSONObj Document::toBson() const {
     return bb.obj();
 }
 
-const StringData Document::metaFieldTextScore("$textScore"_sd);
-const StringData Document::metaFieldRandVal("$randVal"_sd);
+constexpr StringData Document::metaFieldTextScore;
+constexpr StringData Document::metaFieldRandVal;
+constexpr StringData Document::metaFieldSortKey;
 
 BSONObj Document::toBsonWithMetaData() const {
     BSONObjBuilder bb;
@@ -275,6 +282,8 @@ BSONObj Document::toBsonWithMetaData() const {
         bb.append(metaFieldTextScore, getTextScore());
     if (hasRandMetaField())
         bb.append(metaFieldRandVal, getRandMetaField());
+    if (hasSortKeyMetaField())
+        bb.append(metaFieldSortKey, getSortKeyMetaField());
     return bb.obj();
 }
 
@@ -291,6 +300,9 @@ Document Document::fromBsonWithMetaData(const BSONObj& bson) {
                 continue;
             } else if (fieldName == metaFieldRandVal) {
                 md.setRandMetaField(elem.Double());
+                continue;
+            } else if (fieldName == metaFieldSortKey) {
+                md.setSortKeyMetaField(elem.Obj());
                 continue;
             }
         }
@@ -361,10 +373,9 @@ static Value getNestedFieldHelper(const Document& doc,
     return getNestedFieldHelper(val.getDocument(), fieldNames, positions, level + 1);
 }
 
-const Value Document::getNestedField(const FieldPath& fieldNames,
-                                     vector<Position>* positions) const {
-    fassert(16489, fieldNames.getPathLength());
-    return getNestedFieldHelper(*this, fieldNames, positions, 0);
+const Value Document::getNestedField(const FieldPath& path, vector<Position>* positions) const {
+    fassert(16489, path.getPathLength());
+    return getNestedFieldHelper(*this, path, positions, 0);
 }
 
 size_t Document::getApproximateSize() const {
@@ -413,10 +424,12 @@ int Document::compare(const Document& rL,
 
         // For compatibility with BSONObj::woCompare() consider the canonical type of values
         // before considerting their names.
-        const int rCType = canonicalizeBSONType(rField.val.getType());
-        const int lCType = canonicalizeBSONType(lField.val.getType());
-        if (lCType != rCType)
-            return lCType < rCType ? -1 : 1;
+        if (lField.val.getType() != rField.val.getType()) {
+            const int rCType = canonicalizeBSONType(rField.val.getType());
+            const int lCType = canonicalizeBSONType(lField.val.getType());
+            if (lCType != rCType)
+                return lCType < rCType ? -1 : 1;
+        }
 
         const int nameCmp = lField.nameSD().compare(rField.nameSD());
         if (nameCmp)
@@ -464,6 +477,10 @@ void Document::serializeForSorter(BufBuilder& buf) const {
         buf.appendNum(char(DocumentStorage::MetaType::RAND_VAL + 1));
         buf.appendNum(getRandMetaField());
     }
+    if (hasSortKeyMetaField()) {
+        buf.appendNum(char(DocumentStorage::MetaType::SORT_KEY + 1));
+        getSortKeyMetaField().appendSelfToBufBuilder(buf);
+    }
     buf.appendNum(char(0));
 }
 
@@ -480,6 +497,9 @@ Document Document::deserializeForSorter(BufReader& buf, const SorterDeserializeS
             doc.setTextScore(buf.read<LittleEndian<double>>());
         } else if (marker == char(DocumentStorage::MetaType::RAND_VAL) + 1) {
             doc.setRandMetaField(buf.read<LittleEndian<double>>());
+        } else if (marker == char(DocumentStorage::MetaType::SORT_KEY) + 1) {
+            doc.setSortKeyMetaField(
+                BSONObj::deserializeForSorter(buf, BSONObj::SorterDeserializeSettings()));
         } else {
             uasserted(28744, "Unrecognized marker, unable to deserialize buffer");
         }

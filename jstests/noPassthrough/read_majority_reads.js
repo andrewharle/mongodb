@@ -14,26 +14,44 @@
  * Each operation is tested on a single node, and (if supported) through mongos on both sharded and
  * unsharded collections. Mongos doesn't directly handle readConcern majority, but these tests
  * should ensure that it correctly propagates the setting to the shards when running commands.
+ * @tags: [requires_sharding, requires_majority_read_concern]
  */
 
 (function() {
     'use strict';
 
-    function makeCursor(mongo, result) {
-        return new DBCommandCursor(mongo, result);
+    // Skip this test if running with --nojournal and WiredTiger.
+    if (jsTest.options().noJournal &&
+        (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger")) {
+        print("Skipping test because running WiredTiger without journaling isn't a valid" +
+              " replica set configuration");
+        return;
+    }
+
+    var testServer = MongoRunner.runMongod();
+    var db = testServer.getDB("test");
+    if (!db.serverStatus().storageEngine.supportsCommittedReads) {
+        print("Skipping read_majority.js since storageEngine doesn't support it.");
+        MongoRunner.stopMongod(testServer);
+        return;
+    }
+    MongoRunner.stopMongod(testServer);
+
+    function makeCursor(db, result) {
+        return new DBCommandCursor(db, result);
     }
 
     // These test cases are functions that return a cursor of the documents in collections without
     // fetching them yet.
     var cursorTestCases = {
         find: function(coll) {
-            return makeCursor(coll.getMongo(),
+            return makeCursor(coll.getDB(),
                               assert.commandWorked(coll.runCommand(
                                   'find', {readConcern: {level: 'majority'}, batchSize: 0})));
         },
         aggregate: function(coll) {
             return makeCursor(
-                coll.getMongo(),
+                coll.getDB(),
                 assert.commandWorked(coll.runCommand(
                     'aggregate',
                     {readConcern: {level: 'majority'}, cursor: {batchSize: 0}, pipeline: []})));
@@ -43,7 +61,7 @@
                                       {readConcern: {level: 'majority'}, numCursors: 1});
             assert.commandWorked(res);
             assert.eq(res.cursors.length, 1, tojson(res));
-            return makeCursor(coll.getMongo(), res.cursors[0]);
+            return makeCursor(coll.getDB(), res.cursors[0]);
         },
     };
 
@@ -206,17 +224,21 @@
         }
     }
 
-    var mongod = MongoRunner.runMongod(
-        {setParameter: 'testingSnapshotBehaviorInIsolation=true', shardsvr: ""});
-    assert.neq(
-        null,
-        mongod,
-        'mongod was unable to start with the testingSnapshotBehaviorInIsolation parameter enabled');
+    var replTest = new ReplSetTest({
+        nodes: 1,
+        oplogSize: 2,
+        nodeOptions: {
+            setParameter: 'testingSnapshotBehaviorInIsolation=true',
+            enableMajorityReadConcern: '',
+            shardsvr: ''
+        }
+    });
+    replTest.startSet();
+    // Cannot wait for a stable checkpoint with 'testingSnapshotBehaviorInIsolation' set.
+    replTest.initiateWithAnyNodeAsPrimary(
+        null, "replSetInitiate", {doNotWaitForStableCheckpoint: true});
 
-    if (!mongod.adminCommand('serverStatus').storageEngine.supportsCommittedReads) {
-        print("Skipping read_majority_reads.js since storageEngine doesn't support it.");
-        return;
-    }
+    var mongod = replTest.getPrimary();
 
     (function testSingleNode() {
         var db = mongod.getDB("singleNode");
@@ -224,10 +246,10 @@
     })();
 
     var shardingTest = new ShardingTest({
-        shards: 0,  // We use the existing mongod.
+        shards: 0,
         mongos: 1,
     });
-    shardingTest.adminCommand({addShard: mongod.host});
+    assert(shardingTest.adminCommand({addShard: replTest.getURL()}));
 
     // Remove tests of commands that aren't supported at all through mongos, even on unsharded
     // collections.
@@ -265,5 +287,5 @@
     })();
 
     shardingTest.stop();
-    MongoRunner.stopMongod(mongod);
+    replTest.stopSet();
 })();

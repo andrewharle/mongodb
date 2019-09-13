@@ -1,29 +1,31 @@
+
 /**
- * Copyright 2011 (c) 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kQuery
@@ -36,6 +38,7 @@
 #include "mongo/db/pipeline/document_source_limit.h"
 #include "mongo/db/pipeline/document_source_sort.h"
 #include "mongo/db/pipeline/lite_parsed_document_source.h"
+#include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -47,6 +50,8 @@ REGISTER_DOCUMENT_SOURCE(geoNear,
                          DocumentSourceGeoNear::createFromBson);
 
 const long long DocumentSourceGeoNear::kDefaultLimit = 100;
+
+constexpr StringData DocumentSourceGeoNear::kKeyFieldName;
 
 const char* DocumentSourceGeoNear::getSourceName() const {
     return "$geoNear";
@@ -61,7 +66,7 @@ DocumentSource::GetNextResult DocumentSourceGeoNear::getNext() {
     if (!resultsIterator->more())
         return GetNextResult::makeEOF();
 
-    // each result from the geoNear command is wrapped in a wrapper object with "obj",
+    // Each result from the geoNear command is wrapped in a wrapper object with "obj",
     // "dis" and maybe "loc" fields. We want to take the object from "obj" and inject the
     // other fields into it.
     Document result(resultsIterator->next().embeddedObject());
@@ -69,6 +74,11 @@ DocumentSource::GetNextResult DocumentSourceGeoNear::getNext() {
     output.setNestedField(*distanceField, result["dis"]);
     if (includeLocs)
         output.setNestedField(*includeLocs, result["loc"]);
+
+    // In a cluster, $geoNear output will be merged via $sort, so add the sort key.
+    if (pExpCtx->needsMerge) {
+        output.setSortKeyMetaField(BSON("" << result["dis"]));
+    }
 
     return output.freeze();
 }
@@ -89,16 +99,21 @@ Pipeline::SourceContainer::iterator DocumentSourceGeoNear::doOptimizeAt(
 }
 
 // This command is sent as-is to the shards.
-// On router this becomes a sort by distance (nearest-first) with limit.
 intrusive_ptr<DocumentSource> DocumentSourceGeoNear::getShardSource() {
     return this;
 }
-intrusive_ptr<DocumentSource> DocumentSourceGeoNear::getMergeSource() {
-    return DocumentSourceSort::create(pExpCtx, BSON(distanceField->fullPath() << 1), limit);
+// On mongoS this becomes a merge sort by distance (nearest-first) with limit.
+std::list<intrusive_ptr<DocumentSource>> DocumentSourceGeoNear::getMergeSources() {
+    return {DocumentSourceSort::create(
+        pExpCtx, BSON(distanceField->fullPath() << 1 << "$mergePresorted" << true), limit)};
 }
 
-Value DocumentSourceGeoNear::serialize(bool explain) const {
+Value DocumentSourceGeoNear::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     MutableDocument result;
+
+    if (!keyFieldPath.empty()) {
+        result.setField(kKeyFieldName, Value(keyFieldPath));
+    }
 
     if (coordsIsArray) {
         result.setField("near", Value(BSONArray(coords)));
@@ -150,12 +165,10 @@ BSONObj DocumentSourceGeoNear::buildGeoNearCmd() const {
         geoNear.append("minDistance", minDistance);
 
     geoNear.append("query", query);
-    if (!pExpCtx->collation.isEmpty()) {
-        if (pExpCtx->getCollator()) {
-            geoNear.append("collation", pExpCtx->getCollator()->getSpec().toBSON());
-        } else {
-            geoNear.append("collation", CollationSpec::kSimpleSpec);
-        }
+    if (pExpCtx->getCollator()) {
+        geoNear.append("collation", pExpCtx->getCollator()->getSpec().toBSON());
+    } else {
+        geoNear.append("collation", CollationSpec::kSimpleSpec);
     }
 
     geoNear.append("spherical", spherical);
@@ -164,15 +177,21 @@ BSONObj DocumentSourceGeoNear::buildGeoNearCmd() const {
     if (includeLocs)
         geoNear.append("includeLocs", true);  // String in toBson
 
+    if (!keyFieldPath.empty()) {
+        geoNear.append(kKeyFieldName, keyFieldPath);
+    }
+
     return geoNear.obj();
 }
 
 void DocumentSourceGeoNear::runCommand() {
     massert(16603, "Already ran geoNearCommand", !resultsIterator);
 
-    bool ok = _mongod->directClient()->runCommand(
+    bool ok = pExpCtx->mongoProcessInterface->directClient()->runCommand(
         pExpCtx->ns.db().toString(), buildGeoNearCmd(), cmdOutput);
-    uassert(16604, "geoNear command failed: " + cmdOutput.toString(), ok);
+    if (!ok) {
+        uassertStatusOK(getStatusFromCommandResult(cmdOutput));
+    }
 
     resultsIterator.reset(new BSONObjIterator(cmdOutput["results"].embeddedObject()));
 }
@@ -236,6 +255,19 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options) {
     if (options.hasField("uniqueDocs"))
         warning() << "ignoring deprecated uniqueDocs option in $geoNear aggregation stage";
 
+    if (auto keyElt = options[kKeyFieldName]) {
+        uassert(ErrorCodes::TypeMismatch,
+                str::stream() << "$geoNear parameter '" << DocumentSourceGeoNear::kKeyFieldName
+                              << "' must be of type string but found type: "
+                              << typeName(keyElt.type()),
+                keyElt.type() == BSONType::String);
+        keyFieldPath = keyElt.str();
+        uassert(ErrorCodes::BadValue,
+                str::stream() << "$geoNear parameter '" << DocumentSourceGeoNear::kKeyFieldName
+                              << "' cannot be the empty string",
+                !keyFieldPath.empty());
+    }
+
     // The collation field is disallowed, even though it is accepted by the geoNear command, since
     // the $geoNear operation should respect the collation associated with the entire pipeline.
     uassert(40227,
@@ -245,7 +277,7 @@ void DocumentSourceGeoNear::parseOptions(BSONObj options) {
 }
 
 DocumentSourceGeoNear::DocumentSourceGeoNear(const intrusive_ptr<ExpressionContext>& pExpCtx)
-    : DocumentSourceNeedsMongod(pExpCtx),
+    : DocumentSource(pExpCtx),
       coordsIsArray(false),
       limit(DocumentSourceGeoNear::kDefaultLimit),
       maxDistance(-1.0),

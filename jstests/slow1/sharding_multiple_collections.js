@@ -1,10 +1,12 @@
+// @tags: [requires_sharding]
+
 (function() {
     'use strict';
 
     var s = new ShardingTest({shards: 2, mongos: 1, other: {chunkSize: 1, enableBalancer: true}});
 
     assert.commandWorked(s.s0.adminCommand({enablesharding: "test"}));
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
 
     var S = "";
     while (S.length < 500) {
@@ -26,7 +28,16 @@
     s.printShardingStatus();
 
     function mytest(coll, i, loopNumber) {
-        var x = coll.find({_id: i}).explain();
+        try {
+            var x = coll.find({_id: i}).explain();
+        } catch (e) {
+            // Ignore stale shard version exceptions, since there are many migrations happening, and
+            // mongos may not be able to complete the find within the stale version retries limit.
+            if (e.message.contains("stale config")) {
+                return;
+            }
+            throw e;
+        }
         if (x)
             return;
         throw Error("can't find " + i + " in " + coll.getName() + " on loopNumber: " + loopNumber +

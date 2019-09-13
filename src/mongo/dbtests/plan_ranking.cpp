@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 /**
@@ -43,7 +45,7 @@
 #include "mongo/db/exec/multi_plan.h"
 #include "mongo/db/index/index_descriptor.h"
 #include "mongo/db/json.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/query/get_executor.h"
 #include "mongo/db/query/query_knobs.h"
 #include "mongo/db/query/query_planner.h"
@@ -55,9 +57,9 @@
 namespace mongo {
 
 // How we access the external setParameter testing bool.
-extern std::atomic<bool> internalQueryForceIntersectionPlans;  // NOLINT
+extern AtomicBool internalQueryForceIntersectionPlans;
 
-extern std::atomic<bool> internalQueryPlannerEnableHashIntersection;  // NOLINT
+extern AtomicBool internalQueryPlannerEnableHashIntersection;
 
 }  // namespace mongo
 
@@ -71,29 +73,32 @@ static const NamespaceString nss("unittests.PlanRankingTests");
 class PlanRankingTestBase {
 public:
     PlanRankingTestBase()
-        : _internalQueryForceIntersectionPlans(internalQueryForceIntersectionPlans),
-          _enableHashIntersection(internalQueryPlannerEnableHashIntersection),
-          _client(&_txn) {
+        : _internalQueryForceIntersectionPlans(internalQueryForceIntersectionPlans.load()),
+          _enableHashIntersection(internalQueryPlannerEnableHashIntersection.load()),
+          _client(&_opCtx) {
         // Run all tests with hash-based intersection enabled.
-        internalQueryPlannerEnableHashIntersection = true;
+        internalQueryPlannerEnableHashIntersection.store(true);
 
-        OldClientWriteContext ctx(&_txn, nss.ns());
+        // Ensure N is significantly larger then internalQueryPlanEvaluationWorks.
+        ASSERT_GTE(N, internalQueryPlanEvaluationWorks.load() + 1000);
+
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
         _client.dropCollection(nss.ns());
     }
 
     virtual ~PlanRankingTestBase() {
         // Restore external setParameter testing bools.
-        internalQueryForceIntersectionPlans = _internalQueryForceIntersectionPlans;
-        internalQueryPlannerEnableHashIntersection = _enableHashIntersection;
+        internalQueryForceIntersectionPlans.store(_internalQueryForceIntersectionPlans);
+        internalQueryPlannerEnableHashIntersection.store(_enableHashIntersection);
     }
 
     void insert(const BSONObj& obj) {
-        OldClientWriteContext ctx(&_txn, nss.ns());
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
         _client.insert(nss.ns(), obj);
     }
 
     void addIndex(const BSONObj& obj) {
-        ASSERT_OK(dbtests::createIndex(&_txn, nss.ns(), obj));
+        ASSERT_OK(dbtests::createIndex(&_opCtx, nss.ns(), obj));
     }
 
     /**
@@ -103,35 +108,35 @@ public:
      * Does NOT take ownership of 'cq'.  Caller DOES NOT own the returned QuerySolution*.
      */
     QuerySolution* pickBestPlan(CanonicalQuery* cq) {
-        AutoGetCollectionForRead ctx(&_txn, nss.ns());
+        AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
         Collection* collection = ctx.getCollection();
 
         QueryPlannerParams plannerParams;
-        fillOutPlannerParams(&_txn, collection, cq, &plannerParams);
+        fillOutPlannerParams(&_opCtx, collection, cq, &plannerParams);
         // Turn this off otherwise it pops up in some plans.
         plannerParams.options &= ~QueryPlannerParams::KEEP_MUTATIONS;
 
         // Plan.
-        vector<QuerySolution*> solutions;
-        Status status = QueryPlanner::plan(*cq, plannerParams, &solutions);
-        ASSERT(status.isOK());
+        auto statusWithSolutions = QueryPlanner::plan(*cq, plannerParams);
+        ASSERT_OK(statusWithSolutions.getStatus());
+        auto solutions = std::move(statusWithSolutions.getValue());
 
         ASSERT_GREATER_THAN_OR_EQUALS(solutions.size(), 1U);
 
         // Fill out the MPR.
-        _mps.reset(new MultiPlanStage(&_txn, collection, cq));
+        _mps.reset(new MultiPlanStage(&_opCtx, collection, cq));
         unique_ptr<WorkingSet> ws(new WorkingSet());
         // Put each solution from the planner into the MPR.
         for (size_t i = 0; i < solutions.size(); ++i) {
             PlanStage* root;
-            ASSERT(StageBuilder::build(&_txn, collection, *cq, *solutions[i], ws.get(), &root));
-            // Takes ownership of all (actually some) arguments.
-            _mps->addPlan(solutions[i], root, ws.get());
+            ASSERT(StageBuilder::build(&_opCtx, collection, *cq, *solutions[i], ws.get(), &root));
+            // Takes ownership of 'root'.
+            _mps->addPlan(std::move(solutions[i]), root, ws.get());
         }
         // This is what sets a backup plan, should we test for it.
-        PlanYieldPolicy yieldPolicy(PlanExecutor::YIELD_MANUAL,
-                                    _txn.getServiceContext()->getFastClockSource());
-        _mps->pickBestPlan(&yieldPolicy);
+        PlanYieldPolicy yieldPolicy(PlanExecutor::NO_YIELD,
+                                    _opCtx.getServiceContext()->getFastClockSource());
+        _mps->pickBestPlan(&yieldPolicy).transitional_ignore();
         ASSERT(_mps->bestPlanChosen());
 
         size_t bestPlanIdx = _mps->bestPlanIdx();
@@ -149,18 +154,18 @@ public:
         return _mps->hasBackupPlan();
     }
 
-    OperationContext* txn() {
-        return &_txn;
+    OperationContext* opCtx() {
+        return &_opCtx;
     }
 
 protected:
     // A large number, which must be larger than the number of times
     // candidate plans are worked by the multi plan runner. Used for
     // determining the number of documents in the tests below.
-    static const int N;
+    const int N = 12000;
 
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContext& _opCtx = *_txnPtr;
 
 private:
     // Holds the value of global "internalQueryForceIntersectionPlans" setParameter flag.
@@ -175,9 +180,6 @@ private:
 
     DBDirectClient _client;
 };
-
-// static
-const int PlanRankingTestBase::N = internalQueryPlanEvaluationWorks + 1000;
 
 /**
  * Test that the "prefer ixisect" parameter works.
@@ -200,8 +202,7 @@ public:
         {
             auto qr = stdx::make_unique<QueryRequest>(nss);
             qr->setFilter(BSON("a" << 100 << "b" << 1));
-            auto statusWithCQ = CanonicalQuery::canonicalize(
-                txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+            auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
             verify(statusWithCQ.isOK());
             cq = std::move(statusWithCQ.getValue());
             ASSERT(cq.get());
@@ -214,14 +215,13 @@ public:
 
         // Turn on the "force intersect" option.
         // This will be reverted by PlanRankingTestBase's destructor when the test completes.
-        internalQueryForceIntersectionPlans = true;
+        internalQueryForceIntersectionPlans.store(true);
 
         // And run the same query again.
         {
             auto qr = stdx::make_unique<QueryRequest>(nss);
             qr->setFilter(BSON("a" << 100 << "b" << 1));
-            auto statusWithCQ = CanonicalQuery::canonicalize(
-                txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+            auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
             verify(statusWithCQ.isOK());
             cq = std::move(statusWithCQ.getValue());
         }
@@ -256,15 +256,14 @@ public:
         // Run the query {a:1, b:{$gt:1}.
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("a" << 1 << "b" << BSON("$gt" << 1)));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         verify(statusWithCQ.isOK());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
 
         // Turn on the "force intersect" option.
         // This will be reverted by PlanRankingTestBase's destructor when the test completes.
-        internalQueryForceIntersectionPlans = true;
+        internalQueryForceIntersectionPlans.store(true);
 
         QuerySolution* soln = pickBestPlan(cq.get());
         ASSERT(
@@ -298,8 +297,7 @@ public:
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("a" << 27));
         qr->setProj(BSON("_id" << 0 << "a" << 1 << "b" << 1));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -333,8 +331,7 @@ public:
         // There is no data that matches this query but we don't know that until EOF.
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("a" << 1 << "b" << 1 << "c" << 99));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -373,8 +370,7 @@ public:
         qr->setFilter(BSON("a" << 2));
         qr->setProj(BSON("_id" << 0 << "a" << 1 << "b" << 1));
 
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -407,8 +403,7 @@ public:
         // Run the query {a:N+1, b:1}.  (No such document.)
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("a" << N + 1 << "b" << 1));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         verify(statusWithCQ.isOK());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -444,8 +439,7 @@ public:
         // Run the query {a:N+1, b:1}.  (No such document.)
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("a" << BSON("$gte" << N + 1) << "b" << 1));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         verify(statusWithCQ.isOK());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -475,8 +469,7 @@ public:
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("_id" << BSON("$gte" << 20 << "$lte" << 200)));
         qr->setSort(BSON("c" << 1));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
 
@@ -505,8 +498,7 @@ public:
         // Look for A Space Odyssey.
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("foo" << 2001));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         verify(statusWithCQ.isOK());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -540,8 +532,7 @@ public:
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(BSON("a" << 1));
         qr->setSort(BSON("d" << 1));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -578,8 +569,7 @@ public:
         // than an index scan on 'a'.
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(fromjson("{a: 1, b: 1, c: {$gte: 5000}}"));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());
@@ -611,8 +601,7 @@ public:
 
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(fromjson("{a: 9, b: {$ne: 10}, c: 9}"));
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            txn(), std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(opCtx(), std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
         ASSERT(NULL != cq.get());

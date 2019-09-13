@@ -1,24 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
- *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,8 +35,10 @@
 #include <set>
 
 #include "mongo/base/checked_cast.h"
+#include "mongo/base/init.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/catalog/database.h"
+#include "mongo/db/catalog/database_holder.h"
 #include "mongo/db/client.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/db_raii.h"
@@ -56,11 +59,11 @@ namespace {
 std::set<NamespaceString> _backgroundThreadNamespaces;
 stdx::mutex _backgroundThreadMutex;
 
-class WiredTigerRecordStoreThread : public BackgroundJob {
+class OplogTruncaterThread : public BackgroundJob {
 public:
-    WiredTigerRecordStoreThread(const NamespaceString& ns)
+    OplogTruncaterThread(const NamespaceString& ns)
         : BackgroundJob(true /* deleteSelf */), _ns(ns) {
-        _name = std::string("WT RecordStoreThread: ") + _ns.toString();
+        _name = std::string("WT OplogTruncaterThread: ") + _ns.toString();
     }
 
     virtual std::string name() const {
@@ -71,52 +74,64 @@ public:
      * Returns true iff there was an oplog to delete from.
      */
     bool _deleteExcessDocuments() {
-        if (!getGlobalServiceContext()->getGlobalStorageEngine()) {
+        if (!getGlobalServiceContext()->getStorageEngine()) {
             LOG(2) << "no global storage engine yet";
             return false;
         }
 
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
+        const ServiceContext::UniqueOperationContext opCtx = cc().makeOperationContext();
 
         try {
-            ScopedTransaction transaction(&txn, MODE_IX);
+            // A Global IX lock should be good enough to protect the oplog truncation from
+            // interruptions such as restartCatalog. PBWM, database lock or collection lock is not
+            // needed. This improves concurrency if oplog truncation takes long time.
+            ShouldNotConflictWithSecondaryBatchApplicationBlock shouldNotConflictBlock(
+                opCtx.get()->lockState());
+            Lock::GlobalLock lk(opCtx.get(), MODE_IX);
 
-            AutoGetDb autoDb(&txn, _ns.db(), MODE_IX);
-            Database* db = autoDb.getDb();
-            if (!db) {
-                LOG(2) << "no local database yet";
-                return false;
+            WiredTigerRecordStore* rs = nullptr;
+            {
+                // Release the database lock right away because we don't want to
+                // block other operations on the local database and given the
+                // fact that oplog collection is so special, Global IX lock can
+                // make sure the collection exists.
+                Lock::DBLock dbLock(opCtx.get(), _ns.db(), MODE_IX);
+                Database* db = DatabaseHolder::getDatabaseHolder().get(opCtx.get(), _ns.db());
+                if (!db) {
+                    LOG(2) << "no local database yet";
+                    return false;
+                }
+                // We need to hold the database lock while getting the collection. Otherwise a
+                // concurrent collection creation would write to the map in the Database object
+                // while we concurrently read the map.
+                Collection* collection = db->getCollection(opCtx.get(), _ns);
+                if (!collection) {
+                    LOG(2) << "no collection " << _ns;
+                    return false;
+                }
+                rs = checked_cast<WiredTigerRecordStore*>(collection->getRecordStore());
             }
 
-            Lock::CollectionLock collectionLock(txn.lockState(), _ns.ns(), MODE_IX);
-            Collection* collection = db->getCollection(_ns);
-            if (!collection) {
-                LOG(2) << "no collection " << _ns;
-                return false;
-            }
-
-            OldClientContext ctx(&txn, _ns.ns(), false);
-            WiredTigerRecordStore* rs =
-                checked_cast<WiredTigerRecordStore*>(collection->getRecordStore());
-
-            if (!rs->yieldAndAwaitOplogDeletionRequest(&txn)) {
+            if (!rs->yieldAndAwaitOplogDeletionRequest(opCtx.get())) {
                 return false;  // Oplog went away.
             }
-            rs->reclaimOplog(&txn);
+            rs->reclaimOplog(opCtx.get());
+        } catch (const ExceptionForCat<ErrorCategory::Interruption>&) {
+            return false;
         } catch (const std::exception& e) {
-            severe() << "error in WiredTigerRecordStoreThread: " << e.what();
-            fassertFailedNoTrace(!"error in WiredTigerRecordStoreThread");
+            severe() << "error in OplogTruncaterThread: " << e.what();
+            fassertFailedNoTrace(!"error in OplogTruncaterThread");
         } catch (...) {
-            fassertFailedNoTrace(!"unknown error in WiredTigerRecordStoreThread");
+            fassertFailedNoTrace(!"unknown error in OplogTruncaterThread");
         }
         return true;
     }
 
     virtual void run() {
         Client::initThread(_name.c_str());
+        ON_BLOCK_EXIT([] { Client::destroy(); });
 
-        while (!inShutdown()) {
+        while (!globalInShutdownDeprecated()) {
             if (!_deleteExcessDocuments()) {
                 sleepmillis(1000);  // Back off in case there were problems deleting.
             }
@@ -128,16 +143,13 @@ private:
     std::string _name;
 };
 
-}  // namespace
-
-// static
-bool WiredTigerKVEngine::initRsOplogBackgroundThread(StringData ns) {
+bool initRsOplogBackgroundThread(StringData ns) {
     if (!NamespaceString::oplog(ns)) {
         return false;
     }
 
     if (storageGlobalParams.repair || storageGlobalParams.readOnly) {
-        LOG(1) << "not starting WiredTigerRecordStoreThread for " << ns
+        LOG(1) << "not starting OplogTruncaterThread for " << ns
                << " because we are either in repair or read-only mode";
         return false;
     }
@@ -145,14 +157,20 @@ bool WiredTigerKVEngine::initRsOplogBackgroundThread(StringData ns) {
     stdx::lock_guard<stdx::mutex> lock(_backgroundThreadMutex);
     NamespaceString nss(ns);
     if (_backgroundThreadNamespaces.count(nss)) {
-        log() << "WiredTigerRecordStoreThread " << ns << " already started";
+        log() << "OplogTruncaterThread " << ns << " already started";
     } else {
-        log() << "Starting WiredTigerRecordStoreThread " << ns;
-        BackgroundJob* backgroundThread = new WiredTigerRecordStoreThread(nss);
+        log() << "Starting OplogTruncaterThread " << ns;
+        BackgroundJob* backgroundThread = new OplogTruncaterThread(nss);
         backgroundThread->go();
         _backgroundThreadNamespaces.insert(nss);
     }
     return true;
 }
 
+MONGO_INITIALIZER(SetInitRsOplogBackgroundThreadCallback)(InitializerContext* context) {
+    WiredTigerKVEngine::setInitRsOplogBackgroundThreadCallback(initRsOplogBackgroundThread);
+    return Status::OK();
+}
+
+}  // namespace
 }  // namespace mongo

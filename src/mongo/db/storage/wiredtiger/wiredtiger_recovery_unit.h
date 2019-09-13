@@ -1,25 +1,25 @@
-// wiredtiger_recovery_unit.h
 
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,56 +32,127 @@
 
 #include <wiredtiger.h>
 
-#include <memory.h>
+#include <boost/optional.hpp>
+#include <cstdint>
+#include <memory>
+#include <vector>
 
 #include "mongo/base/checked_cast.h"
-#include "mongo/base/owned_pointer_vector.h"
+#include "mongo/bson/timestamp.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/record_id.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/storage/recovery_unit.h"
-#include "mongo/db/storage/snapshot_name.h"
+#include "mongo/db/storage/wiredtiger/wiredtiger_begin_transaction_block.h"
 #include "mongo/db/storage/wiredtiger/wiredtiger_session_cache.h"
-#include "mongo/util/concurrency/ticketholder.h"
 #include "mongo/util/timer.h"
 
 namespace mongo {
 
 class BSONObjBuilder;
 
+class WiredTigerOperationStats final : public StorageStats {
+public:
+    /**
+     *  There are two types of statistics provided by WiredTiger engine - data and wait.
+     */
+    enum class Section { DATA, WAIT };
+
+    BSONObj toBSON() final;
+
+    StorageStats& operator+=(const StorageStats&) final;
+
+    WiredTigerOperationStats& operator+=(const WiredTigerOperationStats&);
+
+    /**
+     * Fetches an operation's storage statistics from WiredTiger engine.
+     */
+    void fetchStats(WT_SESSION*, const std::string&, const std::string&);
+
+    std::shared_ptr<StorageStats> getCopy() final;
+
+private:
+    /**
+     * Each statistic in WiredTiger has an integer key, which this map associates with a section
+     * (either DATA or WAIT) and user-readable name.
+     */
+    static std::map<int, std::pair<StringData, Section>> _statNameMap;
+
+    /**
+     * Stores the value for each statistic returned by a WiredTiger cursor. Each statistic is
+     * associated with an integer key, which can be mapped to a name and section using the
+     * '_statNameMap'.
+     */
+    std::map<int, long long> _stats;
+};
+
 class WiredTigerRecoveryUnit final : public RecoveryUnit {
 public:
     WiredTigerRecoveryUnit(WiredTigerSessionCache* sc);
 
-    virtual ~WiredTigerRecoveryUnit();
+    /**
+     * It's expected a consumer would want to call the constructor that simply takes a
+     * `WiredTigerSessionCache`. That constructor accesses the `WiredTigerKVEngine` to find the
+     * `WiredTigerOplogManager`. However, unit tests construct `WiredTigerRecoveryUnits` with a
+     * `WiredTigerSessionCache` that do not have a valid `WiredTigerKVEngine`. This constructor is
+     * expected to only be useful in those cases.
+     */
+    WiredTigerRecoveryUnit(WiredTigerSessionCache* sc, WiredTigerOplogManager* oplogManager);
+    ~WiredTigerRecoveryUnit();
 
-    virtual void reportState(BSONObjBuilder* b) const;
+    void beginUnitOfWork(OperationContext* opCtx) override;
+    void prepareUnitOfWork() override;
+    void commitUnitOfWork() override;
+    void abortUnitOfWork() override;
 
-    void beginUnitOfWork(OperationContext* opCtx) final;
-    void commitUnitOfWork() final;
-    void abortUnitOfWork() final;
+    bool waitUntilDurable() override;
 
-    virtual bool waitUntilDurable();
+    bool waitUntilUnjournaledWritesDurable() override;
 
-    virtual void registerChange(Change* change);
+    void registerChange(Change* change) override;
 
-    virtual void abandonSnapshot();
+    void abandonSnapshot() override;
+    void preallocateSnapshot() override;
 
-    virtual void* writingPtr(void* data, size_t len);
+    Status obtainMajorityCommittedSnapshot() override;
 
-    virtual void setRollbackWritesDisabled() {}
+    boost::optional<Timestamp> getPointInTimeReadTimestamp() const override;
 
-    virtual SnapshotId getSnapshotId() const;
+    SnapshotId getSnapshotId() const override;
 
-    Status setReadFromMajorityCommittedSnapshot() final;
-    bool isReadingFromMajorityCommittedSnapshot() const final {
-        return _readFromMajorityCommittedSnapshot;
+    Status setTimestamp(Timestamp timestamp) override;
+
+    void setCommitTimestamp(Timestamp timestamp) override;
+
+    void clearCommitTimestamp() override;
+
+    Timestamp getCommitTimestamp() override;
+
+    void setPrepareTimestamp(Timestamp timestamp) override;
+
+    void setIgnorePrepared(bool ignore) override;
+
+    void setTimestampReadSource(ReadSource source,
+                                boost::optional<Timestamp> provided = boost::none) override;
+
+    ReadSource getTimestampReadSource() const override;
+
+    void* writingPtr(void* data, size_t len) override;
+
+    void setRollbackWritesDisabled() override {}
+
+    virtual void setOrderedCommit(bool orderedCommit) override {
+        _orderedCommit = orderedCommit;
     }
 
-    boost::optional<SnapshotName> getMajorityCommittedSnapshot() const final;
+    std::shared_ptr<StorageStats> getOperationStatistics() const override;
 
     // ---- WT STUFF
 
-    WiredTigerSession* getSession(OperationContext* opCtx);
+    WiredTigerSession* getSession();
+    void setIsOplogReader() {
+        _isOplogReader = true;
+    }
 
     /**
      * Enter a period of wait or computation during which there are no WT calls.
@@ -94,7 +165,7 @@ public:
      * running session.
      */
 
-    WiredTigerSession* getSessionNoTxn(OperationContext* opCtx);
+    WiredTigerSession* getSessionNoTxn();
 
     WiredTigerSessionCache* getSessionCache() {
         return _sessionCache;
@@ -104,28 +175,11 @@ public:
     }
     void assertInActiveTxn() const;
 
-    bool everStartedWrite() const {
-        return _everStartedWrite;
-    }
-
-    void setOplogReadTill(const RecordId& id);
-    RecordId getOplogReadTill() const {
-        return _oplogReadTill;
-    }
-
-    static WiredTigerRecoveryUnit* get(OperationContext* txn) {
-        return checked_cast<WiredTigerRecoveryUnit*>(txn->recoveryUnit());
+    static WiredTigerRecoveryUnit* get(OperationContext* opCtx) {
+        return checked_cast<WiredTigerRecoveryUnit*>(opCtx->recoveryUnit());
     }
 
     static void appendGlobalStats(BSONObjBuilder& b);
-
-    /**
-     * Prepares this RU to be the basis for a named snapshot.
-     *
-     * Begins a WT transaction, and invariants if we are already in one.
-     * Bans being in a WriteUnitOfWork until the next call to abandonSnapshot().
-     */
-    void prepareForCreateSnapshot(OperationContext* opCtx);
 
 private:
     void _abort();
@@ -133,21 +187,42 @@ private:
 
     void _ensureSession();
     void _txnClose(bool commit);
-    void _txnOpen(OperationContext* opCtx);
+    void _txnOpen();
+
+    /**
+     * Starts a transaction at the current all-committed timestamp.
+     * Returns the timestamp the transaction was started at.
+     */
+    Timestamp _beginTransactionAtAllCommittedTimestamp(WT_SESSION* session);
 
     WiredTigerSessionCache* _sessionCache;  // not owned
+    WiredTigerOplogManager* _oplogManager;  // not owned
     UniqueWiredTigerSession _session;
     bool _areWriteUnitOfWorksBanned = false;
     bool _inUnitOfWork;
     bool _active;
-    uint64_t _mySnapshotId;
-    bool _everStartedWrite;
-    Timer _timer;
-    RecordId _oplogReadTill;
-    bool _readFromMajorityCommittedSnapshot = false;
-    SnapshotName _majorityCommittedSnapshot = SnapshotName::min();
+    bool _isTimestamped = false;
 
-    typedef OwnedPointerVector<Change> Changes;
+    // Specifies which external source to use when setting read timestamps on transactions.
+    ReadSource _timestampReadSource = ReadSource::kUnset;
+
+    // Commits are assumed ordered.  Unordered commits are assumed to always need to reserve a
+    // new optime, and thus always call oplogDiskLocRegister() on the record store.
+    bool _orderedCommit = true;
+
+    // Ignoring prepared transactions will not return prepare conflicts and allow seeing prepared,
+    // but uncommitted data.
+    WiredTigerBeginTxnBlock::IgnorePrepared _ignorePrepared{
+        WiredTigerBeginTxnBlock::IgnorePrepared::kNoIgnore};
+    Timestamp _commitTimestamp;
+    Timestamp _prepareTimestamp;
+    boost::optional<Timestamp> _lastTimestampSet;
+    uint64_t _mySnapshotId;
+    Timestamp _majorityCommittedSnapshot;
+    Timestamp _readAtTimestamp;
+    std::unique_ptr<Timer> _timer;
+    bool _isOplogReader = false;
+    typedef std::vector<std::unique_ptr<Change>> Changes;
     Changes _changes;
 };
 
@@ -159,7 +234,7 @@ public:
     WiredTigerCursor(const std::string& uri,
                      uint64_t tableID,
                      bool forRecordStore,
-                     OperationContext* txn);
+                     OperationContext* opCtx);
 
     ~WiredTigerCursor();
 
@@ -176,7 +251,6 @@ public:
     WiredTigerSession* getSession() {
         return _session;
     }
-    WT_SESSION* getWTSession();
 
     void reset();
 

@@ -10,6 +10,10 @@
         // tested manually), so 127.0.0.1 is also present so the test mongo shell can connect
         // with that address.
         var mongod = MongoRunner.runMongod({ipv6: "", bind_ip: "::1,127.0.0.1"});
+        if (mongod == null) {
+            jsTest.log("Unable to run test because ipv6 is not on machine, see BF-10990");
+            return;
+        }
         var args = [
             "mongo",
             "--nodb",
@@ -25,6 +29,7 @@
         var exitCode = _runMongoProgram.apply(null, args);
         jsTest.log("Inner mode test finished, exit code was " + exitCode);
 
+        MongoRunner.stopMongod(mongod);
         // Pass the inner test's exit code back as the outer test's exit code
         if (exitCode != 0) {
             doassert("inner test failed with exit code " + exitcode);

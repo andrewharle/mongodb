@@ -1,6 +1,10 @@
 // test dropping a db with simultaneous commits
 //
-// @tags: [assumes_write_concern_unchanged]
+// @tags: [
+//   assumes_superuser_permissions,
+//   assumes_write_concern_unchanged,
+//   does_not_support_stepdowns,
+// ]
 
 m = db.getMongo();
 baseName = "jstests_dur_droprace";

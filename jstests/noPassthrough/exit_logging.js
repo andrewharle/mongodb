@@ -1,5 +1,6 @@
 /**
  * Tests that various forms of normal and abnormal shutdown write to the log files as expected.
+ * @tags: [requires_sharding]
  */
 
 (function() {
@@ -24,32 +25,25 @@
         var conn = launcher.start({});
 
         function checkOutput() {
-            var logContents = "";
-            assert.soon(
-                () => {
-                    logContents = rawMongoProgramOutput();
-                    return matchFn(logContents);
-                },
-                function() {
-                    // We can't just return a string because it will be well over the max
-                    // line length.
-                    // So we just print manually.
-                    print("================ BEGIN LOG CONTENTS ==================");
-                    logContents.split(/\n/).forEach((line) => {
-                        print(line);
-                    });
-                    print("================ END LOG CONTENTS =====================");
-                    return "";
-                },
-                30000);
+            var logContents = rawMongoProgramOutput();
+            function printLog() {
+                // We can't just return a string because it will be well over the max
+                // line length.
+                // So we just print manually.
+                print("================ BEGIN LOG CONTENTS ==================");
+                logContents.split(/\n/).forEach((line) => {
+                    print(line);
+                });
+                print("================ END LOG CONTENTS =====================");
+                return "";
+            }
+
+            assert(matchFn(logContents), printLog);
         }
 
-        try {
-            crashFn(conn);
-            checkOutput();
-        } finally {
-            launcher.stop(conn, undefined, {allowedExitCodes: [expectedExitCode]});
-        }
+        crashFn(conn);
+        launcher.stop(conn, undefined, {allowedExitCode: expectedExitCode});
+        checkOutput();
     }
 
     function runAllTests(launcher) {
@@ -97,7 +91,7 @@
     (function testMongos() {
         print("********************\nTesting exit logging in mongos\n********************");
 
-        var st = new ShardingTest({shards: 1, other: {shardOptions: {nojournal: ""}}});
+        var st = new ShardingTest({shards: 1});
         var mongosLauncher = {
             start: function(opts) {
                 var actualOpts = {configdb: st._configDB};
@@ -109,6 +103,7 @@
         };
 
         runAllTests(mongosLauncher);
+        st.stop();
     }());
 
 }());

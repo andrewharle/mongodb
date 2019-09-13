@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,6 +35,7 @@
 #include "mongo/db/dbmessage.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/matcher/expression.h"
+#include "mongo/db/matcher/extensions_callback_noop.h"
 #include "mongo/db/query/collation/collator_interface.h"
 #include "mongo/db/query/parsed_projection.h"
 #include "mongo/db/query/query_request.h"
@@ -47,25 +50,33 @@ public:
      * If parsing succeeds, returns a std::unique_ptr<CanonicalQuery> representing the parsed
      * query (which will never be NULL).  If parsing fails, returns an error Status.
      *
-     * 'txn' must point to a valid OperationContext, but 'txn' does not need to outlive the returned
-     * CanonicalQuery.
+     * 'opCtx' must point to a valid OperationContext, but 'opCtx' does not need to outlive the
+     * returned CanonicalQuery.
      *
      * Used for legacy find through the OP_QUERY message.
      */
     static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        OperationContext* txn,
+        OperationContext* opCtx,
         const QueryMessage& qm,
-        const ExtensionsCallback& extensionsCallback);
+        const boost::intrusive_ptr<ExpressionContext>& expCtx = nullptr,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallbackNoop(),
+        MatchExpressionParser::AllowedFeatureSet allowedFeatures =
+            MatchExpressionParser::kDefaultSpecialFeatures);
 
     /**
      * If parsing succeeds, returns a std::unique_ptr<CanonicalQuery> representing the parsed
      * query (which will never be NULL).  If parsing fails, returns an error Status.
      *
-     * 'txn' must point to a valid OperationContext, but 'txn' does not need to outlive the returned
-     *  CanonicalQuery.
+     * 'opCtx' must point to a valid OperationContext, but 'opCtx' does not need to outlive the
+     * returned CanonicalQuery.
      */
     static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        OperationContext* txn, std::unique_ptr<QueryRequest> qr, const ExtensionsCallback&);
+        OperationContext* opCtx,
+        std::unique_ptr<QueryRequest> qr,
+        const boost::intrusive_ptr<ExpressionContext>& expCtx = nullptr,
+        const ExtensionsCallback& extensionsCallback = ExtensionsCallbackNoop(),
+        MatchExpressionParser::AllowedFeatureSet allowedFeatures =
+            MatchExpressionParser::kDefaultSpecialFeatures);
 
     /**
      * For testing or for internal clients to use.
@@ -78,15 +89,12 @@ public:
      *
      * Does not take ownership of 'root'.
      */
-    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(
-        OperationContext* txn,
-        const CanonicalQuery& baseQuery,
-        MatchExpression* root,
-        const ExtensionsCallback& extensionsCallback);
+    static StatusWith<std::unique_ptr<CanonicalQuery>> canonicalize(OperationContext* opCtx,
+                                                                    const CanonicalQuery& baseQuery,
+                                                                    MatchExpression* root);
 
     /**
-     * Returns true if "query" describes an exact-match query on _id, possibly with
-     * the $isolated/$atomic modifier.
+     * Returns true if "query" describes an exact-match query on _id.
      */
     static bool isSimpleIdQuery(const BSONObj& query);
 
@@ -141,13 +149,6 @@ public:
     static Status isValid(MatchExpression* root, const QueryRequest& parsed);
 
     /**
-     * Returns the normalized version of the subtree rooted at 'root'.
-     *
-     * Takes ownership of 'root'.
-     */
-    static MatchExpression* normalizeTree(MatchExpression* root);
-
-    /**
      * Traverses expression tree post-order.
      * Sorts children at each non-leaf node by (MatchType, path(), children, number of children)
      */
@@ -159,31 +160,26 @@ public:
     static size_t countNodes(const MatchExpression* root, MatchExpression::MatchType type);
 
     /**
-     * Returns true if this canonical query converted extensions such as $where and $text into
-     * no-ops during parsing.
+     * Returns true if this canonical query may have converted extensions such as $where and $text
+     * into no-ops during parsing. This will be the case if it allowed $where and $text in parsing,
+     * but parsed using an ExtensionsCallbackNoop. This does not guarantee that a $where or $text
+     * existed in the query.
      *
      * Queries with a no-op extension context are special because they can be parsed and planned,
      * but they cannot be executed.
      */
-    bool hasNoopExtensions() const {
-        return _hasNoopExtensions;
-    }
-
-    /**
-     * Returns true if the query this CanonicalQuery was parsed from included a $isolated/$atomic
-     * operator.
-     */
-    bool isIsolated() const {
-        return _isIsolated;
+    bool canHaveNoopMatchNodes() const {
+        return _canHaveNoopMatchNodes;
     }
 
 private:
     // You must go through canonicalize to create a CanonicalQuery.
     CanonicalQuery() {}
 
-    Status init(std::unique_ptr<QueryRequest> qr,
-                const ExtensionsCallback& extensionsCallback,
-                MatchExpression* root,
+    Status init(OperationContext* opCtx,
+                std::unique_ptr<QueryRequest> qr,
+                bool canHaveNoopMatchNodes,
+                std::unique_ptr<MatchExpression> root,
                 std::unique_ptr<CollatorInterface> collator);
 
     std::unique_ptr<QueryRequest> _qr;
@@ -195,9 +191,7 @@ private:
 
     std::unique_ptr<CollatorInterface> _collator;
 
-    bool _hasNoopExtensions = false;
-
-    bool _isIsolated;
+    bool _canHaveNoopMatchNodes = false;
 };
 
 }  // namespace mongo

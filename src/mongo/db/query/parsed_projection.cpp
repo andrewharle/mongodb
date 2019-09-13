@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,9 +30,8 @@
 
 #include "mongo/db/query/parsed_projection.h"
 
-#include "mongo/db/query/query_request.h"
-
 #include "mongo/bson/simple_bsonobj_comparator.h"
+#include "mongo/db/query/query_request.h"
 
 namespace mongo {
 
@@ -47,10 +48,10 @@ using std::string;
  * Returns a Status indicating how it's invalid otherwise.
  */
 // static
-Status ParsedProjection::make(const BSONObj& spec,
+Status ParsedProjection::make(OperationContext* opCtx,
+                              const BSONObj& spec,
                               const MatchExpression* const query,
-                              ParsedProjection** out,
-                              const ExtensionsCallback& extensionsCallback) {
+                              ParsedProjection** out) {
     // Whether we're including or excluding fields.
     enum class IncludeExclude { kUninitialized, kInclude, kExclude };
     IncludeExclude includeExclude = IncludeExclude::kUninitialized;
@@ -58,6 +59,7 @@ Status ParsedProjection::make(const BSONObj& spec,
     bool requiresDocument = false;
     bool hasIndexKeyProjection = false;
 
+    bool wantTextScore = false;
     bool wantGeoNearPoint = false;
     bool wantGeoNearDistance = false;
     bool wantSortKey = false;
@@ -128,10 +130,17 @@ Status ParsedProjection::make(const BSONObj& spec,
                 // is ok because the parsed MatchExpression is not used after being created. We are
                 // only parsing here in order to ensure that the elemMatch projection is valid.
                 //
-                // TODO: Is there a faster way of validating the elemMatchObj?
+                // Match expression extensions such as $text, $where, $geoNear, $near, and
+                // $nearSphere are not allowed in $elemMatch projections. $expr and $jsonSchema are
+                // not allowed because the matcher is not applied to the root of the document.
                 const CollatorInterface* collator = nullptr;
+                boost::intrusive_ptr<ExpressionContext> expCtx(
+                    new ExpressionContext(opCtx, collator));
                 StatusWithMatchExpression statusWithMatcher =
-                    MatchExpressionParser::parse(elemMatchObj, extensionsCallback, collator);
+                    MatchExpressionParser::parse(elemMatchObj,
+                                                 std::move(expCtx),
+                                                 ExtensionsCallbackNoop(),
+                                                 MatchExpressionParser::kBanAllSpecialFeatures);
                 if (!statusWithMatcher.isOK()) {
                     return statusWithMatcher.getStatus();
                 }
@@ -161,7 +170,9 @@ Status ParsedProjection::make(const BSONObj& spec,
                 }
 
                 // This clobbers everything else.
-                if (e2.valuestr() == QueryRequest::metaIndexKey) {
+                if (e2.valuestr() == QueryRequest::metaTextScore) {
+                    wantTextScore = true;
+                } else if (e2.valuestr() == QueryRequest::metaIndexKey) {
                     hasIndexKeyProjection = true;
                 } else if (e2.valuestr() == QueryRequest::metaGeoNearDistance) {
                     wantGeoNearDistance = true;
@@ -183,10 +194,8 @@ Status ParsedProjection::make(const BSONObj& spec,
         } else if (mongoutils::str::equals(elem.fieldName(), "_id") && !elem.trueValue()) {
             pp->_hasId = false;
         } else {
-            // Projections of dotted fields aren't covered.
-            if (mongoutils::str::contains(elem.fieldName(), '.')) {
-                requiresDocument = true;
-            }
+            pp->_hasDottedFieldPath = pp->_hasDottedFieldPath ||
+                elem.fieldNameStringData().find('.') != std::string::npos;
 
             if (elem.trueValue()) {
                 pp->_includedFields.push_back(elem.fieldNameStringData());
@@ -264,6 +273,7 @@ Status ParsedProjection::make(const BSONObj& spec,
     pp->_requiresDocument = requiresDocument;
 
     // Add meta-projections.
+    pp->_wantTextScore = wantTextScore;
     pp->_wantGeoNearPoint = wantGeoNearPoint;
     pp->_wantGeoNearDistance = wantGeoNearDistance;
     pp->_wantSortKey = wantSortKey;
@@ -382,7 +392,7 @@ bool ParsedProjection::_isPositionalOperator(const char* fieldName) {
 // static
 bool ParsedProjection::_hasPositionalOperatorMatch(const MatchExpression* const query,
                                                    const std::string& matchfield) {
-    if (query->isLogical()) {
+    if (query->getCategory() == MatchExpression::MatchCategory::kLogical) {
         for (unsigned int i = 0; i < query->numChildren(); ++i) {
             if (_hasPositionalOperatorMatch(query->getChild(i), matchfield)) {
                 return true;

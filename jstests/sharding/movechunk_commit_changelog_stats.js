@@ -19,8 +19,7 @@
         let changeLog = st.s.getDB('config').changelog.find({what: 'moveChunk.commit'}).toArray();
         assert.gt(changeLog.length, 0);
         for (let i = 0; i < changeLog.length; i++) {
-            assert(changeLog[i].details.hasOwnProperty('counts') ||
-                   changeLog[i].details.hasOwnProperty('clonedBytes'));
+            assert(changeLog[i].details.hasOwnProperty('counts'));
         }
     }
 

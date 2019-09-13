@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -71,7 +73,7 @@ const double kInt32MinAsDouble = kInt32Min;
 const uint32_t kUInt32Zero = 0;
 const uint32_t kUInt32Max = std::numeric_limits<uint32_t>::max();
 const int64_t kUInt32MaxAsInt64 = kUInt32Max;
-const float kUInt32MaxAsFloat = kUInt32Max;
+const float kUInt32MaxAsFloat = static_cast<float>(kUInt32Max);
 const double kUInt32MaxAsDouble = kUInt32Max;
 
 // 64-bit integer values
@@ -79,14 +81,15 @@ const int64_t kInt64Zero = 0;
 const int64_t kInt64Max = std::numeric_limits<int64_t>::max();
 const int64_t kInt64Min = std::numeric_limits<int64_t>::lowest();
 const uint64_t kInt64MaxAsUInt64 = kInt64Max;
-const double kInt64MaxAsDouble = kInt64Max;
+const double kInt64MaxAsDouble = static_cast<double>(kInt64Max);
 const double kInt64MinAsDouble = kInt64Min;
 
 // Unsigned 64-bit integer values
 const uint64_t kUInt64Zero = 0;
 const uint64_t kUInt64Max = std::numeric_limits<uint64_t>::max();
-const float kUInt64MaxAsFloat = kUInt64Max;
-const double kUInt64MaxAsDouble = kUInt64Max;
+const float kUInt64MaxAsFloat = static_cast<float>(kUInt64Max);
+const double kUInt64MaxAsDouble = static_cast<double>(kUInt64Max);
+
 
 // Long long values
 const long long kLongLongMax = std::numeric_limits<long long>::max();

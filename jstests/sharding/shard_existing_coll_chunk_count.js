@@ -18,7 +18,7 @@
     var overhead = Object.bsonsize({_id: ObjectId(), i: 1, pad: ""});
 
     var getNumberChunks = function(ns) {
-        return s.configRS.getPrimary().getDB("config").getCollection("chunks").count({ns});
+        return s.getDB("config").getCollection("chunks").count({ns});
     };
 
     var runCase = function(opts) {

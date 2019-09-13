@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,8 +32,13 @@
 
 #include <iterator>
 
+#include "mongo/client/connection_pool.h"
+#include "mongo/client/dbclientinterface.h"
+#include "mongo/client/dbclientmockcursor.h"
+#include "mongo/db/client.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/oplog_interface_mock.h"
+#include "mongo/db/repl/oplog_interface_remote.h"
 #include "mongo/db/repl/roll_back_local_operations.h"
 #include "mongo/unittest/unittest.h"
 
@@ -40,14 +47,20 @@ namespace {
 using namespace mongo;
 using namespace mongo::repl;
 
-const OplogInterfaceMock::Operations kEmptyMockOperations;
-
-BSONObj makeOp(int seconds, long long hash) {
-    return BSON("ts" << Timestamp(Seconds(seconds), 0) << "h" << hash);
+BSONObj makeOp(long long seconds, long long hash) {
+    auto uuid = unittest::assertGet(UUID::parse("b4c66a44-c1ca-4d86-8d25-12e82fa2de5b"));
+    return BSON("ts" << Timestamp(seconds, seconds) << "h" << hash << "t" << seconds << "op"
+                     << "n"
+                     << "o"
+                     << BSONObj()
+                     << "ns"
+                     << "roll_back_local_operations.test"
+                     << "ui"
+                     << uuid);
 }
 
 int recordId = 0;
-OplogInterfaceMock::Operation makeOpAndRecordId(int seconds, long long hash) {
+OplogInterfaceMock::Operation makeOpAndRecordId(long long seconds, long long hash) {
     return std::make_pair(makeOp(seconds, hash), RecordId(++recordId));
 }
 
@@ -60,32 +73,28 @@ TEST(RollBackLocalOperationsTest, InvalidLocalOplogIterator) {
         std::unique_ptr<Iterator> makeIterator() const override {
             return std::unique_ptr<Iterator>();
         }
+        HostAndPort hostAndPort() const override {
+            return {};
+        }
     } invalidOplog;
     ASSERT_THROWS_CODE(
         RollBackLocalOperations(invalidOplog, [](const BSONObj&) { return Status::OK(); }),
-        UserException,
+        AssertionException,
         ErrorCodes::BadValue);
 }
 
 TEST(RollBackLocalOperationsTest, InvalidRollbackOperationFunction) {
     ASSERT_THROWS_CODE(RollBackLocalOperations(OplogInterfaceMock({makeOpAndRecordId(1, 0)}),
                                                RollBackLocalOperations::RollbackOperationFn()),
-                       UserException,
+                       AssertionException,
                        ErrorCodes::BadValue);
 }
 
 TEST(RollBackLocalOperationsTest, EmptyLocalOplog) {
-    OplogInterfaceMock localOplog(kEmptyMockOperations);
+    OplogInterfaceMock localOplog;
     RollBackLocalOperations finder(localOplog, [](const BSONObj&) { return Status::OK(); });
     auto result = finder.onRemoteOperation(makeOp(1, 0));
     ASSERT_EQUALS(ErrorCodes::OplogStartMissing, result.getStatus().code());
-}
-
-TEST(RollBackLocalOperationsTest, RollbackPeriodTooLong) {
-    OplogInterfaceMock localOplog({makeOpAndRecordId(1802, 0)});
-    RollBackLocalOperations finder(localOplog, [](const BSONObj&) { return Status::OK(); });
-    auto result = finder.onRemoteOperation(makeOp(1, 0));
-    ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit, result.getStatus().code());
 }
 
 TEST(RollBackLocalOperationsTest, RollbackMultipleLocalOperations) {
@@ -107,8 +116,9 @@ TEST(RollBackLocalOperationsTest, RollbackMultipleLocalOperations) {
     RollBackLocalOperations finder(localOplog, rollbackOperation);
     auto result = finder.onRemoteOperation(commonOperation.first);
     ASSERT_OK(result.getStatus());
-    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first), result.getValue().first);
-    ASSERT_EQUALS(commonOperation.second, result.getValue().second);
+    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first),
+                  result.getValue().getOpTime());
+    ASSERT_EQUALS(commonOperation.second, result.getValue().getRecordId());
     ASSERT_FALSE(i == localOperations.cend());
     ASSERT_BSONOBJ_EQ(commonOperation.first, i->first);
     i++;
@@ -165,8 +175,9 @@ TEST(RollBackLocalOperationsTest, SkipRemoteOperations) {
     }
     auto result = finder.onRemoteOperation(commonOperation.first);
     ASSERT_OK(result.getStatus());
-    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first), result.getValue().first);
-    ASSERT_EQUALS(commonOperation.second, result.getValue().second);
+    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first),
+                  result.getValue().getOpTime());
+    ASSERT_EQUALS(commonOperation.second, result.getValue().getRecordId());
     ASSERT_FALSE(i == localOperations.cend());
     ASSERT_BSONOBJ_EQ(commonOperation.first, i->first);
     i++;
@@ -198,8 +209,9 @@ TEST(RollBackLocalOperationsTest, SameTimestampDifferentHashess) {
     }
     auto result = finder.onRemoteOperation(commonOperation.first);
     ASSERT_OK(result.getStatus());
-    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first), result.getValue().first);
-    ASSERT_EQUALS(commonOperation.second, result.getValue().second);
+    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first),
+                  result.getValue().getOpTime());
+    ASSERT_EQUALS(commonOperation.second, result.getValue().getRecordId());
     ASSERT_FALSE(i == localOperations.cend());
     ASSERT_BSONOBJ_EQ(commonOperation.first, i->first);
     i++;
@@ -232,7 +244,7 @@ TEST(RollBackLocalOperationsTest, SameTimestampDifferentHashesEndOfLocalOplog) {
 
 TEST(SyncRollBackLocalOperationsTest, OplogStartMissing) {
     ASSERT_EQUALS(ErrorCodes::OplogStartMissing,
-                  syncRollBackLocalOperations(OplogInterfaceMock(kEmptyMockOperations),
+                  syncRollBackLocalOperations(OplogInterfaceMock(),
                                               OplogInterfaceMock({makeOpAndRecordId(1, 0)}),
                                               [](const BSONObj&) { return Status::OK(); })
                       .getStatus()
@@ -242,16 +254,7 @@ TEST(SyncRollBackLocalOperationsTest, OplogStartMissing) {
 TEST(SyncRollBackLocalOperationsTest, RemoteOplogMissing) {
     ASSERT_EQUALS(ErrorCodes::InvalidSyncSource,
                   syncRollBackLocalOperations(OplogInterfaceMock({makeOpAndRecordId(1, 0)}),
-                                              OplogInterfaceMock(kEmptyMockOperations),
-                                              [](const BSONObj&) { return Status::OK(); })
-                      .getStatus()
-                      .code());
-}
-
-TEST(SyncRollBackLocalOperationsTest, RollbackPeriodTooLong) {
-    ASSERT_EQUALS(ErrorCodes::ExceededTimeLimit,
-                  syncRollBackLocalOperations(OplogInterfaceMock({makeOpAndRecordId(1802, 0)}),
-                                              OplogInterfaceMock({makeOpAndRecordId(1, 0)}),
+                                              OplogInterfaceMock(),
                                               [](const BSONObj&) { return Status::OK(); })
                       .getStatus()
                       .code());
@@ -271,8 +274,9 @@ TEST(SyncRollBackLocalOperationsTest, RollbackTwoOperations) {
                                                   return Status::OK();
                                               });
     ASSERT_OK(result.getStatus());
-    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first), result.getValue().first);
-    ASSERT_EQUALS(commonOperation.second, result.getValue().second);
+    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first),
+                  result.getValue().getOpTime());
+    ASSERT_EQUALS(commonOperation.second, result.getValue().getRecordId());
     ASSERT_FALSE(i == localOperations.cend());
     ASSERT_BSONOBJ_EQ(commonOperation.first, i->first);
     i++;
@@ -290,8 +294,9 @@ TEST(SyncRollBackLocalOperationsTest, SkipOneRemoteOperation) {
                                         return Status::OK();
                                     });
     ASSERT_OK(result.getStatus());
-    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first), result.getValue().first);
-    ASSERT_EQUALS(commonOperation.second, result.getValue().second);
+    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first),
+                  result.getValue().getOpTime());
+    ASSERT_EQUALS(commonOperation.second, result.getValue().getRecordId());
 }
 
 TEST(SyncRollBackLocalOperationsTest, SameTimestampDifferentHashes) {
@@ -308,8 +313,9 @@ TEST(SyncRollBackLocalOperationsTest, SameTimestampDifferentHashes) {
                                         return Status::OK();
                                     });
     ASSERT_OK(result.getStatus());
-    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first), result.getValue().first);
-    ASSERT_EQUALS(commonOperation.second, result.getValue().second);
+    ASSERT_EQUALS(OpTime::parseFromOplogEntry(commonOperation.first),
+                  result.getValue().getOpTime());
+    ASSERT_EQUALS(commonOperation.second, result.getValue().getRecordId());
     ASSERT_TRUE(called);
 }
 
@@ -327,8 +333,7 @@ TEST(SyncRollBackLocalOperationsTest, SameTimestampEndOfLocalOplog) {
                                         return Status::OK();
                                     });
     ASSERT_EQUALS(ErrorCodes::NoMatchingDocument, result.getStatus().code());
-    ASSERT_STRING_CONTAINS(result.getStatus().reason(),
-                           "RS101 reached beginning of local oplog [1]");
+    ASSERT_STRING_CONTAINS(result.getStatus().reason(), "reached beginning of local oplog");
     ASSERT_TRUE(called);
 }
 
@@ -357,7 +362,7 @@ TEST(SyncRollBackLocalOperationsTest, SameTimestampEndOfRemoteOplog) {
                                         return Status::OK();
                                     });
     ASSERT_EQUALS(ErrorCodes::NoMatchingDocument, result.getStatus().code());
-    ASSERT_STRING_CONTAINS(result.getStatus().reason(), "RS100 reached beginning of remote oplog");
+    ASSERT_STRING_CONTAINS(result.getStatus().reason(), "reached beginning of remote oplog");
     ASSERT_TRUE(called);
 }
 
@@ -375,8 +380,7 @@ TEST(SyncRollBackLocalOperationsTest, DifferentTimestampEndOfLocalOplog) {
                                         return Status::OK();
                                     });
     ASSERT_EQUALS(ErrorCodes::NoMatchingDocument, result.getStatus().code());
-    ASSERT_STRING_CONTAINS(result.getStatus().reason(),
-                           "RS101 reached beginning of local oplog [2]");
+    ASSERT_STRING_CONTAINS(result.getStatus().reason(), "reached beginning of local oplog");
     ASSERT_TRUE(called);
 }
 
@@ -401,8 +405,83 @@ TEST(SyncRollBackLocalOperationsTest, DifferentTimestampEndOfRemoteOplog) {
                                                   return Status::OK();
                                               });
     ASSERT_EQUALS(ErrorCodes::NoMatchingDocument, result.getStatus().code());
-    ASSERT_STRING_CONTAINS(result.getStatus().reason(),
-                           "RS100 reached beginning of remote oplog [1]");
+    ASSERT_STRING_CONTAINS(result.getStatus().reason(), "reached beginning of remote oplog");
+}
+
+class DBClientConnectionForTest : public DBClientConnection {
+public:
+    DBClientConnectionForTest(int numInitFailures) : _initFailuresLeft(numInitFailures) {}
+
+    using DBClientConnection::query;
+
+    std::unique_ptr<DBClientCursor> query(const std::string& ns,
+                                          Query query,
+                                          int nToReturn,
+                                          int nToSkip,
+                                          const BSONObj* fieldsToReturn,
+                                          int queryOptions,
+                                          int batchSize) override {
+        if (_initFailuresLeft > 0) {
+            _initFailuresLeft--;
+            unittest::log()
+                << "Throwing DBException on DBClientCursorForTest::query(). Failures left: "
+                << _initFailuresLeft;
+            uasserted(50852, "Simulated network error");
+            MONGO_UNREACHABLE;
+        }
+
+        unittest::log() << "Returning success on DBClientCursorForTest::query()";
+
+        BSONArrayBuilder builder;
+        builder.append(makeOp(1, 1));
+        builder.append(makeOp(2, 2));
+        return std::make_unique<DBClientMockCursor>(this, builder.arr());
+    }
+
+private:
+    int _initFailuresLeft;
+};
+
+void checkRemoteIterator(int numNetworkFailures, bool expectedToSucceed) {
+
+    DBClientConnectionForTest conn(numNetworkFailures);
+    auto getConnection = [&]() -> DBClientBase* { return &conn; };
+
+    auto localOperation = makeOpAndRecordId(1, 1);
+    OplogInterfaceRemote remoteOplogMock(
+        HostAndPort("229w43rd", 10036), getConnection, "somecollection", 0);
+
+    auto result = Status::OK();
+
+    try {
+        result = syncRollBackLocalOperations(OplogInterfaceMock({localOperation}),
+                                             remoteOplogMock,
+                                             [&](const BSONObj&) { return Status::OK(); })
+                     .getStatus();
+    } catch (...) {
+        // For the failure scenario.
+        ASSERT_FALSE(expectedToSucceed);
+        return;
+    }
+    // For the success scenario.
+    ASSERT_TRUE(expectedToSucceed);
+    ASSERT_OK(result);
+}
+
+TEST(SyncRollBackLocalOperationsTest, RemoteOplogMakeIteratorSucceedsWithNoNetworkFailures) {
+    checkRemoteIterator(0, true);
+}
+
+TEST(SyncRollBackLocalOperationsTest, RemoteOplogMakeIteratorSucceedsWithOneNetworkFailure) {
+    checkRemoteIterator(1, true);
+}
+
+TEST(SyncRollBackLocalOperationsTest, RemoteOplogMakeIteratorSucceedsWithTwoNetworkFailures) {
+    checkRemoteIterator(2, true);
+}
+
+TEST(SyncRollBackLocalOperationsTest, RemoteOplogMakeIteratorFailsWithTooManyNetworkFailures) {
+    checkRemoteIterator(3, false);
 }
 
 }  // namespace

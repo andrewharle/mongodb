@@ -1,6 +1,10 @@
 /**
  * Tests that a $match with a geo expression still returns the correct results if it has been
  * absorbed by a $lookup.
+ *
+ * Accessed collections cannot be implicitly sharded because you cannot $lookup into a sharded
+ * collection.
+ * @tags: [assumes_unsharded_collection]
  */
 (function() {
     "use strict";

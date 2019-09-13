@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -34,6 +36,7 @@
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/status.h"
 #include "mongo/base/string_data.h"
+#include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/auth/privilege_format.h"
 #include "mongo/db/auth/role_name.h"
@@ -46,14 +49,18 @@ namespace auth {
 
 struct CreateOrUpdateUserArgs {
     UserName userName;
-    bool hasHashedPassword;
-    std::string hashedPassword;
+    bool hasPassword;
+    std::string password;
     bool hasCustomData;
     BSONObj customData;
     bool hasRoles;
     std::vector<RoleName> roles;
+    boost::optional<BSONArray> authenticationRestrictions;
+    std::vector<std::string> mechanisms;
+    bool digestPassword;
 
-    CreateOrUpdateUserArgs() : hasHashedPassword(false), hasCustomData(false), hasRoles(false) {}
+    CreateOrUpdateUserArgs()
+        : hasPassword(false), hasCustomData(false), hasRoles(false), digestPassword(true) {}
 };
 
 /**
@@ -98,11 +105,15 @@ Status parseAndValidateDropAllUsersFromDatabaseCommand(const BSONObj& cmdObj,
                                                        const std::string& dbname);
 
 struct UsersInfoArgs {
+    enum class Target { kExplicitUsers, kDB, kGlobal };
+
     std::vector<UserName> userNames;
-    bool allForDB;
-    bool showPrivileges;
-    bool showCredentials;
-    UsersInfoArgs() : allForDB(false), showPrivileges(false), showCredentials(false) {}
+    Target target;
+    bool showPrivileges = false;
+    AuthenticationRestrictionsFormat authenticationRestrictionsFormat =
+        AuthenticationRestrictionsFormat::kOmit;
+    bool showCredentials = false;
+    boost::optional<BSONObj> filter;
 };
 
 /**
@@ -113,11 +124,11 @@ Status parseUsersInfoCommand(const BSONObj& cmdObj, StringData dbname, UsersInfo
 
 struct RolesInfoArgs {
     std::vector<RoleName> roleNames;
-    bool allForDB;
-    PrivilegeFormat privilegeFormat;
-    bool showBuiltinRoles;
-    RolesInfoArgs()
-        : allForDB(false), privilegeFormat(PrivilegeFormat::kOmit), showBuiltinRoles(false) {}
+    bool allForDB = false;
+    PrivilegeFormat privilegeFormat = PrivilegeFormat::kOmit;
+    AuthenticationRestrictionsFormat authenticationRestrictionsFormat =
+        AuthenticationRestrictionsFormat::kOmit;
+    bool showBuiltinRoles = false;
 };
 
 /**
@@ -128,12 +139,11 @@ Status parseRolesInfoCommand(const BSONObj& cmdObj, StringData dbname, RolesInfo
 
 struct CreateOrUpdateRoleArgs {
     RoleName roleName;
-    bool hasRoles;
+    bool hasRoles = false;
     std::vector<RoleName> roles;
-    bool hasPrivileges;
+    bool hasPrivileges = false;
     PrivilegeVector privileges;
-
-    CreateOrUpdateRoleArgs() : hasRoles(false), hasPrivileges(false) {}
+    boost::optional<BSONArray> authenticationRestrictions;
 };
 
 /**
@@ -216,18 +226,5 @@ struct MergeAuthzCollectionsArgs {
 Status parseMergeAuthzCollectionsCommand(const BSONObj& cmdObj,
                                          MergeAuthzCollectionsArgs* parsedArgs);
 
-struct AuthSchemaUpgradeArgs {
-    int maxSteps = 3;
-    bool shouldUpgradeShards = true;
-};
-
-/**
- * Takes a command object describing an invocation of the "authSchemaUpgrade" command and
- * parses out the write concern, maximum steps to take and whether or not shard servers should
- * also be upgraded, in the sharded deployment case.
- */
-Status parseAuthSchemaUpgradeCommand(const BSONObj& cmdObj,
-                                     const std::string& dbname,
-                                     AuthSchemaUpgradeArgs* parsedArgs);
 }  // namespace auth
 }  // namespace mongo

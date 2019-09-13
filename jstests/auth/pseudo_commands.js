@@ -2,6 +2,7 @@
  * This tests the access control for the pseudo-commands inprog, curop, and killop.  Once
  * SERVER-5466 is resolved this test should be removed and its functionality merged into
  * commands_builtin_roles.js and commands_user_defined_roles.js.
+ * @tags: [requires_sharding]
  */
 
 function runTest(conn) {
@@ -187,9 +188,11 @@ function runTest(conn) {
 jsTest.log('Test standalone');
 var conn = MongoRunner.runMongod({auth: ''});
 runTest(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s);
 st.stop();

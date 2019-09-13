@@ -1,12 +1,14 @@
+test_kind: js_test
+
 selector:
-  js_test:
-    roots:
-    - jstests/sharding/*.js
-    exclude_files:
+  roots:
+  - jstests/sharding/*.js
+  exclude_files:
+  # Enable when SERVER-36634 is fixed.
+  - jstests/sharding/shard_collection_existing_zones.js
 
 executor:
-  js_test:
-    config:
-      shell_options:
-        nodb: ''
-        readMode: commands
+  config:
+    shell_options:
+      nodb: ''
+      readMode: commands

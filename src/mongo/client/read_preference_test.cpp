@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,7 +41,7 @@ using namespace mongo;
 static const Seconds kMinMaxStaleness = ReadPreferenceSetting::kMinimalMaxStalenessValue;
 
 void checkParse(const BSONObj& rpsObj, const ReadPreferenceSetting& expected) {
-    const auto swRps = ReadPreferenceSetting::fromBSON(rpsObj);
+    const auto swRps = ReadPreferenceSetting::fromInnerBSON(rpsObj);
     ASSERT_OK(swRps.getStatus());
     const auto rps = swRps.getValue();
     ASSERT_TRUE(rps.equals(expected));
@@ -92,12 +94,18 @@ TEST(ReadPreferenceSetting, ParseValid) {
 }
 
 void checkParseFails(const BSONObj& rpsObj) {
-    auto swRps = ReadPreferenceSetting::fromBSON(rpsObj);
+    auto swRps = ReadPreferenceSetting::fromInnerBSON(rpsObj);
     ASSERT_NOT_OK(swRps.getStatus());
 }
 
 void checkParseFailsWithError(const BSONObj& rpsObj, ErrorCodes::Error error) {
-    auto swRps = ReadPreferenceSetting::fromBSON(rpsObj);
+    auto swRps = ReadPreferenceSetting::fromInnerBSON(rpsObj);
+    ASSERT_NOT_OK(swRps.getStatus());
+    ASSERT_EQUALS(swRps.getStatus().code(), error);
+}
+
+void checkParseContainerFailsWithError(const BSONObj& rpsObj, ErrorCodes::Error error) {
+    auto swRps = ReadPreferenceSetting::fromContainingBSON(rpsObj);
     ASSERT_NOT_OK(swRps.getStatus());
     ASSERT_EQUALS(swRps.getStatus().code(), error);
 }
@@ -169,10 +177,16 @@ TEST(ReadPreferenceSetting, ParseInvalid) {
                          << "secondary"
                          << "maxStalenessSeconds"
                          << Seconds::max().count()));
+
+    checkParseContainerFailsWithError(BSON("$query" << BSON("pang"
+                                                            << "pong")
+                                                    << "$readPreference"
+                                                    << 2),
+                                      ErrorCodes::TypeMismatch);
 }
 
 void checkRoundtrip(const ReadPreferenceSetting& rps) {
-    auto parsed = ReadPreferenceSetting::fromBSON(rps.toBSON());
+    auto parsed = ReadPreferenceSetting::fromInnerBSON(rps.toInnerBSON());
     ASSERT_OK(parsed.getStatus());
     ASSERT_TRUE(parsed.getValue().equals(rps));
 }

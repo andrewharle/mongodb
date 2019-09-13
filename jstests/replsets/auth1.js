@@ -6,6 +6,11 @@
 load("jstests/replsets/rslib.js");
 
 (function() {
+    "use strict";
+
+    // TODO SERVER-35447: Multiple users cannot be authenticated on one connection within a session.
+    TestData.disableImplicitSessions = true;
+
     var name = "rs_auth1";
     var port = allocatePorts(5);
     var path = "jstests/libs/";
@@ -40,7 +45,6 @@ load("jstests/replsets/rslib.js");
     print("should fail with wrong permissions");
     assert.eq(
         m, _isWindows() ? 100 : 1, "mongod should exit w/ 1 (EXIT_FAILURE): permissions too open");
-    MongoRunner.stopMongod(port[0]);
 
     // Pre-populate the data directory for the first replica set node, to be started later, with
     // a user's credentials.
@@ -73,10 +77,10 @@ load("jstests/replsets/rslib.js");
     var master = rs.getPrimary();
     rs.awaitSecondaryNodes();
     var mId = rs.getNodeId(master);
-    var slave = rs.liveNodes.slaves[0];
+    var slave = rs._slaves[0];
     assert.eq(1, master.getDB("admin").auth("foo", "bar"));
-    assert.writeOK(
-        master.getDB("test").foo.insert({x: 1}, {writeConcern: {w: 3, wtimeout: 60000}}));
+    assert.writeOK(master.getDB("test").foo.insert(
+        {x: 1}, {writeConcern: {w: 3, wtimeout: ReplSetTest.kDefaultTimeoutMS}}));
 
     print("try some legal and illegal reads");
     var r = master.getDB("test").foo.findOne();
@@ -94,7 +98,7 @@ load("jstests/replsets/rslib.js");
                             "find did not throw, returned: " + tojson(r))
                         .toString();
         printjson(error);
-        assert.gt(error.indexOf("not authorized"), -1, "error was non-auth");
+        assert.gt(error.indexOf("command find requires authentication"), -1, "error was non-auth");
     }
 
     doQueryOn(slave);
@@ -117,7 +121,7 @@ load("jstests/replsets/rslib.js");
     for (var i = 0; i < 1000; i++) {
         bulk.insert({x: i, foo: "bar"});
     }
-    assert.writeOK(bulk.execute({w: 3, wtimeout: 60000}));
+    assert.writeOK(bulk.execute({w: 3, wtimeout: ReplSetTest.kDefaultTimeoutMS}));
 
     print("fail over");
     rs.stop(mId);
@@ -141,7 +145,7 @@ load("jstests/replsets/rslib.js");
     for (var i = 0; i < 1000; i++) {
         bulk.insert({x: i, foo: "bar"});
     }
-    bulk.execute({w: 3, wtimeout: 60000});
+    bulk.execute({w: 3, wtimeout: ReplSetTest.kDefaultTimeoutMS});
 
     print("add member with wrong key");
     var conn = MongoRunner.runMongod({
@@ -208,4 +212,6 @@ load("jstests/replsets/rslib.js");
         }
         return true;
     });
+    MongoRunner.stopMongod(conn);
+    rs.stopSet();
 })();

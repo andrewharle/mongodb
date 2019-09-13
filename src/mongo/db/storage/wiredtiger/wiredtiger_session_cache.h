@@ -1,26 +1,27 @@
 // wiredtiger_session_cache.h
 
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
- *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,7 +35,6 @@
 #include <list>
 #include <string>
 
-#include <boost/thread/shared_mutex.hpp>
 #include <wiredtiger.h>
 
 #include "mongo/db/storage/journal_listener.h"
@@ -124,6 +124,14 @@ public:
      */
     static const uint64_t kMetadataTableId = 0;
 
+    void setIdleExpireTime(Date_t idleExpireTime) {
+        _idleExpireTime = idleExpireTime;
+    }
+
+    Date_t getIdleExpireTime() const {
+        return _idleExpireTime;
+    }
+
 private:
     friend class WiredTigerSessionCache;
 
@@ -148,6 +156,7 @@ private:
     uint64_t _cursorGen;
     int _cursorsOut;
     bool _dropQueuedIdentsAtSessionEnd = true;
+    Date_t _idleExpireTime;
 };
 
 /**
@@ -157,7 +166,7 @@ private:
 class WiredTigerSessionCache {
 public:
     WiredTigerSessionCache(WiredTigerKVEngine* engine);
-    WiredTigerSessionCache(WT_CONNECTION* conn);
+    WiredTigerSessionCache(WT_CONNECTION* conn, ClockSource* cs);
     ~WiredTigerSessionCache();
 
     /**
@@ -169,11 +178,26 @@ public:
     };
 
     /**
+     * Indicates that WiredTiger should be configured to cache cursors.
+     */
+    static bool isEngineCachingCursors();
+
+    /**
      * Returns a smart pointer to a previously released session for reuse, or creates a new session.
      * This method must only be called while holding the global lock to avoid races with
      * shuttingDown, but otherwise is thread safe.
      */
     std::unique_ptr<WiredTigerSession, WiredTigerSessionDeleter> getSession();
+
+    /**
+     * Get a count of idle sessions in the session cache.
+     */
+    size_t getIdleSessionsCount();
+
+    /**
+     * Closes all cached sessions whose idle expiration time has been reached.
+     */
+    void closeExpiredIdleSessions(int64_t idleTimeMillis);
 
     /**
      * Free all cached sessions and ensures that previously acquired sessions will be freed on
@@ -205,7 +229,27 @@ public:
      * the log or forcing a checkpoint if forceCheckpoint is true or the journal is disabled.
      * Uses a temporary session. Safe to call without any locks, even during shutdown.
      */
-    void waitUntilDurable(bool forceCheckpoint);
+    void waitUntilDurable(bool forceCheckpoint, bool stableCheckpoint);
+
+    /**
+     * Waits until a prepared unit of work has ended (either been commited or aborted). This
+     * should be used when encountering WT_PREPARE_CONFLICT errors. The caller is required to retry
+     * the conflicting WiredTiger API operation. A return from this function does not guarantee that
+     * the conflicting transaction has ended, only that one prepared unit of work in the process has
+     * signaled that it has ended.
+     * Accepts an OperationContext that will throw an AssertionException when interrupted.
+     *
+     * This method is provided in WiredTigerSessionCache and not RecoveryUnit because all recovery
+     * units share the same session cache, and we want a recovery unit on one thread to signal all
+     * recovery units waiting for prepare conflicts across all other threads.
+     */
+    void waitUntilPreparedUnitOfWorkCommitsOrAborts(OperationContext* opCtx);
+
+    /**
+     * Notifies waiters that the caller's perpared unit of work has ended (either committed or
+     * aborted).
+     */
+    void notifyPreparedUnitOfWorkHasCommittedOrAborted();
 
     WT_CONNECTION* conn() const {
         return _conn;
@@ -224,9 +268,14 @@ public:
         return _cursorEpoch.load();
     }
 
+    WiredTigerKVEngine* getKVEngine() const {
+        return _engine;
+    }
+
 private:
-    WiredTigerKVEngine* _engine;  // not owned, might be NULL
-    WT_CONNECTION* _conn;         // not owned
+    WiredTigerKVEngine* _engine;      // not owned, might be NULL
+    WT_CONNECTION* _conn;             // not owned
+    ClockSource* const _clockSource;  // not owned
     WiredTigerSnapshotManager _snapshotManager;
 
     // Used as follows:
@@ -249,10 +298,18 @@ private:
     AtomicUInt32 _lastSyncTime;
     stdx::mutex _lastSyncMutex;
 
-    // Notified when we commit to the journal.
-    JournalListener* _journalListener = &NoOpJournalListener::instance;
+    // Mutex and cond var for waiting on prepare commit or abort.
+    stdx::mutex _prepareCommittedOrAbortedMutex;
+    stdx::condition_variable _prepareCommittedOrAbortedCond;
+    std::uint64_t _lastCommitOrAbortCounter;
+
     // Protects _journalListener.
     stdx::mutex _journalListenerMutex;
+    // Notified when we commit to the journal.
+    JournalListener* _journalListener = &NoOpJournalListener::instance;
+
+    WT_SESSION* _waitUntilDurableSession = nullptr;  // owned, and never explicitly closed
+                                                     // (uses connection close to clean up)
 
     /**
      * Returns a session to the cache for later reuse. If closeAll was called between getting this
@@ -267,4 +324,6 @@ private:
 typedef std::unique_ptr<WiredTigerSession,
                         typename WiredTigerSessionCache::WiredTigerSessionDeleter>
     UniqueWiredTigerSession;
+
+extern const std::string kWTRepairMsg;
 }  // namespace

@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2013-2014 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -42,7 +44,7 @@
 
 namespace mongo {
 
-extern std::atomic<bool> failIndexKeyTooLong;  // NOLINT
+extern AtomicBool failIndexKeyTooLong;
 
 class BSONObjBuilder;
 class MatchExpression;
@@ -78,7 +80,7 @@ public:
      *
      * The behavior of the insertion can be specified through 'options'.
      */
-    Status insert(OperationContext* txn,
+    Status insert(OperationContext* opCtx,
                   const BSONObj& obj,
                   const RecordId& loc,
                   const InsertDeleteOptions& options,
@@ -88,7 +90,7 @@ public:
      * Analogous to above, but remove the records instead of inserting them.
      * 'numDeleted' will be set to the number of keys removed from the index for the document.
      */
-    Status remove(OperationContext* txn,
+    Status remove(OperationContext* opCtx,
                   const BSONObj& obj,
                   const RecordId& loc,
                   const InsertDeleteOptions& options,
@@ -104,7 +106,7 @@ public:
      *
      * There is no obligation to perform the update after performing validation.
      */
-    Status validateUpdate(OperationContext* txn,
+    Status validateUpdate(OperationContext* opCtx,
                           const BSONObj& from,
                           const BSONObj& to,
                           const RecordId& loc,
@@ -123,7 +125,7 @@ public:
      * 'numInserted' will be set to the number of keys inserted into the index for the document.
      * 'numDeleted' will be set to the number of keys removed from the index for the document.
      */
-    Status update(OperationContext* txn,
+    Status update(OperationContext* opCtx,
                   const UpdateTicket& ticket,
                   int64_t* numInserted,
                   int64_t* numDeleted);
@@ -131,12 +133,12 @@ public:
     /**
      * Returns an unpositioned cursor over 'this' index.
      */
-    std::unique_ptr<SortedDataInterface::Cursor> newCursor(OperationContext* txn,
+    std::unique_ptr<SortedDataInterface::Cursor> newCursor(OperationContext* opCtx,
                                                            bool isForward = true) const;
     /**
      * Returns a pseudo-random cursor over 'this' index.
      */
-    std::unique_ptr<SortedDataInterface::Cursor> newRandomCursor(OperationContext* txn) const;
+    std::unique_ptr<SortedDataInterface::Cursor> newRandomCursor(OperationContext* opCtx) const;
 
     // ------ index level operations ------
 
@@ -146,7 +148,7 @@ public:
      * only called once for the lifetime of the index
      * if called multiple times, is an error
      */
-    Status initializeAsEmpty(OperationContext* txn);
+    Status initializeAsEmpty(OperationContext* opCtx);
 
     /**
      * Try to page-in the pages that contain the keys generated from 'obj'.
@@ -154,20 +156,18 @@ public:
      * appropriate pages are not swapped out.
      * See prefetch.cpp.
      */
-    Status touch(OperationContext* txn, const BSONObj& obj);
+    Status touch(OperationContext* opCtx, const BSONObj& obj);
 
     /**
      * this pages in the entire index
      */
-    Status touch(OperationContext* txn) const;
+    Status touch(OperationContext* opCtx) const;
 
     /**
      * Walk the entire index, checking the internal structure for consistency.
      * Set numKeys to the number of keys in the index.
-
-     * Return OK if the index is valid.
      */
-    Status validate(OperationContext* txn, int64_t* numKeys, ValidateResults* fullResults);
+    void validate(OperationContext* opCtx, int64_t* numKeys, ValidateResults* fullResults);
 
     /**
      * Add custom statistics about this index to BSON object builder, for display.
@@ -176,21 +176,26 @@ public:
      *
      * Returns true if stats were appended.
      */
-    bool appendCustomStats(OperationContext* txn, BSONObjBuilder* result, double scale) const;
+    bool appendCustomStats(OperationContext* opCtx, BSONObjBuilder* result, double scale) const;
 
     /**
      * @return The number of bytes consumed by this index.
      *         Exactly what is counted is not defined based on padding, re-use, etc...
      */
-    long long getSpaceUsedBytes(OperationContext* txn) const;
+    long long getSpaceUsedBytes(OperationContext* opCtx) const;
 
-    RecordId findSingle(OperationContext* txn, const BSONObj& key) const;
+    RecordId findSingle(OperationContext* opCtx, const BSONObj& key) const;
 
     /**
      * Attempt compaction to regain disk space if the indexed record store supports
      * compaction-in-place.
      */
-    Status compact(OperationContext* txn);
+    Status compact(OperationContext* opCtx);
+
+    /**
+     * Sets this index as multikey with the provided paths.
+     */
+    void setIndexIsMultikey(OperationContext* opCtx, MultikeyPaths paths);
 
     //
     // Bulk operations support
@@ -201,11 +206,17 @@ public:
         /**
          * Insert into the BulkBuilder as-if inserting into an IndexAccessMethod.
          */
-        Status insert(OperationContext* txn,
+        Status insert(OperationContext* opCtx,
                       const BSONObj& obj,
                       const RecordId& loc,
                       const InsertDeleteOptions& options,
                       int64_t* numInserted);
+
+        const MultikeyPaths& getMultikeyPaths() const {
+            return _indexMultikeyPaths;
+        }
+
+        bool isMultikey() const;
 
     private:
         friend class IndexAccessMethod;
@@ -245,21 +256,29 @@ public:
      * Call this when you are ready to finish your bulk work.
      * Pass in the BulkBuilder returned from initiateBulk.
      * @param bulk - something created from initiateBulk
-     * @param mayInterrupt - is this commit interruptable (will cancel)
+     * @param mayInterrupt - is this commit interruptible (will cancel)
      * @param dupsAllowed - if false, error or fill 'dups' if any duplicate values are found
      * @param dups - if NULL, error out on dups if not allowed
      *               if not NULL, put the bad RecordIds there
      */
-    Status commitBulk(OperationContext* txn,
-                      std::unique_ptr<BulkBuilder> bulk,
+    Status commitBulk(OperationContext* opCtx,
+                      BulkBuilder* bulk,
                       bool mayInterrupt,
                       bool dupsAllowed,
                       std::set<RecordId>* dups);
 
     /**
-     * Specifies whether getKeys should relax the index constraints or not.
+     * Specifies whether getKeys should relax the index constraints or not, in order of most
+     * permissive to least permissive.
      */
-    enum class GetKeysMode { kRelaxConstraints, kEnforceConstraints };
+    enum class GetKeysMode {
+        // Relax all constraints.
+        kRelaxConstraints,
+        // Relax all constraints on documents that don't apply to a partial index.
+        kRelaxConstraintsUnfiltered,
+        // Enforce all constraints.
+        kEnforceConstraints
+    };
 
     /**
      * Fills 'keys' with the keys that should be generated for 'obj' on this index.
@@ -306,13 +325,13 @@ protected:
     /**
      * Determines whether it's OK to ignore ErrorCodes::KeyTooLong for this OperationContext
      */
-    bool ignoreKeyTooLong(OperationContext* txn);
+    bool ignoreKeyTooLong(OperationContext* opCtx);
 
     IndexCatalogEntry* _btreeState;  // owned by IndexCatalogEntry
     const IndexDescriptor* _descriptor;
 
 private:
-    void removeOneKey(OperationContext* txn,
+    void removeOneKey(OperationContext* opCtx,
                       const BSONObj& key,
                       const RecordId& loc,
                       bool dupsAllowed);

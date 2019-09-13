@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -73,13 +75,13 @@ public:
      * Returns the ping document of the specified processID.
      * Common status errors include socket errors.
      */
-    virtual StatusWith<LockpingsType> getPing(OperationContext* txn, StringData processID) = 0;
+    virtual StatusWith<LockpingsType> getPing(OperationContext* opCtx, StringData processID) = 0;
 
     /**
      * Updates the ping document. Creates a new entry if it does not exists.
      * Common status errors include socket errors.
      */
-    virtual Status ping(OperationContext* txn, StringData processID, Date_t ping) = 0;
+    virtual Status ping(OperationContext* opCtx, StringData processID, Date_t ping) = 0;
 
     /**
      * Attempts to update the owner of a lock identified by lockID to lockSessionID.
@@ -98,7 +100,7 @@ public:
      * Common status errors include socket and duplicate key errors.
      */
     virtual StatusWith<LocksType> grabLock(
-        OperationContext* txn,
+        OperationContext* opCtx,
         StringData lockID,
         const OID& lockSessionID,
         StringData who,
@@ -122,7 +124,7 @@ public:
      *
      * Common status errors include socket errors.
      */
-    virtual StatusWith<LocksType> overtakeLock(OperationContext* txn,
+    virtual StatusWith<LocksType> overtakeLock(OperationContext* opCtx,
                                                StringData lockID,
                                                const OID& lockSessionID,
                                                const OID& currentHolderTS,
@@ -137,46 +139,47 @@ public:
      * specified session (i.e., it is not owned at all or if it is owned by a different session).
      * Otherwise, it returns an error status. Common errors include socket errors.
      */
-    virtual Status unlock(OperationContext* txn, const OID& lockSessionID) = 0;
+    virtual Status unlock(OperationContext* opCtx, const OID& lockSessionID) = 0;
 
     /**
      * Same as unlock() above except that it unlocks the lock document that matches "lockSessionID"
      * AND "name", rather than just "lockSessionID". This is necessary if multiple documents have
      * been locked with the same lockSessionID.
      */
-    virtual Status unlock(OperationContext* txn, const OID& lockSessionID, StringData name) = 0;
+    virtual Status unlock(OperationContext* opCtx, const OID& lockSessionID, StringData name) = 0;
 
     /**
      * Unlocks all distributed locks with the given owning process ID.  Does not provide any
      * indication as to how many locks were actually unlocked.  So long as the update command runs
      * successfully, returns OK, otherwise returns an error status.
      */
-    virtual Status unlockAll(OperationContext* txn, const std::string& processID) = 0;
+    virtual Status unlockAll(OperationContext* opCtx, const std::string& processID) = 0;
 
     /**
      * Get some information from the config server primary.
      * Common status errors include socket errors.
      */
-    virtual StatusWith<ServerInfo> getServerInfo(OperationContext* txn) = 0;
+    virtual StatusWith<ServerInfo> getServerInfo(OperationContext* opCtx) = 0;
 
     /**
      * Returns the lock document.
      * Returns LockNotFound if lock document doesn't exist.
      * Common status errors include socket errors.
      */
-    virtual StatusWith<LocksType> getLockByTS(OperationContext* txn, const OID& lockSessionID) = 0;
+    virtual StatusWith<LocksType> getLockByTS(OperationContext* opCtx,
+                                              const OID& lockSessionID) = 0;
 
     /**
      * Returns the lock document.
      * Common status errors include socket errors.
      */
-    virtual StatusWith<LocksType> getLockByName(OperationContext* txn, StringData name) = 0;
+    virtual StatusWith<LocksType> getLockByName(OperationContext* opCtx, StringData name) = 0;
 
     /**
      * Attempts to delete the ping document corresponding to the given processId.
      * Common status errors include socket errors.
      */
-    virtual Status stopPing(OperationContext* txn, StringData processId) = 0;
+    virtual Status stopPing(OperationContext* opCtx, StringData processId) = 0;
 
 protected:
     DistLockCatalog();

@@ -5,6 +5,13 @@
 load('./jstests/multiVersion/libs/multi_rs.js');
 load('./jstests/multiVersion/libs/multi_cluster.js');
 
+// When checking UUID consistency, the shell attempts to run a command on the node it believes is
+// primary in each shard. However, this test restarts shards, and the node that is elected primary
+// after the restart may be different from the original primary. Since the shell does not retry on
+// NotMaster errors, and whether or not it detects the new primary before issuing the command is
+// nondeterministic, skip the consistency check for this test.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
 
     /**
@@ -40,8 +47,7 @@ load('./jstests/multiVersion/libs/multi_cluster.js');
 
                 rsOptions: {binVersion: "last-stable"},
                 rs: isRSCluster,
-                // TODO: SERVER-24163 remove after v3.4
-                waitForCSRSSecondaries: false
+                shardAsReplicaSet: false
             }
         });
         st.configRS.awaitReplication();
@@ -58,16 +64,6 @@ load('./jstests/multiVersion/libs/multi_cluster.js');
         assert.commandWorked(st.s.adminCommand({enableSharding: 'sharded'}));
         st.ensurePrimaryShard('sharded', st.shard0.shardName);
 
-        // We explicitly create an index on the shard key to avoid having mongos attempt to
-        // implicitly create one. This is necessary because mongos would otherwise explicitly
-        // include the "collation" option in the requested index to prevent potentially inheriting
-        // the collation-default collation. However, specifying the "collation" option requires a
-        // v=2 index and that may not be possible if the server has featureCompatibilityVersion=3.2.
-        //
-        // TODO SERVER-25955: Allow mongos to implicitly create the shard key index when sharding a
-        // collection with a "simple" default collation and update this test case to not explicitly
-        // create it.
-        assert.commandWorked(st.s.getDB('sharded').foo.createIndex({x: 1}));
         assert.commandWorked(st.s.adminCommand({shardCollection: 'sharded.foo', key: {x: 1}}));
         assert.commandWorked(st.s.adminCommand({split: 'sharded.foo', middle: {x: 0}}));
         assert.commandWorked(
@@ -104,7 +100,7 @@ load('./jstests/multiVersion/libs/multi_cluster.js');
         version = st.s.getCollection('config.version').findOne();
         assert.eq(version.minCompatibleVersion, 5);
         assert.eq(version.currentVersion, 6);
-        assert.neq(clusterID, version.clusterId);
+        assert.eq(clusterID, version.clusterId);
         assert.eq(version.excluding, undefined);
 
         st.stop();

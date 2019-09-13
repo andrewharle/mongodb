@@ -10,13 +10,14 @@
 
     var s = new ShardingTest({shards: 2, mongos: 1});
     var dbForTest = s.getDB("test");
+    var admin = s.getDB("admin");
     dbForTest.foo.drop();
 
     var numDocs = 10000;
 
     // shard test.foo and add a split point
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
     s.adminCommand({shardcollection: "test.foo", key: {_id: 1}});
     s.adminCommand({split: "test.foo", middle: {_id: numDocs / 2}});
 
@@ -44,8 +45,8 @@
     assert.eq("test.foo", x.ns, "namespace mismatch");
     assert(x.sharded, "collection is not sharded");
     assert.eq(numDocs, x.count, "total count");
-    assert.eq(numDocs / 2, x.shards.shard0000.count, "count on shard0000");
-    assert.eq(numDocs / 2, x.shards.shard0001.count, "count on shard0001");
+    assert.eq(numDocs / 2, x.shards[s.shard0.shardName].count, "count on " + s.shard0.shardName);
+    assert.eq(numDocs / 2, x.shards[s.shard1.shardName].count, "count on " + s.shard1.shardName);
     assert(x.totalIndexSize > 0);
 
     // insert one doc into a non-sharded collection
@@ -69,18 +70,21 @@
 
     // Get all current $where operations
     function getInProgWhereOps() {
-        var inprog = dbForTest.currentOp().inprog;
+        let inProgressOps = admin.aggregate([{$currentOp: {'allUsers': true}}]);
+        let inProgressStr = '';
 
         // Find all the where queries
         var myProcs = [];
-        inprog.forEach(function(op) {
-            if (op.query && op.query.filter && op.query.filter.$where) {
+        while (inProgressOps.hasNext()) {
+            let op = inProgressOps.next();
+            inProgressStr += tojson(op);
+            if (op.command && op.command.filter && op.command.filter.$where) {
                 myProcs.push(op);
             }
-        });
+        }
 
         if (myProcs.length == 0) {
-            print('No $where operations found: ' + tojson(inprog));
+            print('No $where operations found: ' + inProgressStr);
         } else {
             print('Found ' + myProcs.length + ' $where operations: ' + tojson(myProcs));
         }
@@ -141,7 +145,7 @@
     // test fsync on admin db
     x = dbForTest._adminCommand("fsync");
     assert(x.ok == 1, "fsync failed: " + tojson(x));
-    if (x.all.shard0000 > 0) {
+    if (x.all[s.shard0.shardName] > 0) {
         assert(x.numFiles > 0, "fsync failed: " + tojson(x));
     }
 

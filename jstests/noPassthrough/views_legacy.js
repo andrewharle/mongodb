@@ -25,7 +25,7 @@
     let cmdRes =
         viewsDB.runCommand({find: "view", filter: {a: {$gt: 0}}, sort: {a: 1}, batchSize: 0});
     assert.commandWorked(cmdRes);
-    let cursor = new DBCommandCursor(viewsDB.getMongo(), cmdRes, 2);
+    let cursor = new DBCommandCursor(viewsDB, cmdRes, 2);
 
     let err = assert.throws(function() {
         cursor.itcount();
@@ -37,7 +37,7 @@
     //
     cmdRes = viewsDB.runCommand({find: "view", filter: {a: {$gt: 0}}, sort: {a: 1}, batchSize: 0});
     assert.commandWorked(cmdRes);
-    cursor = new DBCommandCursor(viewsDB.getMongo(), cmdRes, 2);
+    cursor = new DBCommandCursor(viewsDB, cmdRes, 2);
 
     // When DBCommandCursor is constructed under legacy readMode, cursor.close() will execute a
     // legacy killcursors operation.
@@ -63,6 +63,22 @@
         viewsDB.view.find({x: 1}).toArray();
     });
     assert.eq(res.code, ErrorCodes.CommandNotSupportedOnView, tojson(res));
+
+    // Ensure that legacy getMore succeeds even when a cursor is established on a namespace whose
+    // database does not exist. Legacy getMore must check that the cursor is not over a view, and
+    // this must handle the case where the namespace is not a view by virtue of the database not
+    // existing.
+    assert.commandWorked(viewsDB.dropDatabase());
+
+    cmdRes = viewsDB.runCommand({find: "view", filter: {a: {$gt: 0}}, sort: {a: 1}, batchSize: 0});
+    assert.commandWorked(cmdRes);
+    cursor = new DBCommandCursor(viewsDB, cmdRes, 2);
+    assert.eq(0, cursor.itcount());
+
+    cmdRes = viewsDB.runCommand({aggregate: "view", pipeline: [], cursor: {batchSize: 0}});
+    assert.commandWorked(cmdRes);
+    cursor = new DBCommandCursor(viewsDB, cmdRes, 2);
+    assert.eq(0, cursor.itcount());
 
     MongoRunner.stopMongod(conn);
 }());

@@ -1,3 +1,5 @@
+// @tags: [requires_non_retryable_commands]
+
 orig = 'rename_stayTemp_orig';
 dest = 'rename_stayTemp_dest';
 
@@ -11,7 +13,7 @@ function ns(coll) {
 function istemp(name) {
     var result = db.runCommand("listCollections", {filter: {name: name}});
     assert(result.ok);
-    var collections = new DBCommandCursor(result._mongo, result).toArray();
+    var collections = new DBCommandCursor(db, result).toArray();
     assert.eq(1, collections.length);
     return collections[0].options.temp ? true : false;
 }

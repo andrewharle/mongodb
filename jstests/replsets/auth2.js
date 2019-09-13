@@ -3,6 +3,11 @@
 // This test requires users to persist across a restart.
 // @tags: [requires_persistence]
 
+// We turn off gossiping the mongo shell's clusterTime because this test connects to replica sets
+// and sharded clusters as a user other than __system. Attempting to advance the clusterTime while
+// it has been signed with a dummy key results in an authorization error.
+TestData.skipGossipingClusterTime = true;
+
 (function() {
     var testInvalidAuthStates = function(replSetTest) {
         print("check that 0 is in recovering");
@@ -30,7 +35,7 @@
     var key1 = path + "key1";
     var key2 = path + "key2";
 
-    var replSetTest = new ReplSetTest({name: name, nodes: 3});
+    var replSetTest = new ReplSetTest({name: name, nodes: 3, waitForKeys: true});
     var nodes = replSetTest.startSet();
     var hostnames = replSetTest.nodeList();
     replSetTest.initiate({
@@ -46,7 +51,7 @@
 
     print("add an admin user");
     master.getDB("admin").createUser({user: "foo", pwd: "bar", roles: jsTest.adminUserRoles},
-                                     {w: 3, wtimeout: 30000});
+                                     {w: 3, wtimeout: replSetTest.kDefaultTimeoutMS});
     var m = replSetTest.nodes[0];
 
     print("starting 1 and 2 with key file");
@@ -73,8 +78,6 @@
 
     replSetTest.stop(0);
     m = replSetTest.restart(0, {"keyFile": key1});
-
-    print("0 becomes a secondary");
 
     replSetTest.stopSet();
 }());

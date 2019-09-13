@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,11 +36,15 @@
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/catalog/collection.h"
 #include "mongo/db/client.h"
+#include "mongo/db/curop_failpoint_helpers.h"
 #include "mongo/db/exec/scoped_timer.h"
 #include "mongo/db/exec/working_set_common.h"
 #include "mongo/stdx/memory.h"
 
 namespace mongo {
+
+// Forces a hang in the javascript execution while initializing the group stage.
+MONGO_FAIL_POINT_DEFINE(hangInGroupReduceJs);
 
 using std::unique_ptr;
 using std::vector;
@@ -57,7 +63,7 @@ Status getKey(
         const BSONObj& k = b.obj();
         try {
             s->invoke(func, &k, 0);
-        } catch (const UserException& e) {
+        } catch (const AssertionException& e) {
             return e.toStatus("Failed to invoke group keyf function: ");
         }
         int type = s->type("__returnValue");
@@ -76,11 +82,11 @@ Status getKey(
 // static
 const char* GroupStage::kStageType = "GROUP";
 
-GroupStage::GroupStage(OperationContext* txn,
+GroupStage::GroupStage(OperationContext* opCtx,
                        const GroupRequest& request,
                        WorkingSet* workingSet,
                        PlanStage* child)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _request(request),
       _ws(workingSet),
       _specificStats(),
@@ -96,9 +102,8 @@ Status GroupStage::initGroupScripting() {
     const std::string userToken =
         AuthorizationSession::get(Client::getCurrent())->getAuthenticatedUserNamesToken();
 
-    const NamespaceString nss(_request.ns);
     _scope = getGlobalScriptEngine()->getPooledScope(
-        getOpCtx(), nss.db().toString(), "group" + userToken);
+        getOpCtx(), _request.ns.db().toString(), "group" + userToken);
     if (!_request.reduceScope.isEmpty()) {
         _scope->init(&_request.reduceScope);
     }
@@ -107,11 +112,20 @@ Status GroupStage::initGroupScripting() {
     try {
         _scope->exec(
             "$reduce = " + _request.reduceCode, "group reduce init", false, true, true, 2 * 1000);
-    } catch (const UserException& e) {
+    } catch (const AssertionException& e) {
         return e.toStatus("Failed to initialize group reduce function: ");
     }
-    invariant(_scope->exec(
-        "$arr = [];", "group reduce init 2", false, true, false /*assertOnError*/, 2 * 1000));
+
+    try {
+        _scope->exec("$arr = [];",
+                     "group reduce init 2",
+                     false,  // printResult
+                     true,   // reportError
+                     true,   // assertOnError
+                     2 * 1000);
+    } catch (const AssertionException& e) {
+        return e.toStatus("Failed to initialize group reduce function: ");
+    }
 
     // Initialize _reduceFunction.
     _reduceFunction = _scope->createFunction(
@@ -156,9 +170,18 @@ Status GroupStage::processObject(const BSONObj& obj) {
     _scope->setObject("obj", objCopy, true);
     _scope->setNumber("n", n - 1);
 
+    boost::optional<std::string> oldMsg;
+    if (MONGO_FAIL_POINT(hangInGroupReduceJs)) {
+        oldMsg = CurOpFailpointHelpers::updateCurOpMsg(getOpCtx(), "hangInGroupReduceJs");
+    }
+    auto resetMsgGuard = MakeGuard([&] {
+        if (oldMsg) {
+            CurOpFailpointHelpers::updateCurOpMsg(getOpCtx(), *oldMsg);
+        }
+    });
     try {
         _scope->invoke(_reduceFunction, 0, 0, 0, true /*assertOnError*/);
-    } catch (const UserException& e) {
+    } catch (const AssertionException& e) {
         return e.toStatus("Failed to invoke group reduce function: ");
     }
 
@@ -174,7 +197,7 @@ StatusWith<BSONObj> GroupStage::finalizeResults() {
                          true,   // reportError
                          true,   // assertOnError
                          2 * 1000);
-        } catch (const UserException& e) {
+        } catch (const AssertionException& e) {
             return e.toStatus("Failed to initialize group finalize function: ");
         }
         ScriptingFunction finalizeFunction = _scope->createFunction(
@@ -187,7 +210,7 @@ StatusWith<BSONObj> GroupStage::finalizeResults() {
             "}");
         try {
             _scope->invoke(finalizeFunction, 0, 0, 0, true /*assertOnError*/);
-        } catch (const UserException& e) {
+        } catch (const AssertionException& e) {
             return e.toStatus("Failed to invoke group finalize function: ");
         }
     }
@@ -196,8 +219,17 @@ StatusWith<BSONObj> GroupStage::finalizeResults() {
 
     BSONObj results = _scope->getObject("$arr").getOwned();
 
-    invariant(_scope->exec(
-        "$arr = [];", "group clean up", false, true, false /*assertOnError*/, 2 * 1000));
+    try {
+        _scope->exec("$arr = [];",
+                     "group clean up",
+                     false,  // printResult
+                     true,   // reportError
+                     true,   // assertOnError
+                     2 * 1000);
+    } catch (const AssertionException& e) {
+        return e.toStatus("Failed to clean up group: ");
+    }
+
     _scope->gc();
 
     return results;
@@ -229,17 +261,11 @@ PlanStage::StageState GroupStage::doWork(WorkingSetID* out) {
     } else if (PlanStage::NEED_YIELD == state) {
         *out = id;
         return state;
-    } else if (PlanStage::FAILURE == state) {
+    } else if (PlanStage::FAILURE == state || PlanStage::DEAD == state) {
+        // The stage which produces a failure is responsible for allocating a working set member
+        // with error details.
+        invariant(WorkingSet::INVALID_ID != id);
         *out = id;
-        // If a stage fails, it may create a status WSM to indicate why it failed, in which
-        // case 'id' is valid.  If ID is invalid, we create our own error message.
-        if (WorkingSet::INVALID_ID == id) {
-            const std::string errmsg = "group stage failed to read in results from child";
-            *out = WorkingSetCommon::allocateStatusMember(
-                _ws, Status(ErrorCodes::InternalError, errmsg));
-        }
-        return state;
-    } else if (PlanStage::DEAD == state) {
         return state;
     } else if (PlanStage::ADVANCED == state) {
         WorkingSetMember* member = _ws->get(id);

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -54,7 +54,7 @@ __curstat_get_key(WT_CURSOR *cursor, ...)
 	va_start(ap, cursor);
 	CURSOR_API_CALL(cursor, session, get_key, NULL);
 
-	WT_CURSOR_NEEDKEY(cursor);
+	WT_ERR(__cursor_needkey(cursor));
 
 	if (F_ISSET(cursor, WT_CURSTD_RAW)) {
 		WT_ERR(__wt_struct_size(
@@ -84,16 +84,16 @@ __curstat_get_value(WT_CURSOR *cursor, ...)
 	WT_DECL_RET;
 	WT_ITEM *item;
 	WT_SESSION_IMPL *session;
-	va_list ap;
 	size_t size;
 	uint64_t *v;
 	const char *desc, **p;
+	va_list ap;
 
 	cst = (WT_CURSOR_STAT *)cursor;
 	va_start(ap, cursor);
 	CURSOR_API_CALL(cursor, session, get_value, NULL);
 
-	WT_CURSOR_NEEDVALUE(cursor);
+	WT_ERR(__cursor_needvalue(cursor));
 
 	WT_ERR(cst->stats_desc(cst, WT_STAT_KEY_OFFSET(cst), &desc));
 	if (F_ISSET(cursor, WT_CURSTD_RAW)) {
@@ -265,10 +265,14 @@ __curstat_reset(WT_CURSOR *cursor)
 	WT_SESSION_IMPL *session;
 
 	cst = (WT_CURSOR_STAT *)cursor;
-	CURSOR_API_CALL(cursor, session, reset, NULL);
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, reset, NULL);
 
 	cst->notinitialized = cst->notpositioned = true;
 	F_CLR(cursor, WT_CURSTD_KEY_SET | WT_CURSTD_VALUE_SET);
+
+	/* Reset the session statistics to zero. */
+	if (strcmp(cursor->uri, "statistics:session") == 0)
+		__wt_stat_session_clear_single(&session->stats);
 
 err:	API_END_RET(session, ret);
 }
@@ -287,7 +291,7 @@ __curstat_search(WT_CURSOR *cursor)
 	cst = (WT_CURSOR_STAT *)cursor;
 	CURSOR_API_CALL(cursor, session, search, NULL);
 
-	WT_CURSOR_NEEDKEY(cursor);
+	WT_ERR(__cursor_needkey(cursor));
 	F_CLR(cursor, WT_CURSTD_VALUE_SET | WT_CURSTD_VALUE_SET);
 
 	/* Initialize on demand. */
@@ -320,7 +324,8 @@ __curstat_close(WT_CURSOR *cursor)
 	size_t i;
 
 	cst = (WT_CURSOR_STAT *)cursor;
-	CURSOR_API_CALL(cursor, session, close, NULL);
+	CURSOR_API_CALL_PREPARE_ALLOWED(cursor, session, close, NULL);
+err:
 
 	if (cst->cfg != NULL) {
 		for (i = 0; cst->cfg[i] != NULL; ++i)
@@ -331,9 +336,9 @@ __curstat_close(WT_CURSOR *cursor)
 	__wt_buf_free(session, &cst->pv);
 	__wt_free(session, cst->desc_buf);
 
-	WT_ERR(__wt_cursor_close(cursor));
+	__wt_cursor_close(cursor);
 
-err:	API_END_RET(session, ret);
+	API_END_RET(session, ret);
 }
 
 /*
@@ -407,7 +412,7 @@ __curstat_file_init(WT_SESSION_IMPL *session,
 	}
 
 	/* Release the handle, we're done with it. */
-	WT_TRET(__wt_session_release_btree(session));
+	WT_TRET(__wt_session_release_dhandle(session));
 
 	return (ret);
 }
@@ -466,10 +471,10 @@ __curstat_join_next_set(WT_SESSION_IMPL *session, WT_CURSOR_STAT *cst,
 static int
 __curstat_join_desc(WT_CURSOR_STAT *cst, int slot, const char **resultp)
 {
-	size_t len;
-	const char *static_desc;
 	WT_JOIN_STATS_GROUP *sgrp;
 	WT_SESSION_IMPL *session;
+	size_t len;
+	const char *static_desc;
 
 	sgrp = &cst->u.join_stats_group;
 	session = (WT_SESSION_IMPL *)sgrp->join_cursor->iface.session;
@@ -478,7 +483,7 @@ __curstat_join_desc(WT_CURSOR_STAT *cst, int slot, const char **resultp)
 	    strlen(static_desc) + 1;
 	WT_RET(__wt_realloc(session, NULL, len, &cst->desc_buf));
 	WT_RET(__wt_snprintf(
-	   cst->desc_buf, len, "join: %s%s", sgrp->desc_prefix, static_desc));
+	    cst->desc_buf, len, "join: %s%s", sgrp->desc_prefix, static_desc));
 	*resultp = cst->desc_buf;
 	return (0);
 }
@@ -513,6 +518,28 @@ __curstat_join_init(WT_SESSION_IMPL *session,
 }
 
 /*
+ * __curstat_session_init --
+ *	Initialize the statistics for a session.
+ */
+static void
+__curstat_session_init(WT_SESSION_IMPL *session, WT_CURSOR_STAT *cst)
+{
+	/*
+	 * Copy stats from the session to the cursor. Optionally clear the
+	 * session's statistics.
+	 */
+	memcpy(&cst->u.session_stats,
+	    &session->stats, sizeof(WT_SESSION_STATS));
+	if (F_ISSET(cst, WT_STAT_CLEAR))
+		__wt_stat_session_clear_single(&session->stats);
+
+	cst->stats = (int64_t *)&cst->u.session_stats;
+	cst->stats_base = WT_SESSION_STATS_BASE;
+	cst->stats_count = sizeof(WT_SESSION_STATS) / sizeof(int64_t);
+	cst->stats_desc = __wt_stat_session_desc;
+}
+
+/*
  * __wt_curstat_init --
  *	Initialize a statistics cursor.
  */
@@ -529,25 +556,23 @@ __wt_curstat_init(WT_SESSION_IMPL *session,
 
 	dsrc_uri = uri + strlen("statistics:");
 
-	if (WT_STREQ(dsrc_uri, "join"))
+	if (strcmp(dsrc_uri, "join") == 0)
 		WT_RET(__curstat_join_init(session, curjoin, cfg, cst));
-
+	else if (strcmp(dsrc_uri, "session") == 0) {
+		__curstat_session_init(session, cst);
+		return (0);
+	}
 	else if (WT_PREFIX_MATCH(dsrc_uri, "colgroup:"))
 		WT_RET(
 		    __wt_curstat_colgroup_init(session, dsrc_uri, cfg, cst));
-
 	else if (WT_PREFIX_MATCH(dsrc_uri, "file:"))
 		WT_RET(__curstat_file_init(session, dsrc_uri, cfg, cst));
-
 	else if (WT_PREFIX_MATCH(dsrc_uri, "index:"))
 		WT_RET(__wt_curstat_index_init(session, dsrc_uri, cfg, cst));
-
 	else if (WT_PREFIX_MATCH(dsrc_uri, "lsm:"))
 		WT_RET(__wt_curstat_lsm_init(session, dsrc_uri, cst));
-
 	else if (WT_PREFIX_MATCH(dsrc_uri, "table:"))
 		WT_RET(__wt_curstat_table_init(session, dsrc_uri, cfg, cst));
-
 	else
 		return (__wt_bad_object_type(session, uri));
 
@@ -576,9 +601,13 @@ __wt_curstat_open(WT_SESSION_IMPL *session,
 	    __curstat_search,			/* search */
 	    __wt_cursor_search_near_notsup,	/* search-near */
 	    __wt_cursor_notsup,			/* insert */
+	    __wt_cursor_modify_notsup,		/* modify */
 	    __wt_cursor_notsup,			/* update */
 	    __wt_cursor_notsup,			/* remove */
+	    __wt_cursor_notsup,			/* reserve */
 	    __wt_cursor_reconfigure_notsup,	/* reconfigure */
+	    __wt_cursor_notsup,			/* cache */
+	    __wt_cursor_reopen_notsup,		/* reopen */
 	    __curstat_close);			/* close */
 	WT_CONFIG_ITEM cval, sval;
 	WT_CURSOR *cursor;
@@ -591,9 +620,9 @@ __wt_curstat_open(WT_SESSION_IMPL *session,
 	conn = S2C(session);
 
 	WT_RET(__wt_calloc_one(session, &cst));
-	cursor = &cst->iface;
+	cursor = (WT_CURSOR *)cst;
 	*cursor = iface;
-	cursor->session = &session->iface;
+	cursor->session = (WT_SESSION *)session;
 
 	/*
 	 * Statistics cursor configuration: must match (and defaults to), the

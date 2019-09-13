@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -57,7 +59,7 @@ using std::vector;
 
 DocumentSourceFacet::DocumentSourceFacet(std::vector<FacetPipeline> facetPipelines,
                                          const intrusive_ptr<ExpressionContext>& expCtx)
-    : DocumentSourceNeedsMongod(expCtx),
+    : DocumentSource(expCtx),
       _teeBuffer(TeeBuffer::create(facetPipelines.size())),
       _facets(std::move(facetPipelines)) {
     for (size_t facetId = 0; facetId < _facets.size(); ++facetId) {
@@ -72,7 +74,7 @@ namespace {
  * Extracts the names of the facets and the vectors of raw BSONObjs representing the stages within
  * that facet's pipeline.
  *
- * Throws a UserException if it fails to parse for any reason.
+ * Throws a AssertionException if it fails to parse for any reason.
  */
 vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& elem) {
     uassert(40169,
@@ -99,13 +101,6 @@ vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& ele
                                   << ": "
                                   << subPipeElem,
                     subPipeElem.type() == BSONType::Object);
-            auto stageName = subPipeElem.Obj().firstElementFieldName();
-            uassert(
-                40331,
-                str::stream() << "specified stage is not allowed to be used within a $facet stage: "
-                              << subPipeElem,
-                !str::equals(stageName, "$out") && !str::equals(stageName, "$facet"));
-
             rawPipeline.push_back(subPipeElem.embeddedObject());
         }
 
@@ -118,12 +113,24 @@ vector<pair<string, vector<BSONObj>>> extractRawPipelines(const BSONElement& ele
 std::unique_ptr<DocumentSourceFacet::LiteParsed> DocumentSourceFacet::LiteParsed::parse(
     const AggregationRequest& request, const BSONElement& spec) {
     std::vector<LiteParsedPipeline> liteParsedPipelines;
+
     for (auto&& rawPipeline : extractRawPipelines(spec)) {
         liteParsedPipelines.emplace_back(
             AggregationRequest(request.getNamespaceString(), rawPipeline.second));
     }
-    return std::unique_ptr<DocumentSourceFacet::LiteParsed>(
-        new DocumentSourceFacet::LiteParsed(std::move(liteParsedPipelines)));
+
+    PrivilegeVector requiredPrivileges;
+    for (auto&& pipeline : liteParsedPipelines) {
+
+        // A correct isMongos flag is only required for DocumentSourceCurrentOp which is disallowed
+        // in $facet pipelines.
+        const bool unusedIsMongosFlag = false;
+        Privilege::addPrivilegesToPrivilegeVector(&requiredPrivileges,
+                                                  pipeline.requiredPrivileges(unusedIsMongosFlag));
+    }
+
+    return stdx::make_unique<DocumentSourceFacet::LiteParsed>(std::move(liteParsedPipelines),
+                                                              std::move(requiredPrivileges));
 }
 
 stdx::unordered_set<NamespaceString> DocumentSourceFacet::LiteParsed::getInvolvedNamespaces()
@@ -147,6 +154,13 @@ intrusive_ptr<DocumentSourceFacet> DocumentSourceFacet::create(
 
 void DocumentSourceFacet::setSource(DocumentSource* source) {
     _teeBuffer->setSource(source);
+}
+
+void DocumentSourceFacet::doDispose() {
+    for (auto&& facet : _facets) {
+        facet.pipeline.get_deleter().dismissDisposal();
+        facet.pipeline->dispose(pExpCtx->opCtx);
+    }
 }
 
 DocumentSource::GetNextResult DocumentSourceFacet::getNext() {
@@ -179,11 +193,11 @@ DocumentSource::GetNextResult DocumentSourceFacet::getNext() {
     return resultDoc.freeze();
 }
 
-Value DocumentSourceFacet::serialize(bool explain) const {
+Value DocumentSourceFacet::serialize(boost::optional<ExplainOptions::Verbosity> explain) const {
     MutableDocument serialized;
     for (auto&& facet : _facets) {
-        serialized[facet.name] =
-            Value(explain ? facet.pipeline->writeExplainOps() : facet.pipeline->serialize());
+        serialized[facet.name] = Value(explain ? facet.pipeline->writeExplainOps(*explain)
+                                               : facet.pipeline->serialize());
     }
     return Value(Document{{"$facet", serialized.freezeToValue()}});
 }
@@ -203,50 +217,72 @@ intrusive_ptr<DocumentSource> DocumentSourceFacet::optimize() {
     return this;
 }
 
-void DocumentSourceFacet::doInjectMongodInterface(std::shared_ptr<MongodInterface> mongod) {
-    for (auto&& facet : _facets) {
-        for (auto&& stage : facet.pipeline->getSources()) {
-            if (auto stageNeedingMongod = dynamic_cast<DocumentSourceNeedsMongod*>(stage.get())) {
-                stageNeedingMongod->injectMongodInterface(mongod);
-            }
-        }
-    }
-}
-
-void DocumentSourceFacet::doDetachFromOperationContext() {
+void DocumentSourceFacet::detachFromOperationContext() {
     for (auto&& facet : _facets) {
         facet.pipeline->detachFromOperationContext();
     }
 }
 
-void DocumentSourceFacet::doReattachToOperationContext(OperationContext* opCtx) {
+void DocumentSourceFacet::reattachToOperationContext(OperationContext* opCtx) {
     for (auto&& facet : _facets) {
         facet.pipeline->reattachToOperationContext(opCtx);
     }
 }
 
-bool DocumentSourceFacet::needsPrimaryShard() const {
+DocumentSource::StageConstraints DocumentSourceFacet::constraints(
+    Pipeline::SplitState pipeState) const {
+    const bool mayUseDisk = std::any_of(_facets.begin(), _facets.end(), [&](const auto& facet) {
+        const auto sources = facet.pipeline->getSources();
+        return std::any_of(sources.begin(), sources.end(), [&](const auto source) {
+            return source->constraints().diskRequirement == DiskUseRequirement::kWritesTmpData;
+        });
+    });
+
     // Currently we don't split $facet to have a merger part and a shards part (see SERVER-24154).
-    // This means that if any stage in any of the $facet pipelines requires the primary shard, then
-    // the entire $facet must happen on the merger, and the merger must be the primary shard.
-    for (auto&& facet : _facets) {
-        if (facet.pipeline->needsPrimaryShardMerger()) {
-            return true;
+    // This means that if any stage in any of the $facet pipelines needs to run on the primary shard
+    // or on mongoS, then the entire $facet stage must run there.
+    static const std::set<HostTypeRequirement> definitiveHosts = {
+        HostTypeRequirement::kMongoS, HostTypeRequirement::kPrimaryShard};
+
+    HostTypeRequirement host = HostTypeRequirement::kNone;
+
+    // Iterate through each pipeline to determine the HostTypeRequirement for the $facet stage.
+    // Because we have already validated that there are no conflicting HostTypeRequirements during
+    // parsing, if we observe any of the 'definitiveHosts' types in any of the pipelines then the
+    // entire $facet stage must run on that host and iteration can stop. At the end of this process,
+    // 'host' will be the $facet's final HostTypeRequirement.
+    for (auto fi = _facets.begin(); fi != _facets.end() && !definitiveHosts.count(host); fi++) {
+        const auto& sources = fi->pipeline->getSources();
+        for (auto si = sources.begin(); si != sources.end() && !definitiveHosts.count(host); si++) {
+            const auto hostReq = (*si)->constraints().resolvedHostTypeRequirement(pExpCtx);
+            if (hostReq != HostTypeRequirement::kNone) {
+                host = hostReq;
+            }
         }
     }
-    return false;
+
+    return {StreamType::kBlocking,
+            PositionRequirement::kNone,
+            host,
+            mayUseDisk ? DiskUseRequirement::kWritesTmpData : DiskUseRequirement::kNoDiskUse,
+            FacetRequirement::kNotAllowed,
+            TransactionRequirement::kAllowed};
 }
 
 DocumentSource::GetDepsReturn DocumentSourceFacet::getDependencies(DepsTracker* deps) const {
+    const bool scopeHasVariables = pExpCtx->variablesParseState.hasDefinedVariables();
     for (auto&& facet : _facets) {
         auto subDepsTracker = facet.pipeline->getDependencies(deps->getMetadataAvailable());
 
         deps->fields.insert(subDepsTracker.fields.begin(), subDepsTracker.fields.end());
+        deps->vars.insert(subDepsTracker.vars.begin(), subDepsTracker.vars.end());
 
         deps->needWholeDocument = deps->needWholeDocument || subDepsTracker.needWholeDocument;
         deps->setNeedTextScore(deps->getNeedTextScore() || subDepsTracker.getNeedTextScore());
 
-        if (deps->needWholeDocument && deps->getNeedTextScore()) {
+        // If there are variables defined at this stage's scope, there may be dependencies upon
+        // them in subsequent pipelines. Keep enumerating.
+        if (deps->needWholeDocument && deps->getNeedTextScore() && !scopeHasVariables) {
             break;
         }
     }
@@ -259,25 +295,30 @@ DocumentSource::GetDepsReturn DocumentSourceFacet::getDependencies(DepsTracker* 
 intrusive_ptr<DocumentSource> DocumentSourceFacet::createFromBson(
     BSONElement elem, const intrusive_ptr<ExpressionContext>& expCtx) {
 
+    boost::optional<std::string> needsMongoS;
+    boost::optional<std::string> needsShard;
+
     std::vector<FacetPipeline> facetPipelines;
     for (auto&& rawFacet : extractRawPipelines(elem)) {
         const auto facetName = rawFacet.first;
 
-        auto pipeline = uassertStatusOK(Pipeline::parse(rawFacet.second, expCtx));
+        auto pipeline = uassertStatusOK(Pipeline::parseFacetPipeline(rawFacet.second, expCtx));
 
-        uassert(40172,
-                str::stream() << "sub-pipeline in $facet stage cannot be empty: " << facetName,
-                !pipeline->getSources().empty());
-
-        // Disallow any stages that need to be the first stage in the pipeline.
-        for (auto&& stage : pipeline->getSources()) {
-            if (stage->isValidInitialSource()) {
-                uasserted(40173,
-                          str::stream() << stage->getSourceName()
-                                        << " is not allowed to be used within a $facet stage: "
-                                        << elem.toString());
-            }
+        // Validate that none of the facet pipelines have any conflicting HostTypeRequirements. This
+        // verifies both that all stages within each pipeline are consistent, and that the pipelines
+        // are consistent with one another.
+        if (!needsShard && pipeline->needsShard()) {
+            needsShard.emplace(facetName);
         }
+        if (!needsMongoS && pipeline->needsMongosMerger()) {
+            needsMongoS.emplace(facetName);
+        }
+        uassert(ErrorCodes::IllegalOperation,
+                str::stream() << "$facet pipeline '" << *needsMongoS
+                              << "' must run on mongoS, but '"
+                              << *needsShard
+                              << "' requires a shard",
+                !(needsShard && needsMongoS));
 
         facetPipelines.emplace_back(facetName, std::move(pipeline));
     }

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2009-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -86,14 +88,13 @@ public:
         @return true if --dur is on.
         @return false if --dur is off. (in which case there is action)
         */
-    virtual bool commitNow(OperationContext* txn) = 0;
+    virtual bool commitNow(OperationContext* opCtx) = 0;
 
     /** Commit if enough bytes have been modified. Current threshold is 50MB
 
         The idea is that long running write operations that don't yield
-        (like creating an index or update with $atomic) can call this
-        whenever the db is in a sane state and it will prevent commits
-        from growing too large.
+        (like creating an index) can call this whenever the db is in a sane state and it will
+        prevent commits from growing too large.
         @return true if commited
         */
     virtual bool commitIfNeeded() = 0;
@@ -112,7 +113,7 @@ public:
         *
         * Must be called under the global X lock.
         */
-    virtual void commitAndStopDurThread() = 0;
+    virtual void commitAndStopDurThread(OperationContext* opCtx) = 0;
 
     /**
      * Commits pending changes, flushes all changes to main data files, then removes the
@@ -125,7 +126,7 @@ public:
      * through recovery and be applied to files that have had changes made after this call
      * applied.
      */
-    virtual void syncDataAndTruncateJournal(OperationContext* txn) = 0;
+    virtual void syncDataAndTruncateJournal(OperationContext* opCtx) = 0;
 
     virtual bool isDurable() const = 0;
 

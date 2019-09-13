@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -29,8 +29,8 @@
 #include "thread.h"
 
 static void  print_stats(u_int);
-static void *reader(void *);
-static void *writer(void *);
+static WT_THREAD_RET reader(void *);
+static WT_THREAD_RET writer(void *);
 
 typedef struct {
 	char *name;				/* object name */
@@ -45,15 +45,13 @@ typedef struct {
 
 static INFO *run_info;
 
-int
+void
 rw_start(u_int readers, u_int writers)
 {
 	struct timeval start, stop;
+	wt_thread_t *tids;
 	double seconds;
-	pthread_t *tids;
 	u_int i, name_index, offset, total_nops;
-	int ret;
-	void *thread_ret;
 
 	tids = NULL;	/* Keep GCC 4.1 happy. */
 	total_nops = 0;
@@ -109,18 +107,15 @@ rw_start(u_int readers, u_int writers)
 
 	/* Create threads. */
 	for (i = 0; i < readers; ++i)
-		if ((ret = pthread_create(
-		    &tids[i], NULL, reader, (void *)(uintptr_t)i)) != 0)
-			testutil_die(ret, "pthread_create");
-	for (; i < readers + writers; ++i) {
-		if ((ret = pthread_create(
-		    &tids[i], NULL, writer, (void *)(uintptr_t)i)) != 0)
-			testutil_die(ret, "pthread_create");
-	}
+		testutil_check(__wt_thread_create(
+		    NULL, &tids[i], reader, (void *)(uintptr_t)i));
+	for (; i < readers + writers; ++i)
+		testutil_check(__wt_thread_create(
+		    NULL, &tids[i], writer, (void *)(uintptr_t)i));
 
 	/* Wait for the threads. */
 	for (i = 0; i < readers + writers; ++i)
-		(void)pthread_join(tids[i], &thread_ret);
+		testutil_check(__wt_thread_join(NULL, &tids[i]));
 
 	(void)gettimeofday(&stop, NULL);
 	seconds = (stop.tv_sec - start.tv_sec) +
@@ -147,8 +142,6 @@ rw_start(u_int readers, u_int writers)
 
 	free(run_info);
 	free(tids);
-
-	return (0);
 }
 
 /*
@@ -186,19 +179,19 @@ reader_op(WT_SESSION *session, WT_CURSOR *cursor, INFO *s)
  * reader --
  *	Reader thread start function.
  */
-static void *
+static WT_THREAD_RET
 reader(void *arg)
 {
 	INFO *s;
 	WT_CURSOR *cursor;
 	WT_SESSION *session;
 	u_int i;
-	int id, ret;
+	int id;
 	char tid[128];
 
 	id = (int)(uintptr_t)arg;
 	s = &run_info[id];
-	testutil_check(__wt_thread_id(tid, sizeof(tid)));
+	testutil_check(__wt_thread_str(tid, sizeof(tid)));
 	__wt_random_init(&s->rnd);
 
 	printf(" read thread %2d starting: tid: %s, file: %s\n",
@@ -208,33 +201,26 @@ reader(void *arg)
 
 	if (session_per_op) {
 		for (i = 0; i < s->nops; ++i, ++s->reads, __wt_yield()) {
-			if ((ret = conn->open_session(
-			    conn, NULL, NULL, &session)) != 0)
-				testutil_die(ret, "conn.open_session");
-			if ((ret = session->open_cursor(
-			    session, s->name, NULL, NULL, &cursor)) != 0)
-				testutil_die(ret, "session.open_cursor");
+			testutil_check(
+			    conn->open_session(conn, NULL, NULL, &session));
+			testutil_check(session->open_cursor(
+			    session, s->name, NULL, NULL, &cursor));
 			reader_op(session, cursor, s);
-			if ((ret = session->close(session, NULL)) != 0)
-				testutil_die(ret, "session.close");
+			testutil_check(session->close(session, NULL));
 		}
 	} else {
-		if ((ret = conn->open_session(
-		    conn, NULL, NULL, &session)) != 0)
-			testutil_die(ret, "conn.open_session");
-		if ((ret = session->open_cursor(
-		    session, s->name, NULL, NULL, &cursor)) != 0)
-			testutil_die(ret, "session.open_cursor");
+		testutil_check(conn->open_session(conn, NULL, NULL, &session));
+		testutil_check(session->open_cursor(
+		    session, s->name, NULL, NULL, &cursor));
 		for (i = 0; i < s->nops; ++i, ++s->reads, __wt_yield())
 			reader_op(session, cursor, s);
-		if ((ret = session->close(session, NULL)) != 0)
-			testutil_die(ret, "session.close");
+		testutil_check(session->close(session, NULL));
 	}
 
 	printf(" read thread %2d stopping: tid: %s, file: %s\n",
 	    id, tid, s->name);
 
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }
 
 /*
@@ -245,8 +231,8 @@ static inline void
 writer_op(WT_SESSION *session, WT_CURSOR *cursor, INFO *s)
 {
 	WT_ITEM *key, _key, *value, _value;
-	uint64_t keyno;
 	size_t len;
+	uint64_t keyno;
 	int ret;
 	char keybuf[64], valuebuf[64];
 
@@ -264,8 +250,7 @@ writer_op(WT_SESSION *session, WT_CURSOR *cursor, INFO *s)
 		cursor->set_key(cursor, keyno);
 	if (keyno % 5 == 0) {
 		++s->remove;
-		if ((ret =
-		    cursor->remove(cursor)) != 0 && ret != WT_NOTFOUND)
+		if ((ret = cursor->remove(cursor)) != 0 && ret != WT_NOTFOUND)
 			testutil_die(ret, "cursor.remove");
 	} else {
 		++s->update;
@@ -279,8 +264,7 @@ writer_op(WT_SESSION *session, WT_CURSOR *cursor, INFO *s)
 			value->size = (uint32_t)len;
 			cursor->set_value(cursor, value);
 		}
-		if ((ret = cursor->update(cursor)) != 0)
-			testutil_die(ret, "cursor.update");
+		testutil_check(cursor->update(cursor));
 	}
 	if (log_print)
 		testutil_check(session->log_printf(session,
@@ -291,19 +275,19 @@ writer_op(WT_SESSION *session, WT_CURSOR *cursor, INFO *s)
  * writer --
  *	Writer thread start function.
  */
-static void *
+static WT_THREAD_RET
 writer(void *arg)
 {
 	INFO *s;
 	WT_CURSOR *cursor;
 	WT_SESSION *session;
 	u_int i;
-	int id, ret;
+	int id;
 	char tid[128];
 
 	id = (int)(uintptr_t)arg;
 	s = &run_info[id];
-	testutil_check(__wt_thread_id(tid, sizeof(tid)));
+	testutil_check(__wt_thread_str(tid, sizeof(tid)));
 	__wt_random_init(&s->rnd);
 
 	printf("write thread %2d starting: tid: %s, file: %s\n",
@@ -313,33 +297,26 @@ writer(void *arg)
 
 	if (session_per_op) {
 		for (i = 0; i < s->nops; ++i, __wt_yield()) {
-			if ((ret = conn->open_session(
-			    conn, NULL, NULL, &session)) != 0)
-				testutil_die(ret, "conn.open_session");
-			if ((ret = session->open_cursor(
-			    session, s->name, NULL, NULL, &cursor)) != 0)
-				testutil_die(ret, "session.open_cursor");
+			testutil_check(conn->open_session(
+			    conn, NULL, NULL, &session));
+			testutil_check(session->open_cursor(
+			    session, s->name, NULL, NULL, &cursor));
 			writer_op(session, cursor, s);
-			if ((ret = session->close(session, NULL)) != 0)
-				testutil_die(ret, "session.close");
+			testutil_check(session->close(session, NULL));
 		}
 	} else {
-		if ((ret = conn->open_session(
-		    conn, NULL, NULL, &session)) != 0)
-			testutil_die(ret, "conn.open_session");
-		if ((ret = session->open_cursor(
-		    session, s->name, NULL, NULL, &cursor)) != 0)
-			testutil_die(ret, "session.open_cursor");
+		testutil_check(conn->open_session(conn, NULL, NULL, &session));
+		testutil_check(session->open_cursor(
+		    session, s->name, NULL, NULL, &cursor));
 		for (i = 0; i < s->nops; ++i, __wt_yield())
 			writer_op(session, cursor, s);
-		if ((ret = session->close(session, NULL)) != 0)
-			testutil_die(ret, "session.close");
+		testutil_check(session->close(session, NULL));
 	}
 
 	printf("write thread %2d stopping: tid: %s, file: %s\n",
 	    id, tid, s->name);
 
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }
 
 /*
@@ -354,6 +331,6 @@ print_stats(u_int nthreads)
 
 	s = run_info;
 	for (id = 0; id < nthreads; ++id, ++s)
-		printf("%3d: read %6d, remove %6d, update %6d\n",
+		printf("%3u: read %6d, remove %6d, update %6d\n",
 		    id, s->reads, s->remove, s->update);
 }

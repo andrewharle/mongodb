@@ -84,9 +84,7 @@ conn = MongoRunner.runMongod({
     syncdelay: 2,
     journal: "",
     smallfiles: "",
-    journalOptions: 8 /*DurParanoid*/,
-    master: "",
-    oplogSize: 64
+    journalOptions: 8 /*DurParanoid*/
 });
 work();
 
@@ -94,7 +92,7 @@ log("wait a while for a sync and an lsn write");
 sleep(14);  // wait for lsn write
 
 log("kill mongod -9");
-MongoRunner.stopMongod(conn, /*signal*/ 9);
+MongoRunner.stopMongod(conn, 9, {allowedExitCode: MongoRunner.EXIT_SIGKILL});
 
 // journal file should be present, and non-empty as we killed hard
 
@@ -122,9 +120,7 @@ conn = MongoRunner.runMongod({
     dbpath: path2,
     journal: "",
     smallfiles: "",
-    journalOptions: 24,
-    master: "",
-    oplogSize: 64
+    journalOptions: 24
 });
 verify();
 

@@ -41,17 +41,36 @@ var BackupRestoreTest = function(options) {
     /**
      * Starts a client that will run a CRUD workload.
      */
-    function _crudClient(host, dbName, collectionName) {
+    function _crudClient(host, dbName, collectionName, numNodes) {
         // Launch CRUD client
-        var crudClientCmds = function(dbName, collectionName) {
+        var crudClientCmds = function(dbName, collectionName, numNodes) {
             var bulkNum = 1000;
             var baseNum = 100000;
+
+            let iteration = 0;
+
             var coll = db.getSiblingDB(dbName).getCollection(collectionName);
             coll.ensureIndex({x: 1});
+
             var largeValue = new Array(1024).join('L');
+
             Random.setRandomSeed();
+
             // Run indefinitely.
             while (true) {
+                ++iteration;
+
+                // We periodically use a write concern of w='numNodes' as a backpressure mechanism
+                // to prevent the secondaries from falling off the primary's oplog. The CRUD client
+                // inserts ~1KB documents 1000 at a time, so in the worst case we'll have rolled the
+                // primary's oplog over every ~1000 iterations. We use 100 iterations for the
+                // frequency of when to use a write concern of w='numNodes' to lessen the risk of
+                // being unlucky as a result of running concurrently with the FSM client. Note that
+                // although the updates performed by the CRUD client may in the worst case modify
+                // every document, the oplog entries produced as a result are 10x smaller than the
+                // document itself.
+                const writeConcern = (iteration % 100 === 0) ? {w: numNodes} : {w: 1};
+
                 try {
                     var op = Random.rand();
                     var match = Math.floor(Random.rand() * baseNum);
@@ -64,10 +83,10 @@ var BackupRestoreTest = function(options) {
                                 doc: largeValue.substring(0, match % largeValue.length),
                             });
                         }
-                        assert.writeOK(bulk.execute());
+                        assert.writeOK(bulk.execute(writeConcern));
                     } else if (op < 0.4) {
                         // 20% of the operations: update docs.
-                        var updateOpts = {upsert: true, multi: true};
+                        var updateOpts = {upsert: true, multi: true, writeConcern: writeConcern};
                         assert.writeOK(coll.update({x: {$gte: match}},
                                                    {$inc: {x: baseNum}, $set: {n: 'hello'}},
                                                    updateOpts));
@@ -77,7 +96,8 @@ var BackupRestoreTest = function(options) {
                         coll.find({x: {$gte: match}}).itcount();
                     } else {
                         // 10% of the operations: remove matching docs.
-                        assert.writeOK(coll.remove({x: {$gte: match}}));
+                        assert.writeOK(
+                            coll.remove({x: {$gte: match}}, {writeConcern: writeConcern}));
                     }
                 } catch (e) {
                     if (e instanceof ReferenceError || e instanceof TypeError) {
@@ -89,11 +109,11 @@ var BackupRestoreTest = function(options) {
 
         // Returns the pid of the started mongo shell so the CRUD test client can be terminated
         // without waiting for its execution to finish.
-        return startMongoProgramNoConnect(
-            'mongo',
-            '--eval',
-            '(' + crudClientCmds + ')("' + dbName + '", "' + collectionName + '")',
-            host);
+        return startMongoProgramNoConnect('mongo',
+                                          '--eval',
+                                          '(' + crudClientCmds + ')("' + dbName + '", "' +
+                                              collectionName + '", ' + numNodes + ')',
+                                          host);
     }
 
     /**
@@ -118,8 +138,19 @@ var BackupRestoreTest = function(options) {
                 'auth_drop_role.js',
                 'auth_drop_user.js',
                 'create_index_background.js',
+                'create_index_background_unique_capped.js',
+                'create_index_background_unique.js',
+                'database_versioning.js',
                 'findAndModify_update_grow.js',  // can cause OOM kills on test hosts
+                'multi_statement_transaction_atomicity_isolation.js',
+                'multi_statement_transaction_atomicity_isolation_multi_db.js',
+                'multi_statement_transaction_atomicity_isolation_repeated_reads.js',
+                'multi_statement_transaction_atomicity_isolation_metrics_test.js',
+                'multi_statement_transaction_simple.js',
+                'multi_statement_transaction_simple_repeated_reads.js',
                 'reindex_background.js',
+                'remove_multiple_documents.js',
+                'remove_where.js',
                 'rename_capped_collection_chain.js',
                 'rename_capped_collection_dbname_chain.js',
                 'rename_capped_collection_dbname_droptarget.js',
@@ -128,6 +159,16 @@ var BackupRestoreTest = function(options) {
                 'rename_collection_dbname_chain.js',
                 'rename_collection_dbname_droptarget.js',
                 'rename_collection_droptarget.js',
+                'secondary_reads.js',
+                'secondary_reads_with_catalog_changes.js',
+                'sharded_base_partitioned.js',
+                'sharded_mergeChunks_partitioned.js',
+                'sharded_moveChunk_drop_shard_key_index.js',
+                'sharded_moveChunk_partitioned.js',
+                'sharded_splitChunk_partitioned.js',
+                'snapshot_read_catalog_operations.js',
+                'snapshot_read_kill_operations.js',
+                'snapshot_read_kill_op_only.js',
                 'update_rename.js',
                 'update_rename_noindex.js',
                 'yield_sort.js',
@@ -151,7 +192,8 @@ var BackupRestoreTest = function(options) {
                         };
                         var result = db.getSiblingDB('test').fsm_teardown.insert({a: 1}, wc);
                         assert.writeOK(result, 'teardown insert failed: ' + tojson(result));
-                        result = db.getSiblingDB('test').fsm_teardown.drop();
+                        result = db.getSiblingDB('test').fsm_teardown.drop(
+                            {writeConcern: {w: "majority"}});
                         assert(result, 'teardown drop failed');
                     });
                 } catch (e) {
@@ -179,6 +221,10 @@ var BackupRestoreTest = function(options) {
 
         jsTestLog("Backup restore " + tojson(options));
 
+        // skipValidationOnNamespaceNotFound must be set to true for correct operation of this test.
+        assert(typeof TestData.skipValidationOnNamespaceNotFound === 'undefined' ||
+               TestData.skipValidationOnNamespaceNotFound);
+
         // Test options
         // Test name
         var testName = jsTest.name();
@@ -205,22 +251,30 @@ var BackupRestoreTest = function(options) {
         // Start numNodes node replSet
         var rst = new ReplSetTest({
             nodes: numNodes,
-            nodeOptions: {dbpath: dbpathFormat},
-            oplogSize: 1024,
+            nodeOptions: {
+                dbpath: dbpathFormat,
+                setParameter: {logComponentVerbosity: tojsononeline({storage: {recovery: 2}})}
+            },
+            oplogSize: 1024
         });
         var nodes = rst.startSet();
 
+        // Avoid stepdowns due to heavy workloads on slow machines.
+        var config = rst.getReplSetConfig();
+        config.settings = {electionTimeoutMillis: 60000};
         // Initialize replica set using default timeout. This should give us sufficient time to
         // allocate 1GB oplogs on slow test hosts with mmapv1.
-        rst.initiate();
+        rst.initiate(config);
         rst.awaitNodesAgreeOnPrimary();
         var primary = rst.getPrimary();
         var secondary = rst.getSecondary();
 
+        jsTestLog("Secondary to copy data from: " + secondary);
+
         // Launch CRUD client
         var crudDb = "crud";
         var crudColl = "backuprestore";
-        var crudPid = _crudClient(primary.host, crudDb, crudColl);
+        var crudPid = _crudClient(primary.host, crudDb, crudColl, numNodes);
 
         // Launch FSM client
         var fsmPid = _fsmClient(primary.host, crudDb, numNodes);
@@ -257,6 +311,7 @@ var BackupRestoreTest = function(options) {
 
         // Perform the data backup to new secondary
         if (options.backup == 'fsyncLock') {
+            rst.awaitSecondaryNodes();
             // Test that the secondary supports fsyncLock
             var ret = secondary.getDB("admin").fsyncLock();
             if (!ret.ok) {
@@ -281,8 +336,10 @@ var BackupRestoreTest = function(options) {
                 _runCmd(rsyncCmd);
                 sleep(10000);
             }
+
             // Stop the mongod process
             rst.stop(secondary.nodeId);
+
             // One final rsync
             _runCmd(rsyncCmd);
             removeFile(hiddenDbpath + '/mongod.lock');
@@ -294,6 +351,7 @@ var BackupRestoreTest = function(options) {
         } else if (options.backup == 'stopStart') {
             // Stop the mongod process
             rst.stop(secondary.nodeId);
+
             copyDbpath(dbpathSecondary, hiddenDbpath);
             removeFile(hiddenDbpath + '/mongod.lock');
             print("Source directory:", tojson(ls(dbpathSecondary)));
@@ -345,11 +403,28 @@ var BackupRestoreTest = function(options) {
         // Wait up to 5 minutes until the new hidden node is in state RECOVERING.
         rst.waitForState(hiddenNode, [ReplSetTest.State.RECOVERING, ReplSetTest.State.SECONDARY]);
 
+        jsTestLog('Stopping CRUD and FSM clients');
+
         // Stop CRUD client and FSM client.
-        assert(checkProgram(crudPid), testName + ' CRUD client was not running at end of test');
-        assert(checkProgram(fsmPid), testName + ' FSM client was not running at end of test');
+        var crudStatus = checkProgram(crudPid);
+        assert(crudStatus.alive,
+               testName + ' CRUD client was not running at end of test and exited with code: ' +
+                   crudStatus.exitCode);
         stopMongoProgramByPid(crudPid);
+
+        var fsmStatus = checkProgram(fsmPid);
+        assert(fsmStatus.alive,
+               testName + ' FSM client was not running at end of test and exited with code: ' +
+                   fsmStatus.exitCode);
         stopMongoProgramByPid(fsmPid);
+
+        // Make sure the test database is not in a drop-pending state. This can happen if we
+        // killed the FSM client while it was in the middle of dropping it.
+        assert.soonNoExcept(function() {
+            let result = primary.getDB("test").afterClientKills.insert(
+                {"a": 1}, {writeConcern: {w: "majority"}});
+            return (result.nInserted === 1);
+        }, "failed to insert to test collection", 10 * 60 * 1000);
 
         // Wait up to 5 minutes until the new hidden node is in state SECONDARY.
         jsTestLog('CRUD and FSM clients stopped. Waiting for hidden node ' + hiddenHost +

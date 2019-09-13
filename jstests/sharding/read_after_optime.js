@@ -13,10 +13,7 @@
     assert(lastOp, 'invalid op returned from ReplSetTest.awaitLastOpCommitted()');
 
     var config = configReplSetTest.getReplSetConfigFromNode();
-    var term = -1;
-    if (config.protocolVersion === 1) {
-        term = lastOp.t;
-    }
+    var term = lastOp.t;
 
     var runFindCommand = function(ts) {
         return primaryConn.getDB('local').runCommand({
@@ -36,7 +33,7 @@
     var pingIntervalSeconds = 10;
     assert.commandFailedWithCode(
         runFindCommand(new Timestamp(lastOp.ts.getTime() + pingIntervalSeconds * 5, 0)),
-        ErrorCodes.ExceededTimeLimit);
+        ErrorCodes.MaxTimeMSExpired);
 
     var msg = 'Command on database local timed out waiting for read concern to be satisfied.';
     assert.soon(function() {
@@ -48,4 +45,5 @@
         }
         return false;
     }, 'Did not see any log entries containing the following message: ' + msg, 60000, 300);
+    shardingTest.stop();
 })();

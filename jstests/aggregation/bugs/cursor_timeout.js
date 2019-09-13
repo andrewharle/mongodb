@@ -2,6 +2,9 @@
  * Tests that an aggregation cursor is killed when it is timed out by the ClientCursorMonitor.
  *
  * This test was designed to reproduce SERVER-25585.
+ * @tags: [
+ *   requires_spawning_own_processes,
+ * ]
  */
 (function() {
     'use strict';
@@ -48,7 +51,7 @@
         let serverStatus = assert.commandWorked(testDB.serverStatus());
         const expectedNumTimedOutCursors = serverStatus.metrics.cursor.timedOut + 1;
 
-        const cursor = new DBCommandCursor(conn, res, batchSize);
+        const cursor = new DBCommandCursor(testDB, res, batchSize);
 
         // Wait until the idle cursor background job has killed the aggregation cursor.
         assert.soon(
@@ -57,7 +60,8 @@
                 return +serverStatus.metrics.cursor.timedOut === expectedNumTimedOutCursors;
             },
             function() {
-                return "aggregation cursor failed to time out: " + tojson(serverStatus);
+                return "aggregation cursor failed to time out: " +
+                    tojson(serverStatus.metrics.cursor);
             });
 
         assert.eq(0, serverStatus.metrics.cursor.open.total, tojson(serverStatus));
@@ -90,6 +94,35 @@
         },
         {
           $unwind: "$matches",
+        },
+    ]);
+
+    // Test that an aggregation cursor with nested $lookup stages is killed when the timeout is
+    // reached.
+    assertCursorTimesOut('source', [
+        {
+          $lookup: {
+              from: 'dest',
+              let : {local1: "$local"},
+              pipeline: [
+                  {$match: {$expr: {$eq: ["$foreign", "$$local1"]}}},
+                  {
+                    $lookup: {
+                        from: 'source',
+                        let : {foreign1: "$foreign"},
+                        pipeline: [{$match: {$expr: {$eq: ["$local", "$$foreign1"]}}}],
+                        as: 'matches2'
+                    }
+                  },
+                  {
+                    $unwind: "$matches2",
+                  },
+              ],
+              as: 'matches1',
+          }
+        },
+        {
+          $unwind: "$matches1",
         },
     ]);
 

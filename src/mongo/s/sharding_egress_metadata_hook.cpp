@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -45,22 +47,18 @@
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
-
 namespace rpc {
 
-using std::shared_ptr;
+ShardingEgressMetadataHook::ShardingEgressMetadataHook(ServiceContext* serviceContext)
+    : _serviceContext(serviceContext) {
+    invariant(_serviceContext);
+}
 
-Status ShardingEgressMetadataHook::writeRequestMetadata(bool shardedConnection,
-                                                        OperationContext* txn,
-                                                        const StringData target,
+Status ShardingEgressMetadataHook::writeRequestMetadata(OperationContext* opCtx,
                                                         BSONObjBuilder* metadataBob) {
     try {
-        audit::writeImpersonatedUsersToMetadata(txn, metadataBob);
-
-        ClientMetadataIsMasterState::writeToMetadata(txn, metadataBob);
-        if (!shardedConnection) {
-            return Status::OK();
-        }
+        audit::writeImpersonatedUsersToMetadata(opCtx, metadataBob);
+        ClientMetadataIsMasterState::writeToMetadata(opCtx, metadataBob);
         rpc::ConfigServerMetadata(_getConfigServerOpTime()).writeToMetadata(metadataBob);
         return Status::OK();
     } catch (...) {
@@ -68,20 +66,8 @@ Status ShardingEgressMetadataHook::writeRequestMetadata(bool shardedConnection,
     }
 }
 
-Status ShardingEgressMetadataHook::writeRequestMetadata(OperationContext* txn,
-                                                        const HostAndPort& target,
-                                                        BSONObjBuilder* metadataBob) {
-    try {
-        audit::writeImpersonatedUsersToMetadata(txn, metadataBob);
-        ClientMetadataIsMasterState::writeToMetadata(txn, metadataBob);
-        rpc::ConfigServerMetadata(_getConfigServerOpTime()).writeToMetadata(metadataBob);
-        return Status::OK();
-    } catch (...) {
-        return exceptionToStatus();
-    }
-}
-
-Status ShardingEgressMetadataHook::readReplyMetadata(const StringData replySource,
+Status ShardingEgressMetadataHook::readReplyMetadata(OperationContext* opCtx,
+                                                     StringData replySource,
                                                      const BSONObj& metadataObj) {
     try {
         _saveGLEStats(metadataObj, replySource);
@@ -91,20 +77,12 @@ Status ShardingEgressMetadataHook::readReplyMetadata(const StringData replySourc
     }
 }
 
-Status ShardingEgressMetadataHook::readReplyMetadata(const HostAndPort& replySource,
-                                                     const BSONObj& metadataObj) {
-    try {
-        _saveGLEStats(metadataObj, replySource.toString());
-        return _advanceConfigOptimeFromShard(replySource.toString(), metadataObj);
-    } catch (...) {
-        return exceptionToStatus();
-    }
-}
-
 Status ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(ShardId shardId,
                                                                  const BSONObj& metadataObj) {
+    auto const grid = Grid::get(_serviceContext);
+
     try {
-        auto shard = grid.shardRegistry()->getShardNoReload(shardId);
+        auto shard = grid->shardRegistry()->getShardNoReload(shardId);
         if (!shard) {
             return Status::OK();
         }
@@ -126,7 +104,7 @@ Status ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(ShardId shardId
                 // is safe to use.
                 const auto& replMetadata = parseStatus.getValue();
                 auto opTime = replMetadata.getLastOpCommitted();
-                grid.advanceConfigOpTime(opTime);
+                grid->advanceConfigOpTime(opTime);
             }
         } else {
             // Regular shards return the config opTime as part of ConfigServerMetadata.
@@ -138,7 +116,7 @@ Status ShardingEgressMetadataHook::_advanceConfigOptimeFromShard(ShardId shardId
             const auto& configMetadata = parseStatus.getValue();
             auto opTime = configMetadata.getOpTime();
             if (opTime.is_initialized()) {
-                grid.advanceConfigOpTime(opTime.get());
+                grid->advanceConfigOpTime(opTime.get());
             }
         }
         return Status::OK();

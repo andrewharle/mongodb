@@ -1,7 +1,11 @@
 // Basic tests for a form of stack recursion that's been shown to cause C++ side stack overflows in
 // the past. See SERVER-19614.
 //
-// @tags: [requires_eval_command]
+// @tags: [
+//   does_not_support_stepdowns,
+//   requires_eval_command,
+//   requires_non_retryable_commands,
+// ]
 
 (function() {
     "use strict";

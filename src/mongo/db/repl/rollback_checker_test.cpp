@@ -1,24 +1,26 @@
 
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,12 +33,12 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/client.h"
-#include "mongo/db/repl/replication_executor_test_fixture.h"
 #include "mongo/db/repl/rollback_checker.h"
 #include "mongo/executor/network_interface_mock.h"
-#include "mongo/util/log.h"
-
+#include "mongo/executor/thread_pool_task_executor_test_fixture.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/log.h"
 
 namespace {
 
@@ -47,7 +49,7 @@ using executor::RemoteCommandResponse;
 
 using LockGuard = stdx::lock_guard<stdx::mutex>;
 
-class RollbackCheckerTest : public ReplicationExecutorTest {
+class RollbackCheckerTest : public executor::ThreadPoolExecutorTest {
 public:
     RollbackChecker* getRollbackChecker() const;
 
@@ -61,9 +63,10 @@ protected:
 };
 
 void RollbackCheckerTest::setUp() {
-    ReplicationExecutorTest::setUp();
+    executor::ThreadPoolExecutorTest::setUp();
     launchExecutorThread();
-    _rollbackChecker = stdx::make_unique<RollbackChecker>(&getReplExecutor(), HostAndPort());
+    getNet()->enterNetwork();
+    _rollbackChecker = stdx::make_unique<RollbackChecker>(&getExecutor(), HostAndPort());
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     _hasRolledBackResult = {ErrorCodes::NotYetInitialized, ""};
     _hasCalledCallback = false;
@@ -77,23 +80,27 @@ TEST_F(RollbackCheckerTest, InvalidConstruction) {
     HostAndPort syncSource;
 
     // Null executor.
-    ASSERT_THROWS_CODE(RollbackChecker(nullptr, syncSource), UserException, ErrorCodes::BadValue);
+    ASSERT_THROWS_CODE(
+        RollbackChecker(nullptr, syncSource), AssertionException, ErrorCodes::BadValue);
 }
 
 TEST_F(RollbackCheckerTest, ShutdownBeforeStart) {
     auto callback = [](const RollbackChecker::Result&) {};
-    getReplExecutor().shutdown();
+    shutdownExecutorThread();
+    joinExecutorThread();
     ASSERT_NOT_OK(getRollbackChecker()->reset(callback).getStatus());
     ASSERT_NOT_OK(getRollbackChecker()->checkForRollback(callback).getStatus());
 }
 
 TEST_F(RollbackCheckerTest, ShutdownBeforeHasHadRollback) {
-    getReplExecutor().shutdown();
+    shutdownExecutorThread();
+    joinExecutorThread();
     ASSERT_EQUALS(ErrorCodes::ShutdownInProgress, getRollbackChecker()->hasHadRollback());
 }
 
 TEST_F(RollbackCheckerTest, ShutdownBeforeResetSync) {
-    getReplExecutor().shutdown();
+    shutdownExecutorThread();
+    joinExecutorThread();
     ASSERT_EQUALS(ErrorCodes::CallbackCanceled, getRollbackChecker()->reset_sync());
 }
 
@@ -107,7 +114,7 @@ TEST_F(RollbackCheckerTest, reset) {
     getNet()->runReadyNetworkOperations();
     getNet()->exitNetwork();
 
-    getReplExecutor().wait(cbh);
+    getExecutor().wait(cbh);
     ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
 }
 
@@ -123,7 +130,7 @@ TEST_F(RollbackCheckerTest, RollbackRBID) {
     auto commandResponse = BSON("ok" << 1 << "rbid" << 3);
     getNet()->scheduleSuccessfulResponse(commandResponse);
     getNet()->runReadyNetworkOperations();
-    getReplExecutor().wait(refreshCBH);
+    getExecutor().wait(refreshCBH);
     ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     {
         LockGuard lk(_mutex);
@@ -141,7 +148,7 @@ TEST_F(RollbackCheckerTest, RollbackRBID) {
     getNet()->runReadyNetworkOperations();
     getNet()->exitNetwork();
 
-    getReplExecutor().wait(rbCBH);
+    getExecutor().wait(rbCBH);
     ASSERT_EQUALS(getRollbackChecker()->getLastRBID_forTest(), 4);
     ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     LockGuard lk(_mutex);
@@ -161,7 +168,7 @@ TEST_F(RollbackCheckerTest, NoRollbackRBID) {
     auto commandResponse = BSON("ok" << 1 << "rbid" << 3);
     getNet()->scheduleSuccessfulResponse(commandResponse);
     getNet()->runReadyNetworkOperations();
-    getReplExecutor().wait(refreshCBH);
+    getExecutor().wait(refreshCBH);
     ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     {
         LockGuard lk(_mutex);
@@ -179,7 +186,7 @@ TEST_F(RollbackCheckerTest, NoRollbackRBID) {
     getNet()->runReadyNetworkOperations();
     getNet()->exitNetwork();
 
-    getReplExecutor().wait(rbCBH);
+    getExecutor().wait(rbCBH);
     ASSERT_EQUALS(getRollbackChecker()->getLastRBID_forTest(), 3);
     ASSERT_EQUALS(getRollbackChecker()->getBaseRBID(), 3);
     LockGuard lk(_mutex);

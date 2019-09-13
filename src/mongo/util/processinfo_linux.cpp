@@ -1,30 +1,33 @@
 // processinfo_linux2.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
@@ -38,9 +41,13 @@
 #include <sched.h>
 #include <stdio.h>
 #include <sys/mman.h>
+#include <sys/resource.h>
+#include <sys/time.h>
 #include <sys/utsname.h>
 #include <unistd.h>
-#ifdef __UCLIBC__
+#ifdef __BIONIC__
+#include <android/api-level.h>
+#elif __UCLIBC__
 #include <features.h>
 #else
 #include <gnu/libc-version.h>
@@ -71,7 +78,7 @@ public:
             stringstream ss;
             ss << "couldn't open [" << name << "] " << errnoWithDescription();
             string s = ss.str();
-            msgassertedNoTrace(13538, s.c_str());
+            msgasserted(13538, s.c_str());
         }
         int found = fscanf(f,
                            "%d %127s %c "
@@ -408,6 +415,23 @@ public:
         }
         return 0;
     }
+
+    /**
+    * Get memory limit for the process.
+    * If memory is being limited by the applied control group and it's less
+    * than the OS system memory (default cgroup limit is ulonglong max) let's
+    * return the actual memory we'll have available to the process.
+    */
+    static unsigned long long getMemorySizeLimit() {
+        unsigned long long systemMemBytes = getSystemMemorySize();
+        unsigned long long cgroupMemBytes = 0;
+        std::string cgmemlimit = readLineFromFile("/sys/fs/cgroup/memory/memory.limit_in_bytes");
+        if (!cgmemlimit.empty() &&
+            mongo::parseNumberFromString(cgmemlimit, &cgroupMemBytes).isOK()) {
+            return std::min(systemMemBytes, cgroupMemBytes);
+        }
+        return systemMemBytes;
+    }
 };
 
 
@@ -420,7 +444,7 @@ bool ProcessInfo::supported() {
 }
 
 // get the number of CPUs available to the current process
-boost::optional<unsigned long> ProcessInfo::getNumAvailableCores() {
+boost::optional<unsigned long> ProcessInfo::getNumCoresForProcess() {
     cpu_set_t set;
 
     if (sched_getaffinity(0, sizeof(cpu_set_t), &set) == 0) {
@@ -454,11 +478,12 @@ double ProcessInfo::getSystemMemoryPressurePercentage() {
 }
 
 void ProcessInfo::getExtraInfo(BSONObjBuilder& info) {
-    LinuxProc p(_pid);
-    if (p._maj_flt <= std::numeric_limits<long long>::max())
-        info.appendNumber("page_faults", static_cast<long long>(p._maj_flt));
+    struct rusage ru;
+    getrusage(RUSAGE_SELF, &ru);
+    if (ru.ru_majflt <= std::numeric_limits<long long>::max())
+        info.appendNumber("page_faults", static_cast<long long>(ru.ru_majflt));
     else
-        info.appendNumber("page_faults", static_cast<double>(p._maj_flt));
+        info.appendNumber("page_faults", static_cast<double>(ru.ru_majflt));
 }
 
 /**
@@ -482,6 +507,7 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
     osName = distroName;
     osVersion = distroVersion;
     memSize = LinuxSysHelper::getSystemMemorySize();
+    memLimit = LinuxSysHelper::getMemorySizeLimit();
     addrSize = sizeof(void*) * CHAR_BIT;
     numCores = cpuCount;
     pageSize = static_cast<unsigned long long>(sysconf(_SC_PAGESIZE));
@@ -490,7 +516,11 @@ void ProcessInfo::SystemInfo::collectSystemInfo() {
 
     BSONObjBuilder bExtra;
     bExtra.append("versionString", LinuxSysHelper::readLineFromFile("/proc/version"));
-#ifdef __UCLIBC__
+#ifdef __BIONIC__
+    stringstream ss;
+    ss << "bionic (android api " << __ANDROID_API__ << ")";
+    bExtra.append("libcVersion", ss.str());
+#elif __UCLIBC__
     stringstream ss;
     ss << "uClibc-" << __UCLIBC_MAJOR__ << "." << __UCLIBC_MINOR__ << "." << __UCLIBC_SUBLEVEL__;
     bExtra.append("libcVersion", ss.str());

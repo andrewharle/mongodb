@@ -2,14 +2,7 @@
 
 Import("env")
 
-env.Library(
-    target=[
-        'max_log_size'
-    ],
-    source=[
-        'max_log_size.cpp',
-    ],
-)
+env = env.Clone()
 
 env.Library('parse_log_component_settings',
             ['parse_log_component_settings.cpp'],

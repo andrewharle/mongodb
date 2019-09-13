@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,7 +39,6 @@
 
 #include "mongo/base/status_with.h"
 #include "mongo/bson/bsonobj_comparator_interface.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog/type_chunk.h"
 #include "mongo/s/catalog/type_collection.h"
 #include "mongo/s/catalog/type_tags.h"
@@ -71,32 +72,27 @@ StatusWith<DistributionStatus> createCollectionDistributionStatus(
         shardToChunksMap[stat.shardId];
     }
 
-    for (const auto& entry : chunkMgr->chunkMap()) {
-        const auto& chunkEntry = entry.second;
-
+    for (const auto& chunkEntry : chunkMgr->chunks()) {
         ChunkType chunk;
         chunk.setNS(chunkMgr->getns());
-        chunk.setMin(chunkEntry->getMin());
-        chunk.setMax(chunkEntry->getMax());
-        chunk.setJumbo(chunkEntry->isJumbo());
-        chunk.setShard(chunkEntry->getShardId());
-        chunk.setVersion(chunkEntry->getLastmod());
+        chunk.setMin(chunkEntry.getMin());
+        chunk.setMax(chunkEntry.getMax());
+        chunk.setJumbo(chunkEntry.isJumbo());
+        chunk.setShard(chunkEntry.getShardId());
+        chunk.setVersion(chunkEntry.getLastmod());
 
-        shardToChunksMap[chunkEntry->getShardId()].push_back(chunk);
+        shardToChunksMap[chunkEntry.getShardId()].push_back(chunk);
     }
 
-    vector<TagsType> collectionTags;
-    Status tagsStatus = Grid::get(opCtx)->catalogClient(opCtx)->getTagsForCollection(
-        opCtx, chunkMgr->getns(), &collectionTags);
-    if (!tagsStatus.isOK()) {
-        return {tagsStatus.code(),
-                str::stream() << "Unable to load tags for collection " << chunkMgr->getns()
-                              << " due to "
-                              << tagsStatus.toString()};
+    const auto swCollectionTags =
+        Grid::get(opCtx)->catalogClient()->getTagsForCollection(opCtx, chunkMgr->getns());
+    if (!swCollectionTags.isOK()) {
+        return swCollectionTags.getStatus().withContext(
+            str::stream() << "Unable to load tags for collection " << chunkMgr->getns().ns());
     }
+    const auto& collectionTags = swCollectionTags.getValue();
 
-    DistributionStatus distribution(NamespaceString(chunkMgr->getns()),
-                                    std::move(shardToChunksMap));
+    DistributionStatus distribution(chunkMgr->getns(), std::move(shardToChunksMap));
 
     // Cache the collection tags
     const auto& keyPattern = chunkMgr->getShardKeyPattern().getKeyPattern();
@@ -136,16 +132,16 @@ public:
      * Adds the specified split point to the chunk. The split points must always be within the
      * boundaries of the chunk and must come in increasing order.
      */
-    void addSplitPoint(shared_ptr<Chunk> chunk, const BSONObj& splitPoint) {
-        auto it = _chunkSplitPoints.find(chunk->getMin());
+    void addSplitPoint(const Chunk& chunk, const BSONObj& splitPoint) {
+        auto it = _chunkSplitPoints.find(chunk.getMin());
         if (it == _chunkSplitPoints.end()) {
-            _chunkSplitPoints.emplace(chunk->getMin(),
-                                      BalancerChunkSelectionPolicy::SplitInfo(chunk->getShardId(),
+            _chunkSplitPoints.emplace(chunk.getMin(),
+                                      BalancerChunkSelectionPolicy::SplitInfo(chunk.getShardId(),
                                                                               _nss,
                                                                               _collectionVersion,
-                                                                              chunk->getLastmod(),
-                                                                              chunk->getMin(),
-                                                                              chunk->getMax(),
+                                                                              chunk.getLastmod(),
+                                                                              chunk.getMin(),
+                                                                              chunk.getMax(),
                                                                               {splitPoint}));
         } else if (splitPoint.woCompare(it->second.splitKeys.back()) > 0) {
             it->second.splitKeys.push_back(splitPoint);
@@ -194,13 +190,12 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToSpli
 
     const auto shardStats = std::move(shardStatsStatus.getValue());
 
-    vector<CollectionType> collections;
-
-    Status collsStatus = Grid::get(opCtx)->catalogClient(opCtx)->getCollections(
-        opCtx, nullptr, &collections, nullptr);
-    if (!collsStatus.isOK()) {
-        return collsStatus;
+    auto swCollections = Grid::get(opCtx)->catalogClient()->getCollections(opCtx, nullptr, nullptr);
+    if (!swCollections.isOK()) {
+        return swCollections.getStatus();
     }
+
+    auto& collections = swCollections.getValue();
 
     if (collections.empty()) {
         return SplitInfoVector{};
@@ -248,13 +243,13 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::selectChunksToMo
         return MigrateInfoVector{};
     }
 
-    vector<CollectionType> collections;
 
-    Status collsStatus = Grid::get(opCtx)->catalogClient(opCtx)->getCollections(
-        opCtx, nullptr, &collections, nullptr);
-    if (!collsStatus.isOK()) {
-        return collsStatus;
+    auto swCollections = Grid::get(opCtx)->catalogClient()->getCollections(opCtx, nullptr, nullptr);
+    if (!swCollections.isOK()) {
+        return swCollections.getStatus();
     }
+
+    auto& collections = swCollections.getValue();
 
     if (collections.empty()) {
         return MigrateInfoVector{};
@@ -392,11 +387,10 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicyImpl::_getSplitCandidate
     for (const auto& tagRangeEntry : distribution.tagRanges()) {
         const auto& tagRange = tagRangeEntry.second;
 
-        shared_ptr<Chunk> chunkAtZoneMin =
-            cm->findIntersectingChunkWithSimpleCollation(tagRange.min);
-        invariant(chunkAtZoneMin->getMax().woCompare(tagRange.min) > 0);
+        const auto chunkAtZoneMin = cm->findIntersectingChunkWithSimpleCollation(tagRange.min);
+        invariant(chunkAtZoneMin.getMax().woCompare(tagRange.min) > 0);
 
-        if (chunkAtZoneMin->getMin().woCompare(tagRange.min)) {
+        if (chunkAtZoneMin.getMin().woCompare(tagRange.min)) {
             splitCandidates.addSplitPoint(chunkAtZoneMin, tagRange.min);
         }
 
@@ -404,13 +398,12 @@ StatusWith<SplitInfoVector> BalancerChunkSelectionPolicyImpl::_getSplitCandidate
         if (!tagRange.max.woCompare(shardKeyPattern.globalMax()))
             continue;
 
-        shared_ptr<Chunk> chunkAtZoneMax =
-            cm->findIntersectingChunkWithSimpleCollation(tagRange.max);
+        const auto chunkAtZoneMax = cm->findIntersectingChunkWithSimpleCollation(tagRange.max);
 
         // We need to check that both the chunk's minKey does not match the zone's max and also that
         // the max is not equal, which would only happen in the case of the zone ending in MaxKey.
-        if (chunkAtZoneMax->getMin().woCompare(tagRange.max) &&
-            chunkAtZoneMax->getMax().woCompare(tagRange.max)) {
+        if (chunkAtZoneMax.getMin().woCompare(tagRange.max) &&
+            chunkAtZoneMax.getMax().woCompare(tagRange.max)) {
             splitCandidates.addSplitPoint(chunkAtZoneMax, tagRange.max);
         }
     }
@@ -444,16 +437,15 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::_getMigrateCandi
     for (const auto& tagRangeEntry : distribution.tagRanges()) {
         const auto& tagRange = tagRangeEntry.second;
 
-        shared_ptr<Chunk> chunkAtZoneMin =
-            cm->findIntersectingChunkWithSimpleCollation(tagRange.min);
+        const auto chunkAtZoneMin = cm->findIntersectingChunkWithSimpleCollation(tagRange.min);
 
-        if (chunkAtZoneMin->getMin().woCompare(tagRange.min)) {
+        if (chunkAtZoneMin.getMin().woCompare(tagRange.min)) {
             return {ErrorCodes::IllegalOperation,
                     str::stream()
                         << "Tag boundaries "
                         << tagRange.toString()
                         << " fall in the middle of an existing chunk "
-                        << ChunkRange(chunkAtZoneMin->getMin(), chunkAtZoneMin->getMax()).toString()
+                        << ChunkRange(chunkAtZoneMin.getMin(), chunkAtZoneMin.getMax()).toString()
                         << ". Balancing for collection "
                         << nss.ns()
                         << " will be postponed until the chunk is split appropriately."};
@@ -463,19 +455,18 @@ StatusWith<MigrateInfoVector> BalancerChunkSelectionPolicyImpl::_getMigrateCandi
         if (!tagRange.max.woCompare(shardKeyPattern.globalMax()))
             continue;
 
-        shared_ptr<Chunk> chunkAtZoneMax =
-            cm->findIntersectingChunkWithSimpleCollation(tagRange.max);
+        const auto chunkAtZoneMax = cm->findIntersectingChunkWithSimpleCollation(tagRange.max);
 
         // We need to check that both the chunk's minKey does not match the zone's max and also that
         // the max is not equal, which would only happen in the case of the zone ending in MaxKey.
-        if (chunkAtZoneMax->getMin().woCompare(tagRange.max) &&
-            chunkAtZoneMax->getMax().woCompare(tagRange.max)) {
+        if (chunkAtZoneMax.getMin().woCompare(tagRange.max) &&
+            chunkAtZoneMax.getMax().woCompare(tagRange.max)) {
             return {ErrorCodes::IllegalOperation,
                     str::stream()
                         << "Tag boundaries "
                         << tagRange.toString()
                         << " fall in the middle of an existing chunk "
-                        << ChunkRange(chunkAtZoneMax->getMin(), chunkAtZoneMax->getMax()).toString()
+                        << ChunkRange(chunkAtZoneMax.getMin(), chunkAtZoneMax.getMax()).toString()
                         << ". Balancing for collection "
                         << nss.ns()
                         << " will be postponed until the chunk is split appropriately."};

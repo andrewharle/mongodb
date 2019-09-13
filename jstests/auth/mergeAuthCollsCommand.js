@@ -1,5 +1,6 @@
 /**
  * Tests the behavior of the _mergeAuthzCollections command.
+ * @tags: [requires_sharding]
  */
 
 function assertUsersAndRolesHaveRole(admin, role) {
@@ -117,7 +118,7 @@ function runTest(conn) {
 jsTest.log('Test standalone');
 var conn = MongoRunner.runMongod({});
 runTest(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
 var st = new ShardingTest({shards: 2, config: 3});

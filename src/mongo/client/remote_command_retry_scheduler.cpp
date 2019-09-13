@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -167,20 +169,34 @@ RemoteCommandRetryScheduler::~RemoteCommandRetryScheduler() {
 
 bool RemoteCommandRetryScheduler::isActive() const {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
-    return _active;
+    return _isActive_inlock();
+}
+
+bool RemoteCommandRetryScheduler::_isActive_inlock() const {
+    return State::kRunning == _state || State::kShuttingDown == _state;
 }
 
 Status RemoteCommandRetryScheduler::startup() {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
 
-    if (_active) {
-        return Status(ErrorCodes::IllegalOperation, "fetcher already scheduled");
+    switch (_state) {
+        case State::kPreStart:
+            _state = State::kRunning;
+            break;
+        case State::kRunning:
+            return Status(ErrorCodes::IllegalOperation, "scheduler already started");
+        case State::kShuttingDown:
+            return Status(ErrorCodes::ShutdownInProgress, "scheduler shutting down");
+        case State::kComplete:
+            return Status(ErrorCodes::ShutdownInProgress, "scheduler completed");
     }
 
     auto scheduleStatus = _schedule_inlock();
     if (!scheduleStatus.isOK()) {
+        _state = State::kComplete;
         return scheduleStatus;
     }
+
     return Status::OK();
 }
 
@@ -188,9 +204,18 @@ void RemoteCommandRetryScheduler::shutdown() {
     executor::TaskExecutor::CallbackHandle remoteCommandCallbackHandle;
     {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
-
-        if (!_active) {
-            return;
+        switch (_state) {
+            case State::kPreStart:
+                // Transition directly from PreStart to Complete if not started yet.
+                _state = State::kComplete;
+                return;
+            case State::kRunning:
+                _state = State::kShuttingDown;
+                break;
+            case State::kShuttingDown:
+            case State::kComplete:
+                // Nothing to do if we are already in ShuttingDown or Complete state.
+                return;
         }
 
         remoteCommandCallbackHandle = _remoteCommandCallbackHandle;
@@ -202,7 +227,7 @@ void RemoteCommandRetryScheduler::shutdown() {
 
 void RemoteCommandRetryScheduler::join() {
     stdx::unique_lock<stdx::mutex> lock(_mutex);
-    _condition.wait(lock, [this]() { return !_active; });
+    _condition.wait(lock, [this]() { return !_isActive_inlock(); });
 }
 
 std::string RemoteCommandRetryScheduler::toString() const {
@@ -210,7 +235,7 @@ std::string RemoteCommandRetryScheduler::toString() const {
     str::stream output;
     output << "RemoteCommandRetryScheduler";
     output << " request: " << _request.toString();
-    output << " active: " << _active;
+    output << " active: " << _isActive_inlock();
     if (_remoteCommandCallbackHandle.isValid()) {
         output << " callbackHandle.valid: " << _remoteCommandCallbackHandle.isValid();
         output << " callbackHandle.cancelled: " << _remoteCommandCallbackHandle.isCanceled();
@@ -223,38 +248,44 @@ std::string RemoteCommandRetryScheduler::toString() const {
 Status RemoteCommandRetryScheduler::_schedule_inlock() {
     ++_currentAttempt;
     auto scheduleResult = _executor->scheduleRemoteCommand(
-        _request,
-        stdx::bind(
-            &RemoteCommandRetryScheduler::_remoteCommandCallback, this, stdx::placeholders::_1));
+        _request, [this](const auto& x) { return this->_remoteCommandCallback(x); });
 
     if (!scheduleResult.isOK()) {
         return scheduleResult.getStatus();
     }
 
     _remoteCommandCallbackHandle = scheduleResult.getValue();
-    _active = true;
     return Status::OK();
 }
 
 void RemoteCommandRetryScheduler::_remoteCommandCallback(
     const executor::TaskExecutor::RemoteCommandCallbackArgs& rcba) {
-    auto status = rcba.response.status;
-    auto currentAttempt = _currentAttempt;
-    {
+    const auto& status = rcba.response.status;
+
+    // Use a lambda to avoid unnecessary lock acquisition when checking conditions for termination.
+    auto getCurrentAttempt = [this]() {
         stdx::lock_guard<stdx::mutex> lock(_mutex);
-        currentAttempt = _currentAttempt;
-    }
+        return _currentAttempt;
+    };
 
     if (status.isOK() || status == ErrorCodes::CallbackCanceled ||
-        currentAttempt == _retryPolicy->getMaximumAttempts() ||
-        !_retryPolicy->shouldRetryOnError(status.code())) {
+        !_retryPolicy->shouldRetryOnError(status.code()) ||
+        getCurrentAttempt() == _retryPolicy->getMaximumAttempts()) {
         _onComplete(rcba);
         return;
     }
 
     // TODO(benety): Check cumulative elapsed time of failed responses received against retry
     // policy. Requires SERVER-24067.
-    auto scheduleStatus = _schedule_inlock();
+    auto scheduleStatus = [this]() {
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        if (State::kShuttingDown == _state) {
+            return Status(ErrorCodes::CallbackCanceled,
+                          "scheduler was shut down before retrying command");
+        }
+        return _schedule_inlock();
+    }();
+
     if (!scheduleStatus.isOK()) {
         _onComplete({rcba.executor, rcba.myHandle, rcba.request, scheduleStatus});
         return;
@@ -263,11 +294,18 @@ void RemoteCommandRetryScheduler::_remoteCommandCallback(
 
 void RemoteCommandRetryScheduler::_onComplete(
     const executor::TaskExecutor::RemoteCommandCallbackArgs& rcba) {
+
+    invariant(_callback);
     _callback(rcba);
 
+    // This will release the resources held by the '_callback' function object. To avoid any issues
+    // with destruction logic in the function object's resources accessing this
+    // RemoteCommandRetryScheduler, we release this function object outside the lock.
+    _callback = {};
+
     stdx::lock_guard<stdx::mutex> lock(_mutex);
-    invariant(_active);
-    _active = false;
+    invariant(_isActive_inlock());
+    _state = State::kComplete;
     _condition.notify_all();
 }
 

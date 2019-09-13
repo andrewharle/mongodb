@@ -1,29 +1,31 @@
+
 /**
- * Copyright 2011 (c) 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects for
- * all of the code used other than as permitted herein. If you modify file(s)
- * with this exception, you may extend this exception to your version of the
- * file(s), but you are not obligated to do so. If you do not wish to do so,
- * delete this exception statement from your version. If you delete this
- * exception statement from all source files in the program, then also delete
- * it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -90,6 +92,12 @@ public:
         const Document& rhs;
     };
 
+    static constexpr StringData metaFieldTextScore = "$textScore"_sd;
+    static constexpr StringData metaFieldRandVal = "$randVal"_sd;
+    static constexpr StringData metaFieldSortKey = "$sortKey"_sd;
+
+    static const std::vector<StringData> allMetadataFieldNames;
+
     /// Empty Document (does no allocation)
     Document() {}
 
@@ -123,14 +131,13 @@ public:
         return storage().getField(pos).val;
     }
 
-    /** Similar to extractAllElementsAlongPath(), but using FieldPath rather than a dotted string.
-     *  If you pass a non-NULL positions vector, you get back a path suitable
-     *  to pass to MutableDocument::setNestedField.
-     *
-     *  TODO a version that doesn't use FieldPath
+    /**
+     * Returns the Value stored at the location given by 'path', or Value() if no such path exists.
+     * If 'positions' is non-null, it will be filled with a path suitable to pass to
+     * MutableDocument::setNestedField().
      */
-    const Value getNestedField(const FieldPath& fieldNames,
-                               std::vector<Position>* positions = NULL) const;
+    const Value getNestedField(const FieldPath& path,
+                               std::vector<Position>* positions = nullptr) const;
 
     /// Number of fields in this document. O(n)
     size_t size() const {
@@ -193,7 +200,8 @@ public:
 
     /**
      * Serializes this document to the BSONObj under construction in 'builder'. Metadata is not
-     * included. Throws a UserException if 'recursionLevel' exceeds the maximum allowable depth.
+     * included. Throws a AssertionException if 'recursionLevel' exceeds the maximum allowable
+     * depth.
      */
     void toBson(BSONObjBuilder* builder, size_t recursionLevel = 1) const;
     BSONObj toBson() const;
@@ -210,6 +218,12 @@ public:
      * with metaField.
      */
     static Document fromBsonWithMetaData(const BSONObj& bson);
+
+    /**
+     * Given a BSON object that may have metadata fields added as part of toBsonWithMetadata(),
+     * returns the same object without any of the metadata fields.
+     */
+    static BSONObj stripMetadataFields(const BSONObj& bsonWithMetadata);
 
     // Support BSONObjBuilder and BSONArrayBuilder "stream" API
     friend BSONObjBuilder& operator<<(BSONObjBuilderValueStream& builder, const Document& d);
@@ -233,7 +247,6 @@ public:
         return Document(storage().clone().get());
     }
 
-    static const StringData metaFieldTextScore;  // "$textScore"
     bool hasTextScore() const {
         return storage().hasTextScore();
     }
@@ -241,12 +254,18 @@ public:
         return storage().getTextScore();
     }
 
-    static const StringData metaFieldRandVal;  // "$randVal"
     bool hasRandMetaField() const {
         return storage().hasRandMetaField();
     }
     double getRandMetaField() const {
         return storage().getRandMetaField();
+    }
+
+    bool hasSortKeyMetaField() const {
+        return storage().hasSortKeyMetaField();
+    }
+    BSONObj getSortKeyMetaField() const {
+        return storage().getSortKeyMetaField();
     }
 
     /// members for Sorter
@@ -442,6 +461,10 @@ public:
         return MutableValue(storage().getField(key));
     }
 
+    bool hasField(StringData key) {
+        return storage().findField(key).found();
+    }
+
     /// Update field by Position. Must already be a valid Position.
     MutableValue operator[](Position pos) {
         return getField(pos);
@@ -493,6 +516,10 @@ public:
         storage().setRandMetaField(val);
     }
 
+    void setSortKeyMetaField(BSONObj sortKey) {
+        storage().setSortKeyMetaField(sortKey);
+    }
+
     /** Convert to a read-only document and release reference.
      *
      *  Call this to indicate that you are done with this Document and will
@@ -522,6 +549,10 @@ public:
      */
     Document peek() {
         return Document(storagePtr());
+    }
+
+    size_t getApproximateSize() {
+        return peek().getApproximateSize();
     }
 
 private:

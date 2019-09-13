@@ -1,5 +1,13 @@
-// Test that the collection created with the "convertToCapped" command inherits the default
-// collation of the corresponding collection.
+/**
+ * Test that the collection created with the "convertToCapped" command inherits the default
+ * collation of the corresponding collection.
+ *
+ * @tags: [
+ *  requires_non_retryable_commands,
+ *  requires_capped,
+ * ]
+ */
+
 (function() {
     "use strict";
 

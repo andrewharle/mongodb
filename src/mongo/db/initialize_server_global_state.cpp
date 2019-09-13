@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2008 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
 
@@ -38,19 +40,21 @@
 #include <signal.h>
 
 #ifndef _WIN32
+#include <sys/stat.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 #include <syslog.h>
 #endif
 
 #include "mongo/base/init.h"
-#include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/config.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/internal_user_auth.h"
+#include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/auth/security_key.h"
 #include "mongo/db/server_options.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/logger/console_appender.h"
 #include "mongo/logger/logger.h"
 #include "mongo/logger/message_event.h"
@@ -63,11 +67,14 @@
 #include "mongo/platform/process_id.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
-#include "mongo/util/net/listen.h"
 #include "mongo/util/net/ssl_manager.h"
 #include "mongo/util/processinfo.h"
 #include "mongo/util/quick_exit.h"
 #include "mongo/util/signal_handlers_synchronous.h"
+
+#if defined(__APPLE__)
+#include <TargetConditionals.h>
+#endif
 
 namespace fs = boost::filesystem;
 
@@ -100,7 +107,7 @@ void signalForkSuccess() {
 
 
 static bool forkServer() {
-#ifndef _WIN32
+#if !defined(_WIN32) && !(defined(__APPLE__) && TARGET_OS_TV)
     if (serverGlobalParams.doFork) {
         fassert(16447, !serverGlobalParams.logpath.empty() || serverGlobalParams.logWithSyslog);
 
@@ -126,12 +133,17 @@ static bool forkServer() {
         } else if (child1) {
             // this is run in the original parent process
             int pstat;
-            waitpid(child1, &pstat, 0);
+            if (waitpid(child1, &pstat, 0) == pid_t{-1}) {
+                perror("waitpid");
+                quickExit(-1);
+            }
 
             if (WIFEXITED(pstat)) {
                 if (WEXITSTATUS(pstat)) {
                     cout << "ERROR: child process failed, exited with error number "
-                         << WEXITSTATUS(pstat) << endl;
+                         << WEXITSTATUS(pstat) << endl
+                         << "To see additional information in this output, start without "
+                         << "the \"--fork\" option." << endl;
                 } else {
                     cout << "child process started successfully, parent exiting" << endl;
                 }
@@ -158,7 +170,10 @@ static bool forkServer() {
             // this is run in the middle process
             int pstat;
             cout << "forked process: " << child2 << endl;
-            waitpid(child2, &pstat, 0);
+            if (waitpid(child2, &pstat, 0) == pid_t{-1}) {
+                perror("waitpid");
+                quickExit(-1);
+            }
 
             if (WIFEXITED(pstat)) {
                 quickExit(WEXITSTATUS(pstat));
@@ -198,9 +213,13 @@ void forkServerOrDie() {
         quickExit(EXIT_FAILURE);
 }
 
-MONGO_INITIALIZER_GENERAL(ServerLogRedirection,
-                          ("GlobalLogManager", "EndStartupOptionHandling", "ForkServer"),
-                          ("default"))
+MONGO_EXPORT_SERVER_PARAMETER(maxLogSizeKB, int, logger::LogContext::kDefaultMaxLogSizeKB);
+// On POSIX platforms we need to set our umask before opening any log files, so this
+// should depend on MungeUmask above, but not on Windows.
+MONGO_INITIALIZER_GENERAL(
+    ServerLogRedirection,
+    ("GlobalLogManager", "EndStartupOptionHandling", "ForkServer", "MungeUmask"),
+    ("default"))
 (InitializerContext*) {
     using logger::LogManager;
     using logger::MessageEventEphemeral;
@@ -209,6 +228,9 @@ MONGO_INITIALIZER_GENERAL(ServerLogRedirection,
     using logger::MessageLogDomain;
     using logger::RotatableFileAppender;
     using logger::StatusWithRotatableFileWriter;
+
+    // Hook up this global into our logging encoder
+    MessageEventDetailsEncoder::setMaxLogSizeKBSource(maxLogSizeKB);
 
     if (serverGlobalParams.logWithSyslog) {
 #ifdef _WIN32
@@ -222,12 +244,12 @@ MONGO_INITIALIZER_GENERAL(ServerLogRedirection,
         openlog(strdup(sb.str().c_str()), LOG_PID | LOG_CONS, serverGlobalParams.syslogFacility);
         LogManager* manager = logger::globalLogManager();
         manager->getGlobalDomain()->clearAppenders();
-        manager->getGlobalDomain()->attachAppender(MessageLogDomain::AppenderAutoPtr(
-            new SyslogAppender<MessageEventEphemeral>(new logger::MessageEventWithContextEncoder)));
+        manager->getGlobalDomain()->attachAppender(
+            std::make_unique<SyslogAppender<MessageEventEphemeral>>(
+                std::make_unique<logger::MessageEventDetailsEncoder>()));
         manager->getNamedDomain("javascriptOutput")
-            ->attachAppender(
-                MessageLogDomain::AppenderAutoPtr(new SyslogAppender<MessageEventEphemeral>(
-                    new logger::MessageEventWithContextEncoder)));
+            ->attachAppender(std::make_unique<SyslogAppender<MessageEventEphemeral>>(
+                std::make_unique<logger::MessageEventDetailsEncoder>()));
 #endif  // defined(_WIN32)
     } else if (!serverGlobalParams.logpath.empty()) {
         fassert(16448, !serverGlobalParams.logWithSyslog);
@@ -283,12 +305,11 @@ MONGO_INITIALIZER_GENERAL(ServerLogRedirection,
         LogManager* manager = logger::globalLogManager();
         manager->getGlobalDomain()->clearAppenders();
         manager->getGlobalDomain()->attachAppender(
-            MessageLogDomain::AppenderAutoPtr(new RotatableFileAppender<MessageEventEphemeral>(
-                new MessageEventDetailsEncoder, writer.getValue())));
+            std::make_unique<RotatableFileAppender<MessageEventEphemeral>>(
+                std::make_unique<MessageEventDetailsEncoder>(), writer.getValue()));
         manager->getNamedDomain("javascriptOutput")
-            ->attachAppender(
-                MessageLogDomain::AppenderAutoPtr(new RotatableFileAppender<MessageEventEphemeral>(
-                    new MessageEventDetailsEncoder, writer.getValue())));
+            ->attachAppender(std::make_unique<RotatableFileAppender<MessageEventEphemeral>>(
+                std::make_unique<MessageEventDetailsEncoder>(), writer.getValue()));
 
         if (serverGlobalParams.logAppend && exists) {
             log() << "***** SERVER RESTARTED *****";
@@ -299,13 +320,12 @@ MONGO_INITIALIZER_GENERAL(ServerLogRedirection,
     } else {
         logger::globalLogManager()
             ->getNamedDomain("javascriptOutput")
-            ->attachAppender(MessageLogDomain::AppenderAutoPtr(
-                new logger::ConsoleAppender<MessageEventEphemeral>(
-                    new MessageEventDetailsEncoder)));
+            ->attachAppender(std::make_unique<logger::ConsoleAppender<MessageEventEphemeral>>(
+                std::make_unique<MessageEventDetailsEncoder>()));
     }
 
     logger::globalLogDomain()->attachAppender(
-        logger::MessageLogDomain::AppenderAutoPtr(new RamLogAppender(RamLog::get("global"))));
+        std::make_unique<RamLogAppender>(RamLog::get("global")));
 
     return Status::OK();
 }
@@ -330,11 +350,34 @@ MONGO_INITIALIZER(RegisterShortCircuitExitHandler)(InitializerContext*) {
     return Status::OK();
 }
 
+// On non-windows platforms, drop rwx for group and other unless the
+// user has opted into using the system umask. To do so, we first read
+// out the current umask (by temporarily setting it to
+// no-permissions), and then or the returned umask with the
+// restrictions we want to apply and set it back. The overall effect
+// is to set the bits for 'other' and 'group', but leave umask bits
+// bits for 'user' unaltered.
+namespace {
+#ifndef _WIN32
+MONGO_EXPORT_STARTUP_SERVER_PARAMETER(honorSystemUmask, bool, false);
+#endif
+
+MONGO_INITIALIZER_WITH_PREREQUISITES(MungeUmask, ("EndStartupOptionHandling"))
+(InitializerContext*) {
+#ifndef _WIN32
+    if (!honorSystemUmask) {
+        umask(umask(S_IRWXU | S_IRWXG | S_IRWXO) | S_IRWXG | S_IRWXO);
+    }
+#endif
+
+    return Status::OK();
+}
+}  // namespace
+
 bool initializeServerGlobalState() {
-    Listener::globalTicketHolder.resize(serverGlobalParams.maxConns);
 
 #ifndef _WIN32
-    if (!fs::is_directory(serverGlobalParams.socket)) {
+    if (!serverGlobalParams.noUnixSocket && !fs::is_directory(serverGlobalParams.socket)) {
         cout << serverGlobalParams.socket << " must be a directory" << endl;
         return false;
     }

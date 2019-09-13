@@ -1,24 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
- *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,8 +40,8 @@
 #include "mongo/db/catalog/collection_options.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_context_d.h"
 #include "mongo/db/storage/kv/kv_storage_engine.h"
+#include "mongo/db/storage/storage_engine_init.h"
 #include "mongo/db/storage/storage_engine_lock_file.h"
 #include "mongo/db/storage/storage_engine_metadata.h"
 #include "mongo/db/storage/storage_options.h"
@@ -101,12 +102,15 @@ public:
             }
         }
         const bool ephemeral = false;
+        const auto maxCacheOverflowMB =
+            static_cast<size_t>(1024 * wiredTigerGlobalOptions.maxCacheOverflowFileSizeGB);
         WiredTigerKVEngine* kv =
             new WiredTigerKVEngine(getCanonicalName().toString(),
                                    params.dbpath,
                                    getGlobalServiceContext()->getFastClockSource(),
                                    wiredTigerGlobalOptions.engineConfig,
                                    cacheMB,
+                                   maxCacheOverflowMB,
                                    params.dur,
                                    ephemeral,
                                    params.repair,
@@ -116,6 +120,8 @@ public:
         // Intentionally leaked.
         new WiredTigerServerStatusSection(kv);
         new WiredTigerEngineRuntimeConfigParameter(kv);
+        new WiredTigerMaxCacheOverflowSizeGBParameter(
+            kv, wiredTigerGlobalOptions.maxCacheOverflowFileSizeGB);
 
         KVStorageEngineOptions options;
         options.directoryPerDB = params.directoryperdb;
@@ -150,6 +156,19 @@ public:
             return status;
         }
 
+        // If the 'groupCollections' field does not exist in the 'storage.bson' file, the
+        // data-format of existing tables is as if 'groupCollections' is false. Passing this in
+        // prevents validation from accepting 'params.groupCollections' being true when a "group
+        // collections" aware mongod is launched on an 3.4- dbpath.
+        const bool kDefaultGroupCollections = false;
+        status =
+            metadata.validateStorageEngineOption("groupCollections",
+                                                 params.groupCollections,
+                                                 boost::optional<bool>(kDefaultGroupCollections));
+        if (!status.isOK()) {
+            return status;
+        }
+
         return Status::OK();
     }
 
@@ -157,6 +176,7 @@ public:
         BSONObjBuilder builder;
         builder.appendBool("directoryPerDB", params.directoryperdb);
         builder.appendBool("directoryForIndexes", wiredTigerGlobalOptions.directoryForIndexes);
+        builder.appendBool("groupCollections", params.groupCollections);
         return builder.obj();
     }
 
@@ -164,13 +184,10 @@ public:
         return true;
     }
 };
+
+ServiceContext::ConstructorActionRegisterer registerWiredTiger(
+    "WiredTigerEngineInit", [](ServiceContext* service) {
+        registerStorageEngine(service, std::make_unique<WiredTigerFactory>());
+    });
 }  // namespace
-
-MONGO_INITIALIZER_WITH_PREREQUISITES(WiredTigerEngineInit, ("SetGlobalEnvironment"))
-(InitializerContext* context) {
-    getGlobalServiceContext()->registerStorageEngine(kWiredTigerEngineName,
-                                                     new WiredTigerFactory());
-
-    return Status::OK();
-}
-}
+}  // namespace

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -41,6 +43,7 @@
 #include "mongo/util/destructor_guard.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -118,7 +121,7 @@ Status parseCursorResponse(const BSONObj& obj,
                                     << "' field must be a string: "
                                     << obj);
     }
-    NamespaceString tempNss(namespaceElement.valuestrsafe());
+    const NamespaceString tempNss(namespaceElement.valueStringData());
     if (!tempNss.isValid()) {
         return Status(ErrorCodes::BadValue,
                       str::stream() << "'" << kCursorFieldName << "." << kNamespaceFieldName
@@ -185,7 +188,7 @@ Fetcher::Fetcher(executor::TaskExecutor* executor,
       _firstRemoteCommandScheduler(
           _executor,
           RemoteCommandRequest(_source, _dbname, _cmdObj, _metadata, nullptr, _findNetworkTimeout),
-          stdx::bind(&Fetcher::_callback, this, stdx::placeholders::_1, kFirstBatchFieldName),
+          [this](const auto& x) { return this->_callback(x, kFirstBatchFieldName); },
           std::move(firstCommandRetryPolicy)) {
     uassert(ErrorCodes::BadValue, "callback function cannot be null", work);
 }
@@ -317,7 +320,7 @@ Status Fetcher::_scheduleGetMore(const BSONObj& cmdObj) {
         _executor->scheduleRemoteCommand(
             RemoteCommandRequest(
                 _source, _dbname, cmdObj, _metadata, nullptr, _getMoreNetworkTimeout),
-            stdx::bind(&Fetcher::_callback, this, stdx::placeholders::_1, kNextBatchFieldName));
+            [this](const auto& x) { return this->_callback(x, kNextBatchFieldName); });
 
     if (!scheduleResult.isOK()) {
         return scheduleResult.getStatus();
@@ -329,15 +332,21 @@ Status Fetcher::_scheduleGetMore(const BSONObj& cmdObj) {
 }
 
 void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batchFieldName) {
+    QueryResponse batchData;
+    auto finishCallbackGuard = MakeGuard([this, &batchData] {
+        if (batchData.cursorId && !batchData.nss.isEmpty()) {
+            _sendKillCursors(batchData.cursorId, batchData.nss);
+        }
+        _finishCallback();
+    });
+
     if (!rcbd.response.isOK()) {
         _work(StatusWith<Fetcher::QueryResponse>(rcbd.response.status), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
     if (_isShuttingDown()) {
         _work(Status(ErrorCodes::CallbackCanceled, "fetcher shutting down"), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
@@ -345,15 +354,12 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     Status status = getStatusFromCommandResult(queryResponseObj);
     if (!status.isOK()) {
         _work(StatusWith<Fetcher::QueryResponse>(status), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
-    QueryResponse batchData;
     status = parseCursorResponse(queryResponseObj, batchFieldName, &batchData);
     if (!status.isOK()) {
         _work(StatusWith<Fetcher::QueryResponse>(status), nullptr, nullptr);
-        _finishCallback();
         return;
     }
 
@@ -369,7 +375,6 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
 
     if (!batchData.cursorId) {
         _work(StatusWith<QueryResponse>(batchData), &nextAction, nullptr);
-        _finishCallback();
         return;
     }
 
@@ -381,8 +386,6 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     // Callback function _work may modify nextAction to request the fetcher
     // not to schedule a getMore command.
     if (nextAction != NextAction::kGetMore) {
-        _sendKillCursors(batchData.cursorId, batchData.nss);
-        _finishCallback();
         return;
     }
 
@@ -390,8 +393,6 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     // BSONObjBuilder for the getMore command.
     auto cmdObj = bob.obj();
     if (cmdObj.isEmpty()) {
-        _sendKillCursors(batchData.cursorId, batchData.nss);
-        _finishCallback();
         return;
     }
 
@@ -399,10 +400,10 @@ void Fetcher::_callback(const RemoteCommandCallbackArgs& rcbd, const char* batch
     if (!status.isOK()) {
         nextAction = NextAction::kNoAction;
         _work(StatusWith<Fetcher::QueryResponse>(status), nullptr, nullptr);
-        _sendKillCursors(batchData.cursorId, batchData.nss);
-        _finishCallback();
         return;
     }
+
+    finishCallbackGuard.Dismiss();
 }
 
 void Fetcher::_sendKillCursors(const CursorId id, const NamespaceString& nss) {

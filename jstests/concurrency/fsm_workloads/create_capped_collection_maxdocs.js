@@ -6,6 +6,8 @@
  * Repeatedly creates a capped collection. Also verifies that truncation
  * occurs once the collection reaches a certain size or contains a
  * certain number of documents.
+ *
+ * @tags: [requires_capped]
  */
 load('jstests/concurrency/fsm_libs/extend_workload.js');                // for extendWorkload
 load('jstests/concurrency/fsm_workloads/create_capped_collection.js');  // for $config
@@ -39,21 +41,21 @@ var $config = extendWorkload($config, function($config, $super) {
 
         // Insert multiple small documents and verify that at least one truncation has occurred.
         // There should never be more than 3 documents in the collection, regardless of the
-        // storage
-        // engine. They should always be the most recently inserted documents.
+        // storage engine. They should always be the most recently inserted documents.
 
-        var ids = [];
-        var count;
+        var insertedIds = [];
 
-        ids.push(this.insert(db, myCollName, smallDocSize));
-        ids.push(this.insert(db, myCollName, smallDocSize));
+        insertedIds.push(this.insert(db, myCollName, smallDocSize));
+        insertedIds.push(this.insert(db, myCollName, smallDocSize));
 
         for (var i = 0; i < 50; i++) {
-            ids.push(this.insert(db, myCollName, smallDocSize));
-            count = db[myCollName].find().itcount();
+            insertedIds.push(this.insert(db, myCollName, smallDocSize));
+
+            var foundIds = this.getObjectIds(db, myCollName);
+            var count = foundIds.length;
             assertWhenOwnDB.eq(3, count, 'expected truncation to occur due to number of docs');
-            assertWhenOwnDB.eq(ids.slice(ids.length - count),
-                               this.getObjectIds(db, myCollName),
+            assertWhenOwnDB.eq(insertedIds.slice(insertedIds.length - count),
+                               foundIds,
                                'expected truncation to remove the oldest documents');
         }
     }

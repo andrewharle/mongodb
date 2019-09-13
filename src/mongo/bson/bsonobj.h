@@ -1,30 +1,33 @@
 // @file bsonobj.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -51,6 +54,8 @@
 #include "mongo/util/shared_buffer.h"
 
 namespace mongo {
+
+class BSONObjStlIterator;
 
 /**
    C++ representation of a "BSON" object -- that is, an extended JSON-style
@@ -93,6 +98,13 @@ namespace mongo {
  */
 class BSONObj {
 public:
+    struct DefaultSizeTrait {
+        constexpr static int MaxSize = BSONObjMaxInternalSize;
+    };
+    struct LargeSizeTrait {
+        constexpr static int MaxSize = BufferMaxSize;
+    };
+
     // Declared in bsonobj_comparator_interface.h.
     class ComparatorInterface;
 
@@ -101,6 +113,12 @@ public:
      * by a BSONObj::ComparatorInterface.
      */
     using DeferredComparison = BSONComparatorInterfaceBase<BSONObj>::DeferredComparison;
+
+    /**
+     * Set of rules that dictate the behavior of the comparison APIs.
+     */
+    using ComparisonRules = BSONComparatorInterfaceBase<BSONObj>::ComparisonRules;
+    using ComparisonRulesSet = BSONComparatorInterfaceBase<BSONObj>::ComparisonRulesSet;
 
     static const char kMinBSONLength = 5;
 
@@ -117,8 +135,9 @@ public:
     /** Construct a BSONObj from data in the proper format.
      *  Use this constructor when something else owns bsonData's buffer
     */
-    explicit BSONObj(const char* bsonData) {
-        init(bsonData);
+    template <typename Traits = DefaultSizeTrait>
+    explicit BSONObj(const char* bsonData, Traits t = Traits{}) {
+        init<Traits>(bsonData);
     }
 
     explicit BSONObj(ConstSharedBuffer ownedBuffer)
@@ -192,17 +211,31 @@ public:
      * data this BSONObj is viewing. This can happen if this is a subobject or sibling object
      * contained in a larger buffer.
      */
-    void shareOwnershipWith(ConstSharedBuffer buffer) {
+    BSONObj& shareOwnershipWith(ConstSharedBuffer buffer) & {
         invariant(buffer);
         _ownedBuffer = buffer;
+        return *this;
     }
-    void shareOwnershipWith(const BSONObj& other) {
+    BSONObj& shareOwnershipWith(const BSONObj& other) & {
         shareOwnershipWith(other.sharedBuffer());
+        return *this;
+    }
+    BSONObj&& shareOwnershipWith(ConstSharedBuffer buffer) && {
+        return std::move(shareOwnershipWith(buffer));
+    }
+    BSONObj&& shareOwnershipWith(const BSONObj& other) && {
+        return std::move(shareOwnershipWith(other));
     }
 
-    ConstSharedBuffer sharedBuffer() const {
+    const ConstSharedBuffer& sharedBuffer() const {
         invariant(isOwned());
         return _ownedBuffer;
+    }
+
+    ConstSharedBuffer releaseSharedBuffer() {
+        invariant(isOwned());
+        BSONObj sink = std::move(*this);  // Leave *this in a valid moved-from state.
+        return std::move(sink._ownedBuffer);
     }
 
     /** If the data buffer is under the control of this BSONObj, return it.
@@ -234,6 +267,13 @@ public:
 
     /** note: addFields always adds _id even if not specified */
     int addFields(BSONObj& from, std::set<std::string>& fields); /* returns n added */
+
+    /**
+     * Add specific field to the end of the object if it did not exist, otherwise replace it
+     * preserving original field order. Returns newly built object. Returns copy of this for empty
+     * field.
+     */
+    BSONObj addField(const BSONElement& field) const;
 
     /** remove specified field and return a new object with the remaining fields.
         slowish as builds a full new object
@@ -342,54 +382,19 @@ public:
     }
 
     /** performs a cursory check on the object's size only. */
+    template <typename Traits = DefaultSizeTrait>
     bool isValid() const {
+        static_assert(Traits::MaxSize > 0 && Traits::MaxSize <= std::numeric_limits<int>::max(),
+                      "BSONObj maximum size must be within possible limits");
         int x = objsize();
-        return x > 0 && x <= BSONObjMaxInternalSize;
-    }
-
-    /** @return ok if it can be stored as a valid embedded doc.
-     *  Not valid if any field name:
-     *      - contains a "."
-     *      - starts with "$"
-     *          -- unless it is a dbref ($ref/$id/[$db]/...)
-     */
-    inline bool okForStorage() const {
-        return _okForStorage(false, true).isOK();
-    }
-
-    /** Same as above with the following extra restrictions
-     *  Not valid if:
-     *      - "_id" field is a
-     *          -- Regex
-     *          -- Array
-     */
-    inline bool okForStorageAsRoot() const {
-        return _okForStorage(true, true).isOK();
+        return x > 0 && x <= Traits::MaxSize;
     }
 
     /**
-     * Validates that this can be stored as an embedded document
-     * See details above in okForStorage
-     *
-     * If 'deep' is true then validation is done to children
-     *
-     * If not valid a user readable status message is returned.
+     * Validates that the element is okay to be stored in a collection.
+     * Recursively validates children.
      */
-    inline Status storageValidEmbedded(const bool deep = true) const {
-        return _okForStorage(false, deep);
-    }
-
-    /**
-     * Validates that this can be stored as a document (in a collection)
-     * See details above in okForStorageAsRoot
-     *
-     * If 'deep' is true then validation is done to children
-     *
-     * If not valid a user readable status message is returned.
-     */
-    inline Status storageValid(const bool deep = true) const {
-        return _okForStorage(true, deep);
-    }
+    Status storageValidEmbedded() const;
 
     /** @return true if object is empty -- i.e.,  {} */
     bool isEmpty() const {
@@ -410,26 +415,22 @@ public:
     // See bsonobj_comparator_interface.h for details.
     //
 
-    /**wo='well ordered'.  fields must be in same order in each object.
-       Ordering is with respect to the signs of the elements
-       and allows ascending / descending key mixing.
-       If comparator is non-null, it is used for all comparisons between two strings.
-       @return  <0 if l<r. 0 if l==r. >0 if l>r
-    */
+    /**
+     * Compares two BSON Objects using the rules specified by 'rules', 'comparator' for
+     * string comparisons, and 'o' for ascending vs. descending ordering.
+     *
+     * Returns <0 if 'this' is less than 'obj'.
+     *         >0 if 'this' is greater than 'obj'.
+     *          0 if 'this' is equal to 'obj'.
+     */
     int woCompare(const BSONObj& r,
                   const Ordering& o,
-                  bool considerFieldName = true,
+                  ComparisonRulesSet rules = ComparisonRules::kConsiderFieldName,
                   const StringData::ComparatorInterface* comparator = nullptr) const;
 
-    /**wo='well ordered'.  fields must be in same order in each object.
-       Ordering is with respect to the signs of the elements
-       and allows ascending / descending key mixing.
-       If comparator is non-null, it is used for all comparisons between two strings.
-       @return  <0 if l<r. 0 if l==r. >0 if l>r
-    */
     int woCompare(const BSONObj& r,
                   const BSONObj& ordering = BSONObj(),
-                  bool considerFieldName = true,
+                  ComparisonRulesSet rules = ComparisonRules::kConsiderFieldName,
                   const StringData::ComparatorInterface* comparator = nullptr) const;
 
     DeferredComparison operator<(const BSONObj& other) const {
@@ -525,39 +526,15 @@ public:
      */
     bool valid(BSONVersion version) const;
 
-    enum MatchType {
-        Equality = 0,
-        LT = 0x1,
-        LTE = 0x3,
-        GTE = 0x6,
-        GT = 0x4,
-        opIN = 0x8,  // { x : { $in : [1,2,3] } }
-        NE = 0x9,
-        opSIZE = 0x0A,
-        opALL = 0x0B,
-        NIN = 0x0C,
-        opEXISTS = 0x0D,
-        opMOD = 0x0E,
-        opTYPE = 0x0F,
-        opREGEX = 0x10,
-        opOPTIONS = 0x11,
-        opELEM_MATCH = 0x12,
-        opNEAR = 0x13,
-        opWITHIN = 0x14,
-        opGEO_INTERSECTS = 0x16,
-        opBITS_ALL_SET = 0x17,
-        opBITS_ALL_CLEAR = 0x18,
-        opBITS_ANY_SET = 0x19,
-        opBITS_ANY_CLEAR = 0x1A,
-    };
-
     /** add all elements of the object to the specified vector */
     void elems(std::vector<BSONElement>&) const;
     /** add all elements of the object to the specified list */
     void elems(std::list<BSONElement>&) const;
 
     friend class BSONObjIterator;
-    typedef BSONObjIterator iterator;
+    friend class BSONObjStlIterator;
+    typedef BSONObjStlIterator iterator;
+    typedef BSONObjStlIterator const_iterator;
 
     /**
      * These enable range-based for loops over BSONObjs:
@@ -566,8 +543,8 @@ public:
      *          ... // Do something with elem
      *      }
      */
-    BSONObjIterator begin() const;
-    BSONObjIterator end() const;
+    iterator begin() const;
+    iterator end() const;
 
     void appendSelfToBufBuilder(BufBuilder& b) const {
         verify(objsize());
@@ -593,21 +570,14 @@ public:
     }
 
 private:
-    void _assertInvalid() const;
+    void _assertInvalid(int maxSize) const;
 
+    template <typename Traits = DefaultSizeTrait>
     void init(const char* data) {
         _objdata = data;
-        if (!isValid())
-            _assertInvalid();
+        if (!isValid<Traits>())
+            _assertInvalid(Traits::MaxSize);
     }
-
-    /**
-     * Validate if the element is okay to be stored in a collection, maybe as the root element
-     *
-     * If 'root' is true then checks against _id are made.
-     * If 'deep' is false then do not traverse through children
-     */
-    Status _okForStorage(bool root, bool deep) const;
 
     const char* _objdata;
     ConstSharedBuffer _ownedBuffer;
@@ -629,18 +599,85 @@ struct BSONArray : BSONObj {
     explicit BSONArray(const BSONObj& obj) : BSONObj(obj) {}
 };
 
-/** iterator for a BSONObj
+/**
+ * An stl-compatible forward iterator over the elements of a BSONObj.
+ *
+ * The BSONObj must stay in scope for the duration of the iterator's execution.
+ */
+class BSONObjStlIterator {
+public:
+    using iterator_category = std::forward_iterator_tag;
+    using difference_type = ptrdiff_t;
+    using value_type = BSONElement;
+    using pointer = const BSONElement*;
+    using reference = const BSONElement&;
 
-   Note each BSONObj ends with an EOO element: so you will get more() on an empty
-   object, although next().eoo() will be true.
+    /**
+     * All default constructed iterators are equal to each other.
+     * They are in a dereferencable state, and return an EOO BSONElement.
+     * They must not be incremented.
+     */
+    BSONObjStlIterator() = default;
 
-   The BSONObj must stay in scope for the duration of the iterator's execution.
+    /**
+     * Constructs an iterator pointing to the first element in obj or EOO if it is empty.
+     */
+    explicit BSONObjStlIterator(const BSONObj& obj) : BSONObjStlIterator(obj.firstElement()) {}
 
-   todo: Finish making this an STL-compatible iterator.
-            Need iterator_catagory et al (maybe inherit from std::iterator).
-            Need operator->
-            operator* should return a const reference not a value.
-*/
+    /**
+     * Returns an iterator pointing to the EOO element in obj.
+     */
+    static BSONObjStlIterator endOf(const BSONObj& obj) {
+        auto eooElem = BSONElement();
+        eooElem.data = (obj.objdata() + obj.objsize() - 1);
+        dassert(eooElem.eoo());  // This is checked in the BSONObj constructor.
+        return BSONObjStlIterator(eooElem);
+    }
+
+    /** pre-increment */
+    BSONObjStlIterator& operator++() {
+        dassert(!_cur.eoo());
+        *this = BSONObjStlIterator(BSONElement(_cur.rawdata() + _cur.size()));
+        return *this;
+    }
+
+    /** post-increment */
+    BSONObjStlIterator operator++(int) {
+        BSONObjStlIterator oldPos = *this;
+        ++*this;
+        return oldPos;
+    }
+
+    const BSONElement& operator*() const {
+        return _cur;
+    }
+    const BSONElement* operator->() const {
+        return &_cur;
+    }
+
+    bool operator==(const BSONObjStlIterator& other) {
+        return _cur.rawdata() == other._cur.rawdata();
+    }
+    bool operator!=(const BSONObjStlIterator& other) {
+        return !(*this == other);
+    }
+
+private:
+    explicit BSONObjStlIterator(BSONElement elem) : _cur(elem) {}
+
+    BSONElement _cur;
+};
+
+/**
+ * Non-STL iterator for a BSONObj
+ *
+ * For simple loops over BSONObj, do this instead: for (auto&& elem : obj) { ... }
+ *
+ * Note each BSONObj ends with an EOO element: so you will get moreWithEOO() on an empty
+ * object, although more() will be false and next().eoo() will be true.
+ *
+ * The BSONObj must stay in scope for the duration of the iterator's execution.
+ */
 class BSONObjIterator {
 public:
     /** Create an iterator for a BSON object.
@@ -660,12 +697,6 @@ public:
         _theend = end - 1;
     }
 
-    static BSONObjIterator endOf(const BSONObj& obj) {
-        BSONObjIterator end(obj);
-        end._pos = end._theend;
-        return end;
-    }
-
     /** @return true if more elements exist to be enumerated. */
     bool more() {
         return _pos < _theend;
@@ -675,26 +706,6 @@ public:
      * always at the end. */
     bool moreWithEOO() {
         return _pos <= _theend;
-    }
-
-    /**
-     * @return the next element in the object. For the final element, element.eoo() will be true.
-     */
-    BSONElement next(bool checkEnd) {
-        verify(_pos <= _theend);
-
-        int maxLen = -1;
-        if (checkEnd) {
-            maxLen = _theend + 1 - _pos;
-            verify(maxLen > 0);
-        }
-
-        BSONElement e(_pos, maxLen);
-        int esize = e.size(maxLen);
-        massert(16446, "BSONElement has bad size", esize > 0);
-        _pos += esize;
-
-        return e;
     }
 
     BSONElement next() {
@@ -782,11 +793,11 @@ public:
     BSONArrayIteratorSorted(const BSONArray& array);
 };
 
-inline BSONObjIterator BSONObj::begin() const {
-    return BSONObjIterator(*this);
+inline BSONObj::iterator BSONObj::begin() const {
+    return BSONObj::iterator(*this);
 }
-inline BSONObjIterator BSONObj::end() const {
-    return BSONObjIterator::endOf(*this);
+inline BSONObj::iterator BSONObj::end() const {
+    return BSONObj::iterator::endOf(*this);
 }
 
 /**
@@ -829,9 +840,7 @@ template <size_t N>
 inline void BSONObj::getFields(const std::array<StringData, N>& fieldNames,
                                std::array<BSONElement, N>* fields) const {
     std::bitset<N> foundFields;
-    auto iter = this->begin();
-    while (iter.more() && !foundFields.all()) {
-        auto el = iter.next();
+    for (auto&& el : *this) {
         auto fieldName = el.fieldNameStringData();
         for (std::size_t i = 0; i < N; ++i) {
             if (!foundFields.test(i) && (fieldNames[i] == fieldName)) {
@@ -840,6 +849,8 @@ inline void BSONObj::getFields(const std::array<StringData, N>& fieldNames,
                 break;
             }
         }
+        if (foundFields.all())
+            break;
     }
 }
 }  // namespace mongo

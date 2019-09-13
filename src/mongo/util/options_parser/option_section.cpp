@@ -1,28 +1,31 @@
-/* Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/util/options_parser/option_section.h"
@@ -90,14 +93,14 @@ OptionDescription& OptionSection::addOptionChaining(
         if (option._dottedName == oditerator->_dottedName) {
             StringBuilder sb;
             sb << "Attempted to register option with duplicate dottedName: " << option._dottedName;
-            throw DBException(sb.str(), ErrorCodes::InternalError);
+            uasserted(ErrorCodes::InternalError, sb.str());
         }
         // Allow options with empty singleName since some options are not allowed on the command
         // line
         if (!option._singleName.empty() && option._singleName == oditerator->_singleName) {
             StringBuilder sb;
             sb << "Attempted to register option with duplicate singleName: " << option._singleName;
-            throw DBException(sb.str(), ErrorCodes::InternalError);
+            uasserted(ErrorCodes::InternalError, sb.str());
         }
         // Deprecated dotted names should not conflict with dotted names or deprecated dotted
         // names of any other options.
@@ -107,7 +110,7 @@ OptionDescription& OptionSection::addOptionChaining(
             StringBuilder sb;
             sb << "Attempted to register option with duplicate deprecated dotted name "
                << "(with another option's dotted name): " << option._dottedName;
-            throw DBException(sb.str(), ErrorCodes::BadValue);
+            uasserted(ErrorCodes::BadValue, sb.str());
         }
         for (std::vector<std::string>::const_iterator i =
                  oditerator->_deprecatedDottedNames.begin();
@@ -119,7 +122,7 @@ OptionDescription& OptionSection::addOptionChaining(
                 StringBuilder sb;
                 sb << "Attempted to register option with duplicate deprecated dotted name " << *i
                    << " (other option " << oditerator->_dottedName << ")";
-                throw DBException(sb.str(), ErrorCodes::BadValue);
+                uasserted(ErrorCodes::BadValue, sb.str());
             }
         }
     }
@@ -474,7 +477,7 @@ Status OptionSection::getAllOptions(std::vector<OptionDescription>* options) con
 
     std::list<OptionSection>::const_iterator ositerator;
     for (ositerator = _subSections.begin(); ositerator != _subSections.end(); ositerator++) {
-        ositerator->getAllOptions(options);
+        ositerator->getAllOptions(options).transitional_ignore();
     }
 
     return Status::OK();
@@ -490,7 +493,7 @@ Status OptionSection::getDefaults(std::map<Key, Value>* values) const {
 
     std::list<OptionSection>::const_iterator ositerator;
     for (ositerator = _subSections.begin(); ositerator != _subSections.end(); ositerator++) {
-        ositerator->getDefaults(values);
+        ositerator->getDefaults(values).transitional_ignore();
     }
 
     return Status::OK();
@@ -511,7 +514,7 @@ Status OptionSection::countOptions(int* numOptions, bool visibleOnly, OptionSour
     std::list<OptionSection>::const_iterator ositerator;
     for (ositerator = _subSections.begin(); ositerator != _subSections.end(); ositerator++) {
         int numSubOptions = 0;
-        ositerator->countOptions(&numSubOptions, visibleOnly, sources);
+        ositerator->countOptions(&numSubOptions, visibleOnly, sources).transitional_ignore();
         *numOptions += numSubOptions;
     }
 
@@ -531,7 +534,7 @@ Status OptionSection::getConstraints(std::vector<std::shared_ptr<Constraint>>* c
 
     std::list<OptionSection>::const_iterator ositerator;
     for (ositerator = _subSections.begin(); ositerator != _subSections.end(); ositerator++) {
-        ositerator->getConstraints(constraints);
+        ositerator->getConstraints(constraints).transitional_ignore();
     }
 
     return Status::OK();

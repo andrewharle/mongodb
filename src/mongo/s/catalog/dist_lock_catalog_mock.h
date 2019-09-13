@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -89,11 +91,12 @@ public:
     using GetLockByNameFunc = stdx::function<void(StringData name)>;
     using GetServerInfoFunc = stdx::function<void()>;
 
-    virtual StatusWith<LockpingsType> getPing(OperationContext* txn, StringData processID) override;
+    virtual StatusWith<LockpingsType> getPing(OperationContext* opCtx,
+                                              StringData processID) override;
 
-    virtual Status ping(OperationContext* txn, StringData processID, Date_t ping) override;
+    virtual Status ping(OperationContext* opCtx, StringData processID, Date_t ping) override;
 
-    virtual StatusWith<LocksType> grabLock(OperationContext* txn,
+    virtual StatusWith<LocksType> grabLock(OperationContext* opCtx,
                                            StringData lockID,
                                            const OID& lockSessionID,
                                            StringData who,
@@ -102,7 +105,7 @@ public:
                                            StringData why,
                                            const WriteConcernOptions& writeConcern) override;
 
-    virtual StatusWith<LocksType> overtakeLock(OperationContext* txn,
+    virtual StatusWith<LocksType> overtakeLock(OperationContext* opCtx,
                                                StringData lockID,
                                                const OID& lockSessionID,
                                                const OID& currentHolderTS,
@@ -111,22 +114,22 @@ public:
                                                Date_t time,
                                                StringData why) override;
 
-    virtual Status unlock(OperationContext* txn, const OID& lockSessionID) override;
+    virtual Status unlock(OperationContext* opCtx, const OID& lockSessionID) override;
 
-    virtual Status unlock(OperationContext* txn,
+    virtual Status unlock(OperationContext* opCtx,
                           const OID& lockSessionID,
                           StringData name) override;
 
-    virtual Status unlockAll(OperationContext* txn, const std::string& processID) override;
+    virtual Status unlockAll(OperationContext* opCtx, const std::string& processID) override;
 
-    virtual StatusWith<ServerInfo> getServerInfo(OperationContext* txn) override;
+    virtual StatusWith<ServerInfo> getServerInfo(OperationContext* opCtx) override;
 
-    virtual StatusWith<LocksType> getLockByTS(OperationContext* txn,
+    virtual StatusWith<LocksType> getLockByTS(OperationContext* opCtx,
                                               const OID& lockSessionID) override;
 
-    virtual StatusWith<LocksType> getLockByName(OperationContext* txn, StringData name) override;
+    virtual StatusWith<LocksType> getLockByName(OperationContext* opCtx, StringData name) override;
 
-    virtual Status stopPing(OperationContext* txn, StringData processId) override;
+    virtual Status stopPing(OperationContext* opCtx, StringData processId) override;
 
     /**
      * Sets the checker method to use and the return value for grabLock to return every

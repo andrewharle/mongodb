@@ -1,3 +1,8 @@
+/**
+ * @tags: [
+ *   assumes_superuser_permissions,
+ * ]
+ */
 (function() {
     'use strict';
 
@@ -32,6 +37,11 @@
         return result;
     };
 
+    var checkImplicitCreate = function(createIndexResult, isMongos) {
+        let allowImplicit = !isMongos;
+        assert.eq(allowImplicit, createIndexResult.createdCollectionAutomatically);
+    };
+
     var dbTest = db.getSisterDB('create_indexes_db');
     dbTest.dropDatabase();
 
@@ -40,7 +50,7 @@
     var res = assert.commandWorked(
         collDbNotExist.runCommand('createIndexes', {indexes: [{key: {x: 1}, name: 'x_1'}]}));
     res = extractResult(res);
-    assert(res.createdCollectionAutomatically);
+    checkImplicitCreate(res, isMongos);
     assert.eq(1, res.numIndexesBefore);
     assert.eq(2, res.numIndexesAfter);
     assert.isnull(res.note,
@@ -52,7 +62,7 @@
     var res = assert.commandWorked(
         t.runCommand('createIndexes', {indexes: [{key: {x: 1}, name: 'x_1'}]}));
     res = extractResult(res);
-    assert(res.createdCollectionAutomatically);
+    checkImplicitCreate(res, isMongos);
     assert.eq(1, res.numIndexesBefore);
     assert.eq(2, res.numIndexesAfter);
     assert.isnull(res.note,
@@ -151,5 +161,15 @@
     res = t.runCommand('createIndexes',
                        {indexes: [{key: {e: 1}, name: 'e_1', 'v': 1, 'invalidField': 1}]});
     assert.commandFailedWithCode(res, ErrorCodes.InvalidIndexSpecificationOption);
+
+    // Test that index creation fails with an index named '*'.
+    res = t.runCommand('createIndexes', {indexes: [{key: {star: 1}, name: '*'}]});
+    assert.commandFailedWithCode(res, ErrorCodes.BadValue);
+
+    // Test that user is not allowed to create indexes in config.transactions.
+    var configDB = db.getSiblingDB('config');
+    res = configDB.runCommand(
+        {createIndexes: 'transactions', indexes: [{key: {star: 1}, name: 'star'}]});
+    assert.commandFailedWithCode(res, ErrorCodes.IllegalOperation);
 
 }());

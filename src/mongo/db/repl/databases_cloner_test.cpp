@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,13 +40,14 @@
 #include "mongo/db/repl/oplog_entry.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/storage_interface_mock.h"
+#include "mongo/db/service_context_test_fixture.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/thread_pool_task_executor_test_fixture.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/unittest/task_executor_proxy.h"
 #include "mongo/unittest/unittest.h"
-#include "mongo/util/concurrency/old_thread_pool.h"
 #include "mongo/util/concurrency/thread_name.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/scopeguard.h"
 
@@ -77,16 +80,16 @@ struct StorageInterfaceResults {
 };
 
 
-class DBsClonerTest : public executor::ThreadPoolExecutorTest {
+class DBsClonerTest : public executor::ThreadPoolExecutorTest,
+                      public ScopedGlobalServiceContextForTest {
 public:
-    DBsClonerTest()
-        : _storageInterface{}, _dbWorkThreadPool{OldThreadPool::DoNotStartThreadsTag(), 1} {}
+    DBsClonerTest() : _storageInterface{}, _dbWorkThreadPool(ThreadPool::Options()) {}
 
     StorageInterface& getStorage() {
         return _storageInterface;
     }
 
-    OldThreadPool& getDbWorkThreadPool() {
+    ThreadPool& getDbWorkThreadPool() {
         return _dbWorkThreadPool;
     }
 
@@ -104,8 +107,7 @@ public:
         NetworkInterfaceMock* net = getNet();
         Milliseconds millis(0);
         RemoteCommandResponse response(obj, BSONObj(), millis);
-        executor::TaskExecutor::ResponseStatus responseStatus(response);
-        net->scheduleResponse(noi, net->now(), responseStatus);
+        net->scheduleResponse(noi, net->now(), response);
     }
 
     void scheduleNetworkResponse(std::string cmdName, Status errorStatus) {
@@ -142,27 +144,30 @@ protected:
         executor::ThreadPoolExecutorTest::setUp();
         launchExecutorThread();
 
-        _storageInterface.createOplogFn = [this](OperationContext* txn,
+        _storageInterface.createOplogFn = [this](OperationContext* opCtx,
                                                  const NamespaceString& nss) {
             _storageInterfaceWorkDone.createOplogCalled = true;
             return Status::OK();
         };
-        _storageInterface.insertDocumentFn =
-            [this](OperationContext* txn, const NamespaceString& nss, const BSONObj& doc) {
-                ++_storageInterfaceWorkDone.documentsInsertedCount;
-                return Status::OK();
-            };
-        _storageInterface.insertDocumentsFn = [this](
-            OperationContext* txn, const NamespaceString& nss, const std::vector<BSONObj>& ops) {
+        _storageInterface.insertDocumentFn = [this](OperationContext* opCtx,
+                                                    const NamespaceStringOrUUID& nsOrUUID,
+                                                    const TimestampedBSONObj& doc,
+                                                    long long term) {
+            ++_storageInterfaceWorkDone.documentsInsertedCount;
+            return Status::OK();
+        };
+        _storageInterface.insertDocumentsFn = [this](OperationContext* opCtx,
+                                                     const NamespaceStringOrUUID& nsOrUUID,
+                                                     const std::vector<InsertStatement>& ops) {
             _storageInterfaceWorkDone.insertedOplogEntries = true;
             ++_storageInterfaceWorkDone.oplogEntriesInserted;
             return Status::OK();
         };
-        _storageInterface.dropCollFn = [this](OperationContext* txn, const NamespaceString& nss) {
+        _storageInterface.dropCollFn = [this](OperationContext* opCtx, const NamespaceString& nss) {
             _storageInterfaceWorkDone.droppedCollections.push_back(nss.ns());
             return Status::OK();
         };
-        _storageInterface.dropUserDBsFn = [this](OperationContext* txn) {
+        _storageInterface.dropUserDBsFn = [this](OperationContext* opCtx) {
             _storageInterfaceWorkDone.droppedUserDBs = true;
             return Status::OK();
         };
@@ -177,22 +182,19 @@ protected:
                     log() << "reusing collection during test which may cause problems, ns:" << nss;
                 }
                 (collInfo->loader = new CollectionBulkLoaderMock(&collInfo->stats))
-                    ->init(nullptr, secondaryIndexSpecs);
+                    ->init(secondaryIndexSpecs)
+                    .transitional_ignore();
 
                 return StatusWith<std::unique_ptr<CollectionBulkLoader>>(
                     std::unique_ptr<CollectionBulkLoader>(collInfo->loader));
             };
 
-        _dbWorkThreadPool.startThreads();
+        _dbWorkThreadPool.startup();
     }
 
     void tearDown() override {
-        executor::ThreadPoolExecutorTest::shutdownExecutorThread();
-        executor::ThreadPoolExecutorTest::joinExecutorThread();
-
-        _dbWorkThreadPool.join();
-
-        executor::ThreadPoolExecutorTest::tearDown();
+        getExecutor().shutdown();
+        getExecutor().join();
     }
 
     /**
@@ -242,11 +244,11 @@ protected:
             log() << "Sending response for network request:";
             log() << "     req: " << noi->getRequest().dbname << "." << noi->getRequest().cmdObj;
             log() << "     resp:" << responses[processedRequests].second;
-            net->scheduleResponse(
-                noi,
-                net->now(),
-                executor::TaskExecutor::ResponseStatus(RemoteCommandResponse(
-                    responses[processedRequests].second, BSONObj(), Milliseconds(10))));
+            net->scheduleResponse(noi,
+                                  net->now(),
+                                  RemoteCommandResponse(responses[processedRequests].second,
+                                                        BSONObj(),
+                                                        Milliseconds(10)));
 
             if ((Date_t::now() - lastLog) > Seconds(1)) {
                 lastLog = Date_t();
@@ -330,7 +332,7 @@ protected:
     StorageInterfaceMock _storageInterface;
 
 private:
-    OldThreadPool _dbWorkThreadPool;
+    ThreadPool _dbWorkThreadPool;
     std::map<NamespaceString, CollectionMockStats> _collectionStats;
     std::map<NamespaceString, CollectionCloneInfo> _collections;
     StorageInterfaceResults _storageInterfaceWorkDone;
@@ -354,7 +356,7 @@ TEST_F(DBsClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabasesCloner(
             nullptr, &getExecutor(), &getDbWorkThreadPool(), source, includeDbPred, finishFn),
-        UserException,
+        AssertionException,
         ErrorCodes::InvalidOptions,
         "storage interface must be provided.");
 
@@ -362,14 +364,14 @@ TEST_F(DBsClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabasesCloner(
             &getStorage(), nullptr, &getDbWorkThreadPool(), source, includeDbPred, finishFn),
-        UserException,
+        AssertionException,
         ErrorCodes::InvalidOptions,
         "executor must be provided.");
 
     // Null db worker thread pool.
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabasesCloner(&getStorage(), &getExecutor(), nullptr, source, includeDbPred, finishFn),
-        UserException,
+        AssertionException,
         ErrorCodes::InvalidOptions,
         "db worker thread pool must be provided.");
 
@@ -377,7 +379,7 @@ TEST_F(DBsClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabasesCloner(
             &getStorage(), &getExecutor(), &getDbWorkThreadPool(), {}, includeDbPred, finishFn),
-        UserException,
+        AssertionException,
         ErrorCodes::InvalidOptions,
         "source must be provided.");
 
@@ -385,7 +387,7 @@ TEST_F(DBsClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabasesCloner(
             &getStorage(), &getExecutor(), &getDbWorkThreadPool(), source, {}, finishFn),
-        UserException,
+        AssertionException,
         ErrorCodes::InvalidOptions,
         "includeDbPred must be provided.");
 
@@ -393,7 +395,7 @@ TEST_F(DBsClonerTest, InvalidConstruction) {
     ASSERT_THROWS_CODE_AND_WHAT(
         DatabasesCloner(
             &getStorage(), &getExecutor(), &getDbWorkThreadPool(), source, includeDbPred, {}),
-        UserException,
+        AssertionException,
         ErrorCodes::InvalidOptions,
         "finishFn must be provided.");
 }
@@ -562,6 +564,36 @@ TEST_F(DBsClonerTest, FailsOnListDatabases) {
     ASSERT_EQ(result, expectedResult);
 }
 
+TEST_F(DBsClonerTest, DatabasesClonerResendsListDatabasesRequestOnRetriableError) {
+    Status result{Status::OK()};
+    DatabasesCloner cloner{&getStorage(),
+                           &getExecutor(),
+                           &getDbWorkThreadPool(),
+                           HostAndPort{"local:1234"},
+                           [](const BSONObj&) { return true; },
+                           [](const Status&) {}};
+    ON_BLOCK_EXIT([this] { getExecutor().shutdown(); });
+
+    ASSERT_OK(cloner.startup());
+    ASSERT_TRUE(cloner.isActive());
+
+    auto net = getNet();
+    executor::NetworkInterfaceMock::InNetworkGuard guard(net);
+
+    // Respond to first listDatabases request with a retriable error.
+    assertRemoteCommandNameEquals("listDatabases",
+                                  net->scheduleErrorResponse(Status(ErrorCodes::HostNotFound, "")));
+    net->runReadyNetworkOperations();
+
+    // DatabasesCloner stays active because it resends the listDatabases request.
+    ASSERT_TRUE(cloner.isActive());
+
+    // DatabasesCloner should resend listDatabases request.
+    auto noi = net->getNextReadyRequest();
+    assertRemoteCommandNameEquals("listDatabases", noi->getRequest());
+    net->blackHole(noi);
+}
+
 TEST_F(DBsClonerTest, DatabasesClonerReturnsCallbackCanceledIfShutdownDuringListDatabasesCommand) {
     Status result{Status::OK()};
     DatabasesCloner cloner{&getStorage(),
@@ -728,12 +760,14 @@ public:
                                                    ShouldFailRequestFn shouldFailRequest)
         : unittest::TaskExecutorProxy(executor), _shouldFailRequest(shouldFailRequest) {}
 
-    StatusWith<CallbackHandle> scheduleRemoteCommand(const executor::RemoteCommandRequest& request,
-                                                     const RemoteCommandCallbackFn& cb) override {
+    StatusWith<CallbackHandle> scheduleRemoteCommand(
+        const executor::RemoteCommandRequest& request,
+        const RemoteCommandCallbackFn& cb,
+        const transport::BatonHandle& baton = nullptr) override {
         if (_shouldFailRequest(request)) {
             return Status(ErrorCodes::OperationFailed, "failed to schedule remote command");
         }
-        return getExecutor()->scheduleRemoteCommand(request, cb);
+        return getExecutor()->scheduleRemoteCommand(request, cb, baton);
     }
 
 private:
@@ -788,9 +822,9 @@ TEST_F(DBsClonerTest, DatabaseClonerChecksAdminDbUsingStorageInterfaceAfterCopyi
     bool isAdminDbValidFnCalled = false;
     OperationContext* isAdminDbValidFnOpCtx = nullptr;
     _storageInterface.isAdminDbValidFn = [&isAdminDbValidFnCalled,
-                                          &isAdminDbValidFnOpCtx](OperationContext* txn) {
+                                          &isAdminDbValidFnOpCtx](OperationContext* opCtx) {
         isAdminDbValidFnCalled = true;
-        isAdminDbValidFnOpCtx = txn;
+        isAdminDbValidFnOpCtx = opCtx;
         return Status::OK();
     };
 
@@ -830,7 +864,7 @@ TEST_F(DBsClonerTest, AdminDbValidationErrorShouldAbortTheCloner) {
     Status result = getDetectableErrorStatus();
 
     bool isAdminDbValidFnCalled = false;
-    _storageInterface.isAdminDbValidFn = [&isAdminDbValidFnCalled](OperationContext* txn) {
+    _storageInterface.isAdminDbValidFn = [&isAdminDbValidFnCalled](OperationContext* opCtx) {
         isAdminDbValidFnCalled = true;
         return Status(ErrorCodes::OperationFailed, "admin db invalid");
     };

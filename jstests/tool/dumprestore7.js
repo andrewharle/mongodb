@@ -1,5 +1,14 @@
 (function() {
     "use strict";
+
+    // Skip this test if running with --nojournal and WiredTiger.
+    if (jsTest.options().noJournal &&
+        (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger")) {
+        print("Skipping test because running WiredTiger without journaling isn't a valid" +
+              " replica set configuration");
+        return;
+    }
+
     var name = "dumprestore7";
 
     var step = (function() {
@@ -79,6 +88,7 @@
         assert.eq(count, 20, "mongorestore should only have inserted the latter 20 entries");
     }
 
+    MongoRunner.stopMongod(restoreMongod);
     step("stopping replset test");
     replTest.stopSet();
 })();

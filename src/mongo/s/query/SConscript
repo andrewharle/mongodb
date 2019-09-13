@@ -2,6 +2,8 @@
 
 Import("env")
 
+env = env.Clone()
+
 env.Library(
     target="cluster_query",
     source=[
@@ -10,10 +12,25 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/commands',
+        '$BUILD_DIR/mongo/db/curop',
+        '$BUILD_DIR/mongo/db/curop_failpoint_helpers',
         '$BUILD_DIR/mongo/db/query/query_common',
+        '$BUILD_DIR/mongo/s/commands/cluster_commands_helpers',
         "cluster_client_cursor",
         "cluster_cursor_cleanup_job",
         "store_possible_cursor",
+    ],
+)
+
+env.CppUnitTest(
+    target="cluster_find_test",
+    source=[
+        "cluster_find_test.cpp",
+    ],
+    LIBDEPS=[
+        'cluster_query',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/s/catalog_cache_test_fixture',
     ],
 )
 
@@ -23,6 +40,7 @@ env.Library(
         "cluster_client_cursor_impl.cpp",
     ],
     LIBDEPS=[
+        "$BUILD_DIR/mongo/db/pipeline/pipeline",
         "router_exec_stage",
     ],
 )
@@ -30,14 +48,21 @@ env.Library(
 env.Library(
     target="router_exec_stage",
     source=[
+        "document_source_router_adapter.cpp",
         "router_stage_limit.cpp",
         "router_stage_merge.cpp",
         "router_stage_mock.cpp",
-        "router_stage_remove_sortkey.cpp",
+        "router_stage_pipeline.cpp",
+        "router_stage_remove_metadata_fields.cpp",
         "router_stage_skip.cpp",
+        "router_stage_update_on_add_shard.cpp",
     ],
     LIBDEPS=[
+        "$BUILD_DIR/mongo/db/query/query_common",
         "async_results_merger",
+    ],
+    LIBDEPS_PRIVATE=[
+        "$BUILD_DIR/mongo/db/pipeline/pipeline",
     ],
 )
 
@@ -45,14 +70,12 @@ env.CppUnitTest(
     target="router_exec_stage_test",
     source=[
         "router_stage_limit_test.cpp",
-        "router_stage_remove_sortkey_test.cpp",
+        "router_stage_remove_metadata_fields_test.cpp",
         "router_stage_skip_test.cpp",
     ],
     LIBDEPS=[
         'router_exec_stage',
-        '$BUILD_DIR/mongo/db/auth/authorization_manager_mock_init',
-        '$BUILD_DIR/mongo/db/service_context_noop_init',
-        '$BUILD_DIR/mongo/s/mongoscore',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
     ],
 )
 
@@ -60,13 +83,15 @@ env.Library(
     target="async_results_merger",
     source=[
         "async_results_merger.cpp",
-        "cluster_client_cursor_params.cpp",
+        "establish_cursors.cpp",
+        env.Idlc('async_results_merger_params.idl')[0],
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/db/query/command_request_response",
         "$BUILD_DIR/mongo/executor/task_executor_interface",
+        "$BUILD_DIR/mongo/s/async_requests_sender",
         "$BUILD_DIR/mongo/s/client/sharding_client",
-        "$BUILD_DIR/mongo/s/coreshard",
+        '$BUILD_DIR/mongo/s/catalog/sharding_catalog_client_impl',
     ],
 )
 
@@ -87,14 +112,26 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'async_results_merger',
-        '$BUILD_DIR/mongo/db/auth/authorization_manager_mock_init',
+        'cluster_client_cursor',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/db/query/query_request',
-        '$BUILD_DIR/mongo/db/service_context_noop_init',
         '$BUILD_DIR/mongo/executor/thread_pool_task_executor_test_fixture',
-        '$BUILD_DIR/mongo/s/sharding_test_fixture',
+        '$BUILD_DIR/mongo/s/sharding_router_test_fixture',
     ],
 )
 
+env.CppUnitTest(
+    target="establish_cursors_test",
+    source=[
+        "establish_cursors_test.cpp",
+    ],
+    LIBDEPS=[
+        'async_results_merger',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/query/query_request',
+        '$BUILD_DIR/mongo/s/sharding_router_test_fixture',
+    ],
+)
 env.Library(
     target="store_possible_cursor",
     source=[
@@ -102,6 +139,7 @@ env.Library(
     ],
     LIBDEPS=[
         "$BUILD_DIR/mongo/base",
+        "$BUILD_DIR/mongo/db/curop",
         "$BUILD_DIR/mongo/db/query/command_request_response",
         "cluster_client_cursor",
         "cluster_cursor_manager",
@@ -115,9 +153,8 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'store_possible_cursor',
-        '$BUILD_DIR/mongo/db/auth/authorization_manager_mock_init',
-        '$BUILD_DIR/mongo/db/service_context_noop_init',
-        '$BUILD_DIR/mongo/s/mongoscore',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/query/query_test_service_context',
         '$BUILD_DIR/mongo/util/clock_source_mock',
     ],
 )
@@ -129,6 +166,12 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/auth/auth',
+        '$BUILD_DIR/mongo/db/auth/authprivilege',
+        '$BUILD_DIR/mongo/db/generic_cursor',
+        '$BUILD_DIR/mongo/db/kill_sessions',
+        '$BUILD_DIR/mongo/db/logical_session_cache',
+        '$BUILD_DIR/mongo/db/logical_session_id',
     ],
 )
 
@@ -138,6 +181,8 @@ env.CppUnitTest(
         "cluster_cursor_manager_test.cpp",
     ],
     LIBDEPS=[
+        "$BUILD_DIR/mongo/db/logical_session_id",
+        "$BUILD_DIR/mongo/db/service_context_test_fixture",
         "$BUILD_DIR/mongo/util/clock_source_mock",
         "cluster_client_cursor_mock",
         "cluster_cursor_manager",
@@ -150,6 +195,7 @@ env.Library(
         "cluster_cursor_cleanup_job.cpp",
     ],
     LIBDEPS=[
+        "$BUILD_DIR/mongo/db/cursor_server_params",
         "$BUILD_DIR/mongo/s/coreshard",
         "$BUILD_DIR/mongo/util/background_job",
     ],
@@ -162,8 +208,7 @@ env.CppUnitTest(
     ],
     LIBDEPS=[
         'cluster_client_cursor',
-        '$BUILD_DIR/mongo/db/auth/authorization_manager_mock_init',
-        '$BUILD_DIR/mongo/db/service_context_noop_init',
-        '$BUILD_DIR/mongo/s/mongoscore',
+        '$BUILD_DIR/mongo/db/auth/authmocks',
+        '$BUILD_DIR/mongo/db/service_context_test_fixture',
     ],
 )

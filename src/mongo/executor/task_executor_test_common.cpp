@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,14 +37,16 @@
 #include <memory>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/executor/network_interface.h"
 #include "mongo/executor/network_interface_mock.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/executor/task_executor_test_fixture.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/stdx/thread.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/unittest/unittest.h"
+#include "mongo/util/clock_source_mock.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 
@@ -51,7 +55,7 @@ namespace executor {
 namespace {
 
 using ExecutorFactory =
-    stdx::function<std::unique_ptr<TaskExecutor>(std::unique_ptr<NetworkInterfaceMock>*)>;
+    stdx::function<std::unique_ptr<TaskExecutor>(std::unique_ptr<NetworkInterfaceMock>)>;
 
 class CommonTaskExecutorTestFixture : public TaskExecutorTest {
 public:
@@ -61,7 +65,7 @@ public:
 private:
     std::unique_ptr<TaskExecutor> makeTaskExecutor(
         std::unique_ptr<NetworkInterfaceMock> net) override {
-        return _makeExecutor(&net);
+        return _makeExecutor(std::move(net));
     }
 
     ExecutorFactory _makeExecutor;
@@ -69,7 +73,7 @@ private:
 
 using ExecutorTestCaseFactory =
     stdx::function<std::unique_ptr<CommonTaskExecutorTestFixture>(ExecutorFactory)>;
-using ExecutorTestCaseMap = unordered_map<std::string, ExecutorTestCaseFactory>;
+using ExecutorTestCaseMap = stdx::unordered_map<std::string, ExecutorTestCaseFactory>;
 
 static ExecutorTestCaseMap& executorTestCaseRegistry() {
     static ExecutorTestCaseMap registry;
@@ -106,44 +110,62 @@ public:
         });                                                                     \
     void CET_##TEST_NAME::_doTest()
 
-void setStatus(const TaskExecutor::CallbackArgs& cbData, Status* target) {
-    *target = cbData.status;
+auto makeSetStatusClosure(Status* target) {
+    return [target](const TaskExecutor::CallbackArgs& cbData) { *target = cbData.status; };
 }
 
-void setStatusAndShutdown(const TaskExecutor::CallbackArgs& cbData, Status* target) {
-    setStatus(cbData, target);
-    if (cbData.status != ErrorCodes::CallbackCanceled)
-        cbData.executor->shutdown();
+auto makeSetStatusAndShutdownClosure(Status* target) {
+    return [target](const TaskExecutor::CallbackArgs& cbData) {
+        *target = cbData.status;
+        if (cbData.status != ErrorCodes::CallbackCanceled) {
+            cbData.executor->shutdown();
+        }
+    };
 }
 
-void setStatusAndTriggerEvent(const TaskExecutor::CallbackArgs& cbData,
-                              Status* outStatus,
-                              TaskExecutor::EventHandle event) {
-    *outStatus = cbData.status;
-    if (!cbData.status.isOK())
-        return;
-    cbData.executor->signalEvent(event);
+auto makeSetStatusAndTriggerEventClosure(Status* target, TaskExecutor::EventHandle event) {
+    return [=](const TaskExecutor::CallbackArgs& cbData) {
+        *target = cbData.status;
+        if (!cbData.status.isOK())
+            return;
+        cbData.executor->signalEvent(event);
+    };
 }
 
-void scheduleSetStatusAndShutdown(const TaskExecutor::CallbackArgs& cbData,
-                                  Status* outStatus1,
-                                  Status* outStatus2) {
-    if (!cbData.status.isOK()) {
-        *outStatus1 = cbData.status;
-        return;
-    }
-    *outStatus1 =
-        cbData.executor
-            ->scheduleWork(stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, outStatus2))
-            .getStatus();
+auto makeScheduleSetStatusAndShutdownClosure(Status* outStatus1, Status* outStatus2) {
+    return [=](const TaskExecutor::CallbackArgs& cbData) {
+        if (!cbData.status.isOK()) {
+            *outStatus1 = cbData.status;
+            return;
+        }
+        *outStatus1 =
+            cbData.executor->scheduleWork(makeSetStatusAndShutdownClosure(outStatus2)).getStatus();
+    };
+}
+
+auto makeSetStatusOnRemoteCommandCompletionClosure(const RemoteCommandRequest* expectedRequest,
+                                                   Status* outStatus) {
+    return [=](const TaskExecutor::RemoteCommandCallbackArgs& cbData) {
+        if (cbData.request != *expectedRequest) {
+            auto desc = [](const RemoteCommandRequest& request) -> std::string {
+                return mongoutils::str::stream() << "Request(" << request.target.toString() << ", "
+                                                 << request.dbname << ", " << request.cmdObj << ')';
+            };
+            *outStatus =
+                Status(ErrorCodes::BadValue,
+                       mongoutils::str::stream() << "Actual request: " << desc(cbData.request)
+                                                 << "; expected: "
+                                                 << desc(*expectedRequest));
+            return;
+        }
+        *outStatus = cbData.response.status;
+    };
 }
 
 COMMON_EXECUTOR_TEST(RunOne) {
     TaskExecutor& executor = getExecutor();
     Status status = getDetectableErrorStatus();
-    ASSERT_OK(
-        executor.scheduleWork(stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, &status))
-            .getStatus());
+    ASSERT_OK(executor.scheduleWork(makeSetStatusAndShutdownClosure(&status)).getStatus());
     launchExecutorThread();
     joinExecutorThread();
     ASSERT_OK(status);
@@ -152,9 +174,7 @@ COMMON_EXECUTOR_TEST(RunOne) {
 COMMON_EXECUTOR_TEST(Schedule1ButShutdown) {
     TaskExecutor& executor = getExecutor();
     Status status = getDetectableErrorStatus();
-    ASSERT_OK(
-        executor.scheduleWork(stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, &status))
-            .getStatus());
+    ASSERT_OK(executor.scheduleWork(makeSetStatusAndShutdownClosure(&status)).getStatus());
     executor.shutdown();
     launchExecutorThread();
     joinExecutorThread();
@@ -165,12 +185,10 @@ COMMON_EXECUTOR_TEST(Schedule2Cancel1) {
     TaskExecutor& executor = getExecutor();
     Status status1 = getDetectableErrorStatus();
     Status status2 = getDetectableErrorStatus();
-    TaskExecutor::CallbackHandle cb = unittest::assertGet(
-        executor.scheduleWork(stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, &status1)));
+    TaskExecutor::CallbackHandle cb =
+        unittest::assertGet(executor.scheduleWork(makeSetStatusAndShutdownClosure(&status1)));
     executor.cancel(cb);
-    ASSERT_OK(
-        executor.scheduleWork(stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, &status2))
-            .getStatus());
+    ASSERT_OK(executor.scheduleWork(makeSetStatusAndShutdownClosure(&status2)).getStatus());
     launchExecutorThread();
     joinExecutorThread();
     ASSERT_EQUALS(status1, ErrorCodes::CallbackCanceled);
@@ -181,9 +199,7 @@ COMMON_EXECUTOR_TEST(OneSchedulesAnother) {
     TaskExecutor& executor = getExecutor();
     Status status1 = getDetectableErrorStatus();
     Status status2 = getDetectableErrorStatus();
-    ASSERT_OK(executor
-                  .scheduleWork(stdx::bind(
-                      scheduleSetStatusAndShutdown, stdx::placeholders::_1, &status1, &status2))
+    ASSERT_OK(executor.scheduleWork(makeScheduleSetStatusAndShutdownClosure(&status1, &status2))
                   .getStatus());
     launchExecutorThread();
     joinExecutorThread();
@@ -241,8 +257,8 @@ EventChainAndWaitingTest::EventChainAndWaitingTest(TaskExecutor* exec,
       status3(ErrorCodes::InternalError, "Not mutated"),
       status4(ErrorCodes::InternalError, "Not mutated"),
       status5(ErrorCodes::InternalError, "Not mutated") {
-    triggered2 = stdx::bind(setStatusAndTriggerEvent, stdx::placeholders::_1, &status2, event2);
-    triggered3 = stdx::bind(setStatusAndTriggerEvent, stdx::placeholders::_1, &status3, event3);
+    triggered2 = makeSetStatusAndTriggerEventClosure(&status2, event2);
+    triggered3 = makeSetStatusAndTriggerEventClosure(&status3, event3);
 }
 
 EventChainAndWaitingTest::~EventChainAndWaitingTest() {
@@ -252,18 +268,20 @@ EventChainAndWaitingTest::~EventChainAndWaitingTest() {
 }
 
 void EventChainAndWaitingTest::run() {
-    executor->onEvent(goEvent,
-                      stdx::bind(&EventChainAndWaitingTest::onGo, this, stdx::placeholders::_1));
+    executor->onEvent(goEvent, [=](const TaskExecutor::CallbackArgs& cbData) { onGo(cbData); })
+        .status_with_transitional_ignore();
     executor->signalEvent(goEvent);
     executor->waitForEvent(goEvent);
     executor->waitForEvent(event2);
     executor->waitForEvent(event3);
 
     TaskExecutor::EventHandle neverSignaledEvent = unittest::assertGet(executor->makeEvent());
-    neverSignaledWaiter =
-        stdx::thread(stdx::bind(&TaskExecutor::waitForEvent, executor, neverSignaledEvent));
-    TaskExecutor::CallbackHandle shutdownCallback = unittest::assertGet(
-        executor->scheduleWork(stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, &status5)));
+    auto waitForeverCallback = [this, neverSignaledEvent]() {
+        executor->waitForEvent(neverSignaledEvent);
+    };
+    neverSignaledWaiter = stdx::thread(waitForeverCallback);
+    TaskExecutor::CallbackHandle shutdownCallback =
+        unittest::assertGet(executor->scheduleWork(makeSetStatusAndShutdownClosure(&status5)));
     executor->wait(shutdownCallback);
 }
 
@@ -303,8 +321,7 @@ void EventChainAndWaitingTest::onGo(const TaskExecutor::CallbackArgs& cbData) {
     }
 
     cbHandle = executor->onEvent(
-        goEvent,
-        stdx::bind(&EventChainAndWaitingTest::onGoAfterTriggered, this, stdx::placeholders::_1));
+        goEvent, [=](const TaskExecutor::CallbackArgs& cbData) { onGoAfterTriggered(cbData); });
     if (!cbHandle.isOK()) {
         status1 = cbHandle.getStatus();
         executor->shutdown();
@@ -321,6 +338,53 @@ void EventChainAndWaitingTest::onGoAfterTriggered(const TaskExecutor::CallbackAr
     cbData.executor->signalEvent(triggerEvent);
 }
 
+COMMON_EXECUTOR_TEST(EventWaitingWithTimeoutTest) {
+    TaskExecutor& executor = getExecutor();
+    launchExecutorThread();
+
+    auto eventThatWillNeverBeTriggered = unittest::assertGet(executor.makeEvent());
+
+    auto serviceContext = ServiceContext::make();
+
+    serviceContext->setFastClockSource(stdx::make_unique<ClockSourceMock>());
+    auto mockClock = static_cast<ClockSourceMock*>(serviceContext->getFastClockSource());
+
+    auto client = serviceContext->makeClient("for testing");
+    auto opCtx = client->makeOperationContext();
+
+    auto deadline = mockClock->now() + Milliseconds{1};
+    mockClock->advance(Milliseconds(2));
+    ASSERT(stdx::cv_status::timeout ==
+           executor.waitForEvent(opCtx.get(), eventThatWillNeverBeTriggered, deadline));
+    executor.shutdown();
+    joinExecutorThread();
+}
+
+COMMON_EXECUTOR_TEST(EventSignalWithTimeoutTest) {
+    TaskExecutor& executor = getExecutor();
+    launchExecutorThread();
+
+    auto eventSignalled = unittest::assertGet(executor.makeEvent());
+
+    auto serviceContext = ServiceContext::make();
+
+    serviceContext->setFastClockSource(stdx::make_unique<ClockSourceMock>());
+    auto mockClock = static_cast<ClockSourceMock*>(serviceContext->getFastClockSource());
+
+    auto client = serviceContext->makeClient("for testing");
+    auto opCtx = client->makeOperationContext();
+
+    auto deadline = mockClock->now() + Milliseconds{1};
+    mockClock->advance(Milliseconds(1));
+
+    executor.signalEvent(eventSignalled);
+
+    ASSERT(stdx::cv_status::no_timeout ==
+           executor.waitForEvent(opCtx.get(), eventSignalled, deadline));
+    executor.shutdown();
+    joinExecutorThread();
+}
+
 COMMON_EXECUTOR_TEST(ScheduleWorkAt) {
     NetworkInterfaceMock* net = getNet();
     TaskExecutor& executor = getExecutor();
@@ -331,15 +395,14 @@ COMMON_EXECUTOR_TEST(ScheduleWorkAt) {
     Status status4 = getDetectableErrorStatus();
 
     const Date_t now = net->now();
-    const TaskExecutor::CallbackHandle cb1 = unittest::assertGet(executor.scheduleWorkAt(
-        now + Milliseconds(100), stdx::bind(setStatus, stdx::placeholders::_1, &status1)));
-    const TaskExecutor::CallbackHandle cb4 = unittest::assertGet(executor.scheduleWorkAt(
-        now - Milliseconds(50), stdx::bind(setStatus, stdx::placeholders::_1, &status4)));
-    unittest::assertGet(executor.scheduleWorkAt(
-        now + Milliseconds(5000), stdx::bind(setStatus, stdx::placeholders::_1, &status3)));
+    const TaskExecutor::CallbackHandle cb1 = unittest::assertGet(
+        executor.scheduleWorkAt(now + Milliseconds(100), makeSetStatusClosure(&status1)));
+    const TaskExecutor::CallbackHandle cb4 = unittest::assertGet(
+        executor.scheduleWorkAt(now - Milliseconds(50), makeSetStatusClosure(&status4)));
+    unittest::assertGet(
+        executor.scheduleWorkAt(now + Milliseconds(5000), makeSetStatusClosure(&status3)));
     const TaskExecutor::CallbackHandle cb2 = unittest::assertGet(executor.scheduleWorkAt(
-        now + Milliseconds(200),
-        stdx::bind(setStatusAndShutdown, stdx::placeholders::_1, &status2)));
+        now + Milliseconds(200), makeSetStatusAndShutdownClosure(&status2)));
 
     executor.wait(cb4);
     ASSERT_OK(status4);
@@ -358,26 +421,6 @@ COMMON_EXECUTOR_TEST(ScheduleWorkAt) {
     ASSERT_EQUALS(status3, ErrorCodes::CallbackCanceled);
 }
 
-std::string getRequestDescription(const RemoteCommandRequest& request) {
-    return mongoutils::str::stream() << "Request(" << request.target.toString() << ", "
-                                     << request.dbname << ", " << request.cmdObj << ')';
-}
-
-static void setStatusOnRemoteCommandCompletion(
-    const TaskExecutor::RemoteCommandCallbackArgs& cbData,
-    const RemoteCommandRequest& expectedRequest,
-    Status* outStatus) {
-    if (cbData.request != expectedRequest) {
-        *outStatus = Status(ErrorCodes::BadValue,
-                            mongoutils::str::stream() << "Actual request: "
-                                                      << getRequestDescription(cbData.request)
-                                                      << "; expected: "
-                                                      << getRequestDescription(expectedRequest));
-        return;
-    }
-    *outStatus = cbData.response.status;
-}
-
 COMMON_EXECUTOR_TEST(ScheduleRemoteCommand) {
     NetworkInterfaceMock* net = getNet();
     TaskExecutor& executor = getExecutor();
@@ -389,8 +432,7 @@ COMMON_EXECUTOR_TEST(ScheduleRemoteCommand) {
                                             << "doc"),
                                        nullptr);
     TaskExecutor::CallbackHandle cbHandle = unittest::assertGet(executor.scheduleRemoteCommand(
-        request,
-        stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status1)));
+        request, makeSetStatusOnRemoteCommandCompletionClosure(&request, &status1)));
     net->enterNetwork();
     ASSERT(net->hasReadyRequests());
     NetworkInterfaceMock::NetworkOperationIterator noi = net->getNextReadyRequest();
@@ -413,8 +455,7 @@ COMMON_EXECUTOR_TEST(ScheduleAndCancelRemoteCommand) {
                                             << "doc"),
                                        nullptr);
     TaskExecutor::CallbackHandle cbHandle = unittest::assertGet(executor.scheduleRemoteCommand(
-        request,
-        stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status1)));
+        request, makeSetStatusOnRemoteCommandCompletionClosure(&request, &status1)));
     executor.cancel(cbHandle);
     launchExecutorThread();
     getNet()->enterNetwork();
@@ -435,8 +476,7 @@ COMMON_EXECUTOR_TEST(RemoteCommandWithTimeout) {
     const RemoteCommandRequest request(
         HostAndPort("lazy", 27017), "admin", BSON("sleep" << 1), nullptr, Milliseconds(1));
     TaskExecutor::CallbackHandle cbHandle = unittest::assertGet(executor.scheduleRemoteCommand(
-        request,
-        stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status)));
+        request, makeSetStatusOnRemoteCommandCompletionClosure(&request, &status)));
     net->enterNetwork();
     ASSERT(net->hasReadyRequests());
     const Date_t startTime = net->now();
@@ -456,11 +496,9 @@ COMMON_EXECUTOR_TEST(CallbackHandleComparison) {
     const RemoteCommandRequest request(
         HostAndPort("lazy", 27017), "admin", BSON("cmd" << 1), nullptr);
     TaskExecutor::CallbackHandle cbHandle1 = unittest::assertGet(executor.scheduleRemoteCommand(
-        request,
-        stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status1)));
+        request, makeSetStatusOnRemoteCommandCompletionClosure(&request, &status1)));
     TaskExecutor::CallbackHandle cbHandle2 = unittest::assertGet(executor.scheduleRemoteCommand(
-        request,
-        stdx::bind(setStatusOnRemoteCommandCompletion, stdx::placeholders::_1, request, &status2)));
+        request, makeSetStatusOnRemoteCommandCompletionClosure(&request, &status2)));
 
     // test equality
     ASSERT_TRUE(cbHandle1 == cbHandle1);

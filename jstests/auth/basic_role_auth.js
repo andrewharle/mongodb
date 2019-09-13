@@ -10,6 +10,7 @@
  * 2nd level field name: user names.
  * 3rd level is an object that has the format:
  *     { pwd: <password>, roles: [<list of roles>] }
+ * @tags: [requires_sharding]
  */
 var AUTH_INFO = {
     admin: {
@@ -41,7 +42,8 @@ var READ_WRITE_PERM =
     {insert: 1, update: 1, remove: 1, query: 1, index_r: 1, index_w: 1, killCursor: 1};
 var ADMIN_PERM = {index_r: 1, index_w: 1, profile_r: 1};
 var UADMIN_PERM = {user_r: 1, user_w: 1};
-var CLUSTER_PERM = {killOp: 1, currentOp: 1, fsync_unlock: 1, killCursor: 1, profile_r: 1};
+var CLUSTER_PERM =
+    {killOp: 1, currentOp: 1, fsync_unlock: 1, killCursor: 1, killAnyCursor: 1, profile_r: 1};
 
 /**
  * Checks whether an error occurs after running an operation.
@@ -157,32 +159,49 @@ var testOps = function(db, allowedActions) {
         var dbName = db.getName();
         var db2 = newConn.getDB(dbName);
 
-        if (db2 == 'admin') {
+        if (db2.getName() == 'admin') {
             assert.eq(1, db2.auth('aro', AUTH_INFO.admin.aro.pwd));
         } else {
             assert.eq(1, db2.auth('ro', AUTH_INFO.test.ro.pwd));
         }
 
-        var cursor = db2.kill_cursor.find().batchSize(2);
+        // Create cursor from db2.
+        var cmdRes = db2.runCommand({find: db2.kill_cursor.getName(), batchSize: 2});
+        assert.commandWorked(cmdRes);
+        var cursorId = cmdRes.cursor.id;
+        assert(!bsonBinaryEqual({cursorId: cursorId}, {cursorId: NumberLong(0)}),
+               "find command didn't return a cursor: " + tojson(cmdRes));
 
-        db.killCursor(cursor.id());
-        // Send a synchronous message to make sure that kill cursor was processed
-        // before proceeding.
-        db.runCommand({whatsmyuri: 1});
-
-        checkErr(!allowedActions.hasOwnProperty('killCursor'), function() {
-            while (cursor.hasNext()) {
-                var next = cursor.next();
-
-                // This is a failure in mongos case. Standalone case will fail
-                // when next() was called.
-                if (next.code == 16336) {
-                    // could not find cursor in cache for id
-                    throw next.$err;
-                }
+        const shouldSucceed = (function() {
+            // admin users can do anything they want.
+            if (allowedActions.hasOwnProperty('killAnyCursor')) {
+                return true;
             }
+
+            // users can kill their own cursors
+            const users = assert.commandWorked(db.runCommand({connectionStatus: 1}))
+                              .authInfo.authenticatedUsers;
+            const users2 = assert.commandWorked(db2.runCommand({connectionStatus: 1}))
+                               .authInfo.authenticatedUsers;
+            if (!users.length && !users2.length) {
+                // Special case, no-auth
+                return true;
+            }
+            return users.some(function(u) {
+                return users2.some(function(u2) {
+                    return ((u.db === u2.db) && (u.user === u2.user));
+                });
+            });
+        })();
+
+        checkErr(shouldSucceed, function() {
+            // Issue killCursor command from db.
+            cmdRes = db.runCommand({killCursors: db2.kill_cursor.getName(), cursors: [cursorId]});
+            assert.commandWorked(cmdRes);
+            assert(bsonBinaryEqual({cursorId: cmdRes.cursorsKilled}, {cursorId: [cursorId]}),
+                   "unauthorized to kill cursor: " + tojson(cmdRes));
         });
-    });  // TODO: enable test after SERVER-5813 is fixed.
+    })();
 
     var isMongos = db.runCommand({isdbgrid: 1}).isdbgrid;
     // Note: fsyncUnlock is not supported in mongos.
@@ -192,7 +211,7 @@ var testOps = function(db, allowedActions) {
             var errorCodeUnauthorized = 13;
 
             if (res.code == errorCodeUnauthorized) {
-                throw Error("unauthorized unauthorized fsyncUnlock");
+                throw Error("unauthorized fsyncUnlock");
             }
         });
     }
@@ -474,7 +493,7 @@ var runTests = function(conn) {
             testFunc.test(newConn);
         } catch (x) {
             failures.push(testFunc.name);
-            jsTestLog(x);
+            jsTestLog(tojson(x));
         }
     });
 
@@ -491,10 +510,12 @@ var runTests = function(conn) {
 
 var conn = MongoRunner.runMongod({auth: ''});
 runTests(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 1, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st =
+    new ShardingTest({shards: 1, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTests(st.s);
 st.stop();
 

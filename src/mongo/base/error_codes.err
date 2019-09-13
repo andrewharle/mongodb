@@ -49,7 +49,7 @@ error_code("LockBusy", 46)
 error_code("NoMatchingDocument", 47)
 error_code("NamespaceExists", 48)
 error_code("InvalidRoleModification", 49)
-error_code("ExceededTimeLimit", 50)
+error_code("MaxTimeMSExpired", 50)
 error_code("ManualInterventionRequired", 51)
 error_code("DollarPrefixedFieldName", 52)
 error_code("InvalidIdField", 53)
@@ -167,7 +167,7 @@ error_code("ViewDepthLimitExceeded", 165)
 error_code("CommandNotSupportedOnView", 166)
 error_code("OptionNotSupportedOnView", 167)
 error_code("InvalidPipelineOperator", 168)
-error_code("CommandOnShardedViewNotSupportedOnMongod", 169)
+error_code("CommandOnShardedViewNotSupportedOnMongod", 169, extra='ResolvedView')
 error_code("TooManyMatchingDocuments", 170)
 error_code("CannotIndexParallelArrays", 171)
 error_code("TransportSessionClosed", 172)
@@ -189,7 +189,7 @@ error_code("LinearizableReadConcernError", 187)
 error_code("IncompatibleServerVersion", 188)
 error_code("PrimarySteppedDown", 189)
 error_code("MasterSlaveConnectionFailure", 190)
-error_code("BalancerLostDistributedLock", 191)
+error_code("OBSOLETE_BalancerLostDistributedLock", 191)
 error_code("FailPointEnabled", 192)
 error_code("NoShardingEnabled", 193)
 error_code("BalancerInterrupted", 194)
@@ -200,21 +200,80 @@ error_code("ReplicaSetMonitorRemoved", 199)
 error_code("ChunkRangeCleanupPending", 200)
 error_code("CannotBuildIndexKeys", 201)
 error_code("NetworkInterfaceExceededTimeLimit", 202)
+error_code("ShardingStateNotInitialized", 203)
+error_code("TimeProofMismatch", 204)
+error_code("ClusterTimeFailsRateLimiter", 205)
+error_code("NoSuchSession", 206)
+error_code("InvalidUUID", 207)
 error_code("TooManyLocks", 208)
+error_code("StaleClusterTime", 209)
+error_code("CannotVerifyAndSignLogicalTime", 210)
 error_code("KeyNotFound", 211)
+error_code("IncompatibleRollbackAlgorithm", 212)
+error_code("DuplicateSession", 213)
+error_code("AuthenticationRestrictionUnmet", 214)
+error_code("DatabaseDropPending", 215)
+error_code("ElectionInProgress", 216)
+error_code("IncompleteTransactionHistory", 217);
 error_code("UpdateOperationFailed", 218)
 error_code("FTDCPathNotSet", 219)
 error_code("FTDCPathAlreadySet", 220)
+error_code("IndexModified", 221)
+error_code("CloseChangeStream", 222)
+error_code("IllegalOpMsgFlag", 223)
+error_code("QueryFeatureNotAllowed", 224)
+error_code("TransactionTooOld", 225)
+error_code("AtomicityFailure", 226)
+error_code("CannotImplicitlyCreateCollection", 227, extra="CannotImplicitlyCreateCollectionInfo");
+error_code("SessionTransferIncomplete", 228)
+error_code("MustDowngrade", 229)
+error_code("DNSHostNotFound", 230)
+error_code("DNSProtocolError", 231)
+error_code("MaxSubPipelineDepthExceeded", 232)
+error_code("TooManyDocumentSequences", 233)
+error_code("RetryChangeStream", 234)
+error_code("InternalErrorNotSupported", 235) # this function or module is not available on this platform or configuration
+error_code("ForTestingErrorExtraInfo", 236, extra="ErrorExtraInfoExample")
+error_code("CursorKilled", 237)
+error_code("NotImplemented", 238)
+error_code("SnapshotTooOld", 239)
+error_code("DNSRecordTypeMismatch", 240)
+error_code("ConversionFailure", 241)
+error_code("CannotCreateCollection", 242)
+error_code("IncompatibleWithUpgradedServer", 243)
+error_code("NOT_YET_AVAILABLE_TransactionAborted", 244)
+error_code("BrokenPromise", 245)
+error_code("SnapshotUnavailable", 246)
 error_code("ProducerConsumerQueueBatchTooLarge", 247)
 error_code("ProducerConsumerQueueEndClosed", 248)
-
+error_code("StaleDbVersion", 249, extra="StaleDbRoutingVersion")
+error_code("StaleChunkHistory", 250)
+error_code("NoSuchTransaction", 251)
+error_code("ReentrancyNotAllowed", 252)
+error_code("FreeMonHttpInFlight", 253)
+error_code("FreeMonHttpTemporaryFailure", 254)
+error_code("FreeMonHttpPermanentFailure", 255)
+error_code("TransactionCommitted", 256)
+error_code("TransactionTooLarge", 257)
+error_code("UnknownFeatureCompatibilityVersion", 258);
+error_code("KeyedExecutorRetry", 259);
+error_code("InvalidResumeToken", 260);
+error_code("TooManyLogicalSessions", 261);
+error_code("ExceededTimeLimit", 262);
+error_code("OperationNotSupportedInTransaction", 263);
+error_code("TooManyFilesOpen", 264);
+error_code("FailPointSetFailed", 266)
+error_code("DataModifiedByRepair", 269);
+error_code("RepairedReplicaSetNode", 270);
+error_code("AlarmAlreadyFulfilled", 277)
 # Error codes 4000-8999 are reserved.
 
 # Non-sequential error codes (for compatibility only)
 error_code("SocketException", 9001)
-error_code("RecvStaleConfig", 9996)
+error_code("OBSOLETE_RecvStaleConfig", 9996)
 error_code("NotMaster", 10107)
 error_code("CannotGrowDocumentInCappedNamespace", 10003)
+error_code("BSONObjectTooLarge", 10334)
 error_code("DuplicateKey", 11000)
 error_code("InterruptedAtShutdown", 11600)
 error_code("Interrupted", 11601)
@@ -226,21 +285,44 @@ error_code("BackgroundOperationInProgressForNamespace", 12587);
 error_code("NotMasterOrSecondary", 13436);
 error_code("NotMasterNoSlaveOk", 13435);
 error_code("ShardKeyTooBig", 13334);
-error_code("SendStaleConfig", 13388);
+error_code("StaleConfig", 13388, extra="StaleConfigInfo");
 error_code("DatabaseDifferCase", 13297);
 error_code("OBSOLETE_PrepareConfigsFailed", 13104);
 
-# SERVER-21428 explains the extra changes needed if error_class components change.
-error_class("NetworkError", ["HostUnreachable", "HostNotFound", "NetworkTimeout"])
+# Group related errors into classes, can be checked against ErrorCodes::isXXXClassName methods.
+error_class("NetworkError", ["HostUnreachable", "HostNotFound", "NetworkTimeout", "SocketException"])
 error_class("Interruption", ["Interrupted",
                              "InterruptedAtShutdown",
                              "InterruptedDueToReplStateChange",
-                             "ExceededTimeLimit"])
-error_class("NotMasterError", ["NotMaster", "NotMasterNoSlaveOk"])
-error_class("StaleShardingError",
-            ["RecvStaleConfig", "SendStaleConfig", "StaleShardVersion", "StaleEpoch"])
+                             "ExceededTimeLimit",
+                             "MaxTimeMSExpired",
+                             "CursorKilled",
+                             "LockTimeout"])
+
+# isNotMasterError() includes all codes that indicate that the node that received the request was
+# not master at some point during command processing, regardless of whether some write may have
+# happened. If you care about whether a write could have happened, check for individual codes.
+error_class("NotMasterError", [
+    "NotMaster",
+    "NotMasterNoSlaveOk",
+    "NotMasterOrSecondary",
+    "InterruptedDueToReplStateChange",
+    "PrimarySteppedDown",
+    ])
+error_class("StaleShardVersionError",
+            ["StaleConfig", "StaleShardVersion", "StaleEpoch"])
+error_class("NeedRetargettingError",
+            ["StaleConfig", "StaleShardVersion", "StaleEpoch", "CannotImplicitlyCreateCollection"])
 error_class("WriteConcernError", ["WriteConcernFailed",
                                   "WriteConcernLegacyOK",
                                   "UnknownReplWriteConcern",
                                   "CannotSatisfyWriteConcern"])
 error_class("ShutdownError", ["ShutdownInProgress", "InterruptedAtShutdown"])
+
+#TODO SERVER-28679 add checksum failure.
+error_class("ConnectionFatalMessageParseError", ["IllegalOpMsgFlag",
+                                                 "TooManyDocumentSequences"])
+
+error_class("ExceededTimeLimitError", ["ExceededTimeLimit", "MaxTimeMSExpired", "NetworkInterfaceExceededTimeLimit"])
+
+error_class("SnapshotError", ["SnapshotTooOld", "SnapshotUnavailable", "StaleChunkHistory"])

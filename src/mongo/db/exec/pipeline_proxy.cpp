@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -47,12 +49,22 @@ using stdx::make_unique;
 const char* PipelineProxyStage::kStageType = "PIPELINE_PROXY";
 
 PipelineProxyStage::PipelineProxyStage(OperationContext* opCtx,
-                                       intrusive_ptr<Pipeline> pipeline,
+                                       std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
                                        WorkingSet* ws)
-    : PlanStage(kStageType, opCtx),
-      _pipeline(pipeline),
-      _includeMetaData(_pipeline->getContext()->inShard),  // send metadata to merger
-      _ws(ws) {}
+    : PipelineProxyStage(opCtx, std::move(pipeline), ws, kStageType) {}
+
+PipelineProxyStage::PipelineProxyStage(OperationContext* opCtx,
+                                       std::unique_ptr<Pipeline, PipelineDeleter> pipeline,
+                                       WorkingSet* ws,
+                                       const char* stageTypeName)
+    : PlanStage(stageTypeName, opCtx),
+      _pipeline(std::move(pipeline)),
+      _includeMetaData(_pipeline->getContext()->needsMerge),  // send metadata to merger
+      _ws(ws) {
+    // We take over responsibility for disposing of the Pipeline, since it is required that
+    // doDispose() will be called before destruction of this PipelineProxyStage.
+    _pipeline.get_deleter().dismissDisposal();
+}
 
 PlanStage::StageState PipelineProxyStage::doWork(WorkingSetID* out) {
     if (!out) {
@@ -99,6 +111,10 @@ void PipelineProxyStage::doReattachToOperationContext() {
     _pipeline->reattachToOperationContext(getOpCtx());
 }
 
+void PipelineProxyStage::doDispose() {
+    _pipeline->dispose(getOpCtx());
+}
+
 unique_ptr<PlanStageStats> PipelineProxyStage::getStats() {
     unique_ptr<PlanStageStats> ret =
         make_unique<PlanStageStats>(CommonStats(kStageType), STAGE_PIPELINE_PROXY);
@@ -119,12 +135,17 @@ boost::optional<BSONObj> PipelineProxyStage::getNextBson() {
 }
 
 std::string PipelineProxyStage::getPlanSummaryStr() const {
-    return PipelineD::getPlanSummaryStr(_pipeline);
+    return PipelineD::getPlanSummaryStr(_pipeline.get());
 }
 
 void PipelineProxyStage::getPlanSummaryStats(PlanSummaryStats* statsOut) const {
     invariant(statsOut);
-    PipelineD::getPlanSummaryStats(_pipeline, statsOut);
+    PipelineD::getPlanSummaryStats(_pipeline.get(), statsOut);
     statsOut->nReturned = getCommonStats()->advanced;
 }
+
+vector<Value> PipelineProxyStage::writeExplainOps(ExplainOptions::Verbosity verbosity) const {
+    return _pipeline->writeExplainOps(verbosity);
+}
+
 }  // namespace mongo

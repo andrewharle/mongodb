@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -57,31 +59,34 @@ public:
     static const std::string kVersionFieldName;
     static const std::string kMajorityWriteConcernModeName;
 
+    // If this field is present, a repair operation potentially modified replicated data. This
+    // should never be included in a valid configuration document.
+    static const std::string kRepairedFieldName;
+
     static const size_t kMaxMembers = 50;
     static const size_t kMaxVotingMembers = 7;
     static const Milliseconds kInfiniteCatchUpTimeout;
+    static const Milliseconds kCatchUpDisabled;
+    static const Milliseconds kCatchUpTakeoverDisabled;
 
     static const Milliseconds kDefaultElectionTimeoutPeriod;
     static const Milliseconds kDefaultHeartbeatInterval;
     static const Seconds kDefaultHeartbeatTimeoutPeriod;
     static const Milliseconds kDefaultCatchUpTimeoutPeriod;
     static const bool kDefaultChainingAllowed;
+    static const Milliseconds kDefaultCatchUpTakeoverDelay;
 
     /**
      * Initializes this ReplSetConfig from the contents of "cfg".
-     * The default protocol version is 0 to keep backward-compatibility.
-     * If usePV1ByDefault is true, the protocol version will be 1 when it's not specified in "cfg".
      * Sets _replicaSetId to "defaultReplicaSetId" if a replica set ID is not specified in "cfg".
      */
-    Status initialize(const BSONObj& cfg,
-                      bool usePV1ByDefault = false,
-                      OID defaultReplicaSetId = OID());
+    Status initialize(const BSONObj& cfg, OID defaultReplicaSetId = OID());
 
     /**
      * Same as the generic initialize() above except will default "configsvr" setting to the value
      * of serverGlobalParams.configsvr.
      */
-    Status initializeForInitiate(const BSONObj& cfg, bool usePV1ByDefault = false);
+    Status initializeForInitiate(const BSONObj& cfg);
 
     /**
      * Returns true if this object has been successfully initialized or copied from
@@ -151,6 +156,10 @@ public:
         return _members.end();
     }
 
+    const std::vector<MemberConfig>& members() const {
+        return _members;
+    }
+
     /**
      * Access a MemberConfig element by index.
      */
@@ -172,13 +181,13 @@ public:
      * Returns a MemberConfig index position corresponding to the member with the given
      * HostAndPort in the config, or -1 if there is no member with that address.
      */
-    const int findMemberIndexByHostAndPort(const HostAndPort& hap) const;
+    int findMemberIndexByHostAndPort(const HostAndPort& hap) const;
 
     /**
      * Returns a MemberConfig index position corresponding to the member with the given
      * _id in the config, or -1 if there is no member with that address.
      */
-    const int findMemberIndexByConfigId(long long configId) const;
+    int findMemberIndexByConfigId(long long configId) const;
 
     /**
      * Gets the default write concern for the replica set described by this configuration.
@@ -340,16 +349,29 @@ public:
      */
     Milliseconds getPriorityTakeoverDelay(int memberIdx) const;
 
+    /**
+     * Returns the duration to wait before running for election when this node
+     * sees that it is more caught up than the current primary.
+     */
+    Milliseconds getCatchUpTakeoverDelay() const {
+        return _catchUpTakeoverDelay;
+    }
+
+    /**
+     * Return the number of members with a priority greater than "priority".
+     */
+    int calculatePriorityRank(double priority) const;
+
+    /**
+     * Returns true if this replica set has at least one arbiter.
+     */
+    bool containsArbiter() const;
+
 private:
     /**
      * Parses the "settings" subdocument of a replica set configuration.
      */
     Status _parseSettingsSubdocument(const BSONObj& settings);
-
-    /**
-     * Return the number of members with a priority greater than "priority".
-     */
-    int _calculatePriorityRank(double priority) const;
 
     /**
      * Calculates and stores the majority for electing a primary (_majorityVoteCount).
@@ -370,10 +392,7 @@ private:
      * Sets replica set ID to 'defaultReplicaSetId' if forInitiate is false and 'cfg' does not
      * contain an ID.
      */
-    Status _initialize(const BSONObj& cfg,
-                       bool forInitiate,
-                       bool usePV1ByDefault,
-                       OID defaultReplicaSetId);
+    Status _initialize(const BSONObj& cfg, bool forInitiate, OID defaultReplicaSetId);
 
     bool _isInitialized = false;
     long long _version = 1;
@@ -384,6 +403,7 @@ private:
     Milliseconds _heartbeatInterval = kDefaultHeartbeatInterval;
     Seconds _heartbeatTimeoutPeriod = kDefaultHeartbeatTimeoutPeriod;
     Milliseconds _catchUpTimeoutPeriod = kDefaultCatchUpTimeoutPeriod;
+    Milliseconds _catchUpTakeoverDelay = kDefaultCatchUpTakeoverDelay;
     bool _chainingAllowed = kDefaultChainingAllowed;
     bool _writeConcernMajorityJournalDefault = false;
     int _majorityVoteCount = 0;

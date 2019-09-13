@@ -8,7 +8,7 @@ var st = new ShardingTest({shards: 2, other: {chunkSize: 1}});
 
 var config = st.getDB("config");
 st.adminCommand({enablesharding: "test"});
-st.ensurePrimaryShard("test", "shard0001");
+st.ensurePrimaryShard("test", st.shard1.shardName);
 st.adminCommand({shardcollection: "test.foo", key: {"a": 1}});
 
 var testDB = st.getDB("test");
@@ -29,7 +29,7 @@ var str = new Array(1024).join('a');
 // collections in the database. The upshot is that we need a sharded collection on
 // both shards in order to ensure M/R will output to two shards.
 st.adminCommand({split: 'test.foo', middle: {a: numDocs + numBatch / 2}});
-st.adminCommand({moveChunk: 'test.foo', find: {a: numDocs}, to: 'shard0000'});
+st.adminCommand({moveChunk: 'test.foo', find: {a: numDocs}, to: st.shard0.shardName});
 
 // Add some more data for input so that chunks will get split further
 for (var splitPoint = 0; splitPoint < numBatch; splitPoint += 400) {
@@ -81,15 +81,15 @@ config.chunks.find({ns: testDB.mrShardedOut.getFullName()}).forEach(function(chu
 
 // Check that chunks for the newly created sharded output collection are well distributed.
 var shard0Chunks =
-    config.chunks.find({ns: testDB.mrShardedOut._fullName, shard: 'shard0000'}).count();
+    config.chunks.find({ns: testDB.mrShardedOut._fullName, shard: st.shard0.shardName}).count();
 var shard1Chunks =
-    config.chunks.find({ns: testDB.mrShardedOut._fullName, shard: 'shard0001'}).count();
+    config.chunks.find({ns: testDB.mrShardedOut._fullName, shard: st.shard1.shardName}).count();
 assert.lte(Math.abs(shard0Chunks - shard1Chunks), 1);
 
 jsTest.log('Starting second pass');
 
 st.adminCommand({split: 'test.foo', middle: {a: numDocs + numBatch / 2}});
-st.adminCommand({moveChunk: 'test.foo', find: {a: numDocs}, to: 'shard0000'});
+st.adminCommand({moveChunk: 'test.foo', find: {a: numDocs}, to: st.shard0.shardName});
 
 // Add some more data for input so that chunks will get split further
 for (splitPoint = 0; splitPoint < numBatch; splitPoint += 400) {

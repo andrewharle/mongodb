@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -55,15 +57,14 @@ class NamespaceString;
  * stage which will produce a document like the following:
  * {facetA: [<all input documents except the first one>], facetB: [<the first document>]}.
  */
-class DocumentSourceFacet final : public DocumentSourceNeedsMongod,
-                                  public SplittableDocumentSource {
+class DocumentSourceFacet final : public DocumentSource, public NeedsMergerDocumentSource {
 public:
     struct FacetPipeline {
-        FacetPipeline(std::string name, boost::intrusive_ptr<Pipeline> pipeline)
+        FacetPipeline(std::string name, std::unique_ptr<Pipeline, PipelineDeleter> pipeline)
             : name(std::move(name)), pipeline(std::move(pipeline)) {}
 
         std::string name;
-        boost::intrusive_ptr<Pipeline> pipeline;
+        std::unique_ptr<Pipeline, PipelineDeleter> pipeline;
     };
 
     class LiteParsed : public LiteParsedDocumentSource {
@@ -71,13 +72,19 @@ public:
         static std::unique_ptr<LiteParsed> parse(const AggregationRequest& request,
                                                  const BSONElement& spec);
 
+        LiteParsed(std::vector<LiteParsedPipeline> liteParsedPipelines, PrivilegeVector privileges)
+            : _liteParsedPipelines(std::move(liteParsedPipelines)),
+              _requiredPrivileges(std::move(privileges)) {}
+
+        PrivilegeVector requiredPrivileges(bool isMongos) const final {
+            return _requiredPrivileges;
+        }
+
         stdx::unordered_set<NamespaceString> getInvolvedNamespaces() const final;
 
     private:
-        LiteParsed(std::vector<LiteParsedPipeline> liteParsedPipelines)
-            : _liteParsedPipelines(std::move(liteParsedPipelines)) {}
-
         const std::vector<LiteParsedPipeline> _liteParsedPipelines;
+        const PrivilegeVector _requiredPrivileges;
     };
 
     static boost::intrusive_ptr<DocumentSource> createFromBson(
@@ -120,22 +127,28 @@ public:
     boost::intrusive_ptr<DocumentSource> getShardSource() final {
         return nullptr;
     }
-    boost::intrusive_ptr<DocumentSource> getMergeSource() final {
-        return this;
+    std::list<boost::intrusive_ptr<DocumentSource>> getMergeSources() final {
+        return {this};
+    }
+
+    const std::vector<FacetPipeline>& getFacetPipelines() const {
+        return _facets;
     }
 
     // The following are overridden just to forward calls to sub-pipelines.
     void addInvolvedCollections(std::vector<NamespaceString>* collections) const final;
-    void doInjectMongodInterface(std::shared_ptr<MongodInterface> mongod) final;
-    void doDetachFromOperationContext() final;
-    void doReattachToOperationContext(OperationContext* opCtx) final;
-    bool needsPrimaryShard() const final;
+    void detachFromOperationContext() final;
+    void reattachToOperationContext(OperationContext* opCtx) final;
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final;
+
+protected:
+    void doDispose() final;
 
 private:
     DocumentSourceFacet(std::vector<FacetPipeline> facetPipelines,
                         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
 
     boost::intrusive_ptr<TeeBuffer> _teeBuffer;
     std::vector<FacetPipeline> _facets;

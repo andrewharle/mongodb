@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -41,7 +43,7 @@
 namespace mongo {
 
 // static
-bool WorkingSetCommon::fetchAndInvalidateRecordId(OperationContext* txn,
+bool WorkingSetCommon::fetchAndInvalidateRecordId(OperationContext* opCtx,
                                                   WorkingSetMember* member,
                                                   const Collection* collection) {
     // Already in our desired state.
@@ -55,7 +57,7 @@ bool WorkingSetCommon::fetchAndInvalidateRecordId(OperationContext* txn,
     }
 
     // Do the fetch, invalidate the DL.
-    member->obj = collection->docFor(txn, member->recordId);
+    member->obj = collection->docFor(opCtx, member->recordId);
     member->obj.setValue(member->obj.value().getOwned());
     member->recordId = RecordId();
     member->transitionToOwnedObj();
@@ -86,7 +88,7 @@ void WorkingSetCommon::prepareForSnapshotChange(WorkingSet* workingSet) {
 }
 
 // static
-bool WorkingSetCommon::fetch(OperationContext* txn,
+bool WorkingSetCommon::fetch(OperationContext* opCtx,
                              WorkingSet* workingSet,
                              WorkingSetID id,
                              unowned_ptr<SeekableRecordCursor> cursor) {
@@ -105,7 +107,7 @@ bool WorkingSetCommon::fetch(OperationContext* txn,
         return false;
     }
 
-    member->obj = {txn->recoveryUnit()->getSnapshotId(), record->data.releaseToBson()};
+    member->obj = {opCtx->recoveryUnit()->getSnapshotId(), record->data.releaseToBson()};
 
     if (member->isSuspicious) {
         // Make sure that all of the keyData is still valid for this copy of the document.
@@ -142,6 +144,9 @@ BSONObj WorkingSetCommon::buildMemberStatusObject(const Status& status) {
     bob.append("ok", status.isOK() ? 1.0 : 0.0);
     bob.append("code", status.code());
     bob.append("errmsg", status.reason());
+    if (auto extraInfo = status.extraInfo()) {
+        extraInfo->serialize(&bob);
+    }
 
     return bob.obj();
 }
@@ -160,8 +165,7 @@ WorkingSetID WorkingSetCommon::allocateStatusMember(WorkingSet* ws, const Status
 
 // static
 bool WorkingSetCommon::isValidStatusMemberObject(const BSONObj& obj) {
-    return obj.nFields() == 3 && obj.hasField("ok") && obj.hasField("code") &&
-        obj.hasField("errmsg");
+    return obj.hasField("ok") && obj["code"].type() == NumberInt && obj["errmsg"].type() == String;
 }
 
 // static
@@ -188,7 +192,9 @@ void WorkingSetCommon::getStatusMemberObject(const WorkingSet& ws,
 // static
 Status WorkingSetCommon::getMemberObjectStatus(const BSONObj& memberObj) {
     invariant(WorkingSetCommon::isValidStatusMemberObject(memberObj));
-    return Status(ErrorCodes::fromInt(memberObj["code"].numberInt()), memberObj["errmsg"]);
+    return Status(ErrorCodes::Error(memberObj["code"].numberInt()),
+                  memberObj["errmsg"].valueStringData(),
+                  memberObj);
 }
 
 // static
@@ -203,8 +209,7 @@ std::string WorkingSetCommon::toStatusString(const BSONObj& obj) {
         Status unknownStatus(ErrorCodes::UnknownError, "no details available");
         return unknownStatus.toString();
     }
-    Status status(ErrorCodes::fromInt(obj.getIntField("code")), obj.getStringField("errmsg"));
-    return status.toString();
+    return getMemberObjectStatus(obj).toString();
 }
 
 }  // namespace mongo

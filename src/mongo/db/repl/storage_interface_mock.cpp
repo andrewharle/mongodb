@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,64 +40,73 @@
 
 namespace mongo {
 namespace repl {
-void StorageInterfaceMock::startup() {}
-void StorageInterfaceMock::shutdown() {}
-bool StorageInterfaceMock::getInitialSyncFlag(OperationContext* txn) const {
-    stdx::lock_guard<stdx::mutex> lock(_initialSyncFlagMutex);
-    return _initialSyncFlag;
+
+StatusWith<int> StorageInterfaceMock::getRollbackID(OperationContext* opCtx) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (!_rbidInitialized) {
+        return Status(ErrorCodes::NamespaceNotFound, "Rollback ID not initialized");
+    }
+    return _rbid;
 }
 
-void StorageInterfaceMock::setInitialSyncFlag(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_initialSyncFlagMutex);
-    _initialSyncFlag = true;
+StatusWith<int> StorageInterfaceMock::initializeRollbackID(OperationContext* opCtx) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (_rbidInitialized) {
+        return Status(ErrorCodes::NamespaceExists, "Rollback ID already initialized");
+    }
+    _rbidInitialized = true;
+
+    // Start the mock RBID at a very high number to differentiate it from uninitialized RBIDs.
+    _rbid = 100;
+    return _rbid;
 }
 
-void StorageInterfaceMock::clearInitialSyncFlag(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_initialSyncFlagMutex);
-    _initialSyncFlag = false;
+StatusWith<int> StorageInterfaceMock::incrementRollbackID(OperationContext* opCtx) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    if (!_rbidInitialized) {
+        return Status(ErrorCodes::NamespaceNotFound, "Rollback ID not initialized");
+    }
+    _rbid++;
+    return _rbid;
 }
 
-OpTime StorageInterfaceMock::getMinValid(OperationContext* txn) const {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    return _minValid;
+void StorageInterfaceMock::setStableTimestamp(ServiceContext* serviceCtx, Timestamp snapshotName) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    _stableTimestamp = snapshotName;
 }
 
-void StorageInterfaceMock::setMinValid(OperationContext* txn, const OpTime& minValid) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _minValid = minValid;
+void StorageInterfaceMock::setInitialDataTimestamp(ServiceContext* serviceCtx,
+                                                   Timestamp snapshotName) {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    _initialDataTimestamp = snapshotName;
 }
 
-void StorageInterfaceMock::setMinValidToAtLeast(OperationContext* txn, const OpTime& minValid) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _minValid = std::max(_minValid, minValid);
+Timestamp StorageInterfaceMock::getStableTimestamp() const {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return _stableTimestamp;
 }
 
-void StorageInterfaceMock::setOplogDeleteFromPoint(OperationContext* txn,
-                                                   const Timestamp& timestamp) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _oplogDeleteFromPoint = timestamp;
+Timestamp StorageInterfaceMock::getInitialDataTimestamp() const {
+    stdx::lock_guard<stdx::mutex> lock(_mutex);
+    return _initialDataTimestamp;
 }
 
-Timestamp StorageInterfaceMock::getOplogDeleteFromPoint(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    return _oplogDeleteFromPoint;
+Timestamp StorageInterfaceMock::getAllCommittedTimestamp(ServiceContext* serviceCtx) const {
+    return allCommittedTimestamp;
 }
 
-void StorageInterfaceMock::setAppliedThrough(OperationContext* txn, const OpTime& optime) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    _appliedThrough = optime;
+Timestamp StorageInterfaceMock::getOldestOpenReadTimestamp(ServiceContext* serviceCtx) const {
+    return oldestOpenReadTimestamp;
 }
 
-OpTime StorageInterfaceMock::getAppliedThrough(OperationContext* txn) {
-    stdx::lock_guard<stdx::mutex> lock(_minValidBoundariesMutex);
-    return _appliedThrough;
+bool StorageInterfaceMock::supportsDocLocking(ServiceContext* serviceCtx) const {
+    return supportsDocLockingBool;
 }
 
-Status CollectionBulkLoaderMock::init(Collection* coll,
-                                      const std::vector<BSONObj>& secondaryIndexSpecs) {
+Status CollectionBulkLoaderMock::init(const std::vector<BSONObj>& secondaryIndexSpecs) {
     LOG(1) << "CollectionBulkLoaderMock::init called";
     stats->initCalled = true;
-    return initFn(coll, secondaryIndexSpecs);
+    return Status::OK();
 };
 
 Status CollectionBulkLoaderMock::insertDocuments(const std::vector<BSONObj>::const_iterator begin,

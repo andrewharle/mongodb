@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,12 +30,15 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/client/dbclientinterface.h"
 #include "mongo/db/catalog/document_validation.h"
+#include "mongo/db/dbmessage.h"
+#include "mongo/db/ops/write_ops.h"
 #include "mongo/db/ops/write_ops_parsers.h"
+#include "mongo/db/ops/write_ops_parsers_test_helpers.h"
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
+namespace {
 
 TEST(CommandWriteOpsParsers, CommonFields_BypassDocumentValidation) {
     for (BSONElement bypassDocumentValidation : BSON_ARRAY(true << false << 1 << 0 << 1.0 << 0.0)) {
@@ -43,8 +48,12 @@ TEST(CommandWriteOpsParsers, CommonFields_BypassDocumentValidation) {
                         << BSON_ARRAY(BSONObj())
                         << "bypassDocumentValidation"
                         << bypassDocumentValidation);
-        auto op = parseInsertCommand("foo", cmd);
-        ASSERT_EQ(op.bypassDocumentValidation, shouldBypassDocumentValidationForCommand(cmd));
+        for (bool seq : {false, true}) {
+            auto request = toOpMsg("foo", cmd, seq);
+            auto op = InsertOp::parse(request);
+            ASSERT_EQ(op.getWriteCommandBase().getBypassDocumentValidation(),
+                      shouldBypassDocumentValidationForCommand(cmd));
+        }
     }
 }
 
@@ -56,8 +65,11 @@ TEST(CommandWriteOpsParsers, CommonFields_Ordered) {
                         << BSON_ARRAY(BSONObj())
                         << "ordered"
                         << ordered);
-        auto op = parseInsertCommand("foo", cmd);
-        ASSERT_EQ(op.continueOnError, !ordered);
+        for (bool seq : {false, true}) {
+            auto request = toOpMsg("foo", cmd, seq);
+            auto op = InsertOp::parse(request);
+            ASSERT_EQ(op.getWriteCommandBase().getOrdered(), ordered);
+        }
     }
 }
 
@@ -73,66 +85,173 @@ TEST(CommandWriteOpsParsers, CommonFields_IgnoredFields) {
                     << BSONObj()
                     << "writeConcern"
                     << BSONObj());
-    parseInsertCommand("foo", cmd);
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        InsertOp::parse(request);
+    }
 }
 
-TEST(CommandWriteOpsParsers, GarbageFieldsAtTopLevel) {
+TEST(CommandWriteOpsParsers, GarbageFieldsAtTopLevel_Body) {
     auto cmd = BSON("insert"
                     << "bar"
                     << "documents"
                     << BSON_ARRAY(BSONObj())
                     << "GARBAGE"
-                    << 1);
-    ASSERT_THROWS_CODE(parseInsertCommand("foo", cmd), UserException, ErrorCodes::FailedToParse);
+                    << BSON_ARRAY(BSONObj()));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS(InsertOp::parse(request), AssertionException);
+    }
+}
+
+TEST(CommandWriteOpsParsers, ErrorOnDuplicateCommonField) {
+    auto cmd = BSON("insert"
+                    << "bar"
+                    << "documents"
+                    << BSON_ARRAY(BSONObj())
+                    << "documents"
+                    << BSON_ARRAY(BSONObj()));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS(InsertOp::parse(request), AssertionException);
+    }
+}
+
+TEST(CommandWriteOpsParsers, ErrorOnDuplicateCommonFieldBetweenBodyAndSequence) {
+    OpMsgRequest request;
+    request.body = BSON("insert"
+                        << "bar"
+                        << "documents"
+                        << BSON_ARRAY(BSONObj())
+                        << "$db"
+                        << "foo");
+    request.sequences = {{"documents",
+                          {
+                              BSONObj(),
+                          }}};
+
+    ASSERT_THROWS(InsertOp::parse(request), AssertionException);
+}
+
+TEST(CommandWriteOpsParsers, ErrorOnWrongSizeStmtIdsArray) {
+    auto cmd = BSON("insert"
+                    << "bar"
+                    << "documents"
+                    << BSON_ARRAY(BSONObj() << BSONObj())
+                    << "stmtIds"
+                    << BSON_ARRAY(12));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS_CODE(InsertOp::parse(request), AssertionException, ErrorCodes::InvalidLength);
+    }
+}
+
+TEST(CommandWriteOpsParsers, ErrorOnStmtIdSpecifiedTwoWays) {
+    auto cmd = BSON("insert"
+                    << "bar"
+                    << "documents"
+                    << BSON_ARRAY(BSONObj())
+                    << "stmtIds"
+                    << BSON_ARRAY(12)
+                    << "stmtId"
+                    << 13);
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS_CODE(
+            InsertOp::parse(request), AssertionException, ErrorCodes::InvalidOptions);
+    }
 }
 
 TEST(CommandWriteOpsParsers, GarbageFieldsInUpdateDoc) {
     auto cmd = BSON("update"
                     << "bar"
                     << "updates"
-                    << BSON_ARRAY("q" << BSONObj() << "u" << BSONObj() << "GARBAGE" << 1));
-    ASSERT_THROWS_CODE(parseInsertCommand("foo", cmd), UserException, ErrorCodes::FailedToParse);
+                    << BSON_ARRAY(BSON("q" << BSONObj() << "u" << BSONObj() << "GARBAGE" << 1)));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS(UpdateOp::parse(request), AssertionException);
+    }
 }
 
 TEST(CommandWriteOpsParsers, GarbageFieldsInDeleteDoc) {
     auto cmd = BSON("delete"
                     << "bar"
                     << "deletes"
-                    << BSON_ARRAY("q" << BSONObj() << "limit" << 0 << "GARBAGE" << 1));
+                    << BSON_ARRAY(BSON("q" << BSONObj() << "limit" << 0 << "GARBAGE" << 1)));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS(DeleteOp::parse(request), AssertionException);
+    }
 }
 
 TEST(CommandWriteOpsParsers, BadCollationFieldInUpdateDoc) {
     auto cmd = BSON("update"
                     << "bar"
                     << "updates"
-                    << BSON_ARRAY("q" << BSONObj() << "u" << BSONObj() << "collation" << 1));
-    ASSERT_THROWS_CODE(parseInsertCommand("foo", cmd), UserException, ErrorCodes::FailedToParse);
+                    << BSON_ARRAY(BSON("q" << BSONObj() << "u" << BSONObj() << "collation" << 1)));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS_CODE(UpdateOp::parse(request), AssertionException, ErrorCodes::TypeMismatch);
+    }
 }
 
 TEST(CommandWriteOpsParsers, BadCollationFieldInDeleteDoc) {
     auto cmd = BSON("delete"
                     << "bar"
                     << "deletes"
-                    << BSON_ARRAY("q" << BSONObj() << "limit" << 0 << "collation" << 1));
-    ASSERT_THROWS_CODE(parseInsertCommand("foo", cmd), UserException, ErrorCodes::FailedToParse);
+                    << BSON_ARRAY(BSON("q" << BSONObj() << "limit" << 0 << "collation" << 1)));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS_CODE(DeleteOp::parse(request), AssertionException, ErrorCodes::TypeMismatch);
+    }
+}
+
+TEST(CommandWriteOpsParsers, BadArrayFiltersFieldInUpdateDoc) {
+    auto cmd = BSON("update"
+                    << "bar"
+                    << "updates"
+                    << BSON_ARRAY(BSON("q" << BSONObj() << "u" << BSONObj() << "arrayFilters"
+                                           << "bad")));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS(UpdateOp::parse(request), AssertionException);
+    }
+}
+
+TEST(CommandWriteOpsParsers, BadArrayFiltersElementInUpdateDoc) {
+    auto cmd = BSON("update"
+                    << "bar"
+                    << "updates"
+                    << BSON_ARRAY(BSON("q" << BSONObj() << "u" << BSONObj() << "arrayFilters"
+                                           << BSON_ARRAY("bad"))));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg("foo", cmd, seq);
+        ASSERT_THROWS_CODE(UpdateOp::parse(request), AssertionException, ErrorCodes::TypeMismatch);
+    }
 }
 
 TEST(CommandWriteOpsParsers, SingleInsert) {
     const auto ns = NamespaceString("test", "foo");
     const BSONObj obj = BSON("x" << 1);
     auto cmd = BSON("insert" << ns.coll() << "documents" << BSON_ARRAY(obj));
-    const auto op = parseInsertCommand(ns.db(), cmd);
-    ASSERT_EQ(op.ns.ns(), ns.ns());
-    ASSERT(!op.bypassDocumentValidation);
-    ASSERT(!op.continueOnError);
-    ASSERT_EQ(op.documents.size(), 1u);
-    ASSERT_BSONOBJ_EQ(op.documents[0], obj);
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg(ns.db(), cmd, seq);
+        const auto op = InsertOp::parse(request);
+        ASSERT_EQ(op.getNamespace().ns(), ns.ns());
+        ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+        ASSERT(op.getWriteCommandBase().getOrdered());
+        ASSERT_EQ(op.getDocuments().size(), 1u);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[0], obj);
+    }
 }
 
 TEST(CommandWriteOpsParsers, EmptyMultiInsertFails) {
     const auto ns = NamespaceString("test", "foo");
     auto cmd = BSON("insert" << ns.coll() << "documents" << BSONArray());
-    ASSERT_THROWS_CODE(parseInsertCommand(ns.db(), cmd), UserException, ErrorCodes::InvalidLength);
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg(ns.db(), cmd, seq);
+        ASSERT_THROWS_CODE(InsertOp::parse(request), AssertionException, ErrorCodes::InvalidLength);
+    }
 }
 
 TEST(CommandWriteOpsParsers, RealMultiInsert) {
@@ -140,13 +259,58 @@ TEST(CommandWriteOpsParsers, RealMultiInsert) {
     const BSONObj obj0 = BSON("x" << 0);
     const BSONObj obj1 = BSON("x" << 1);
     auto cmd = BSON("insert" << ns.coll() << "documents" << BSON_ARRAY(obj0 << obj1));
-    const auto op = parseInsertCommand(ns.db(), cmd);
-    ASSERT_EQ(op.ns.ns(), ns.ns());
-    ASSERT(!op.bypassDocumentValidation);
-    ASSERT(!op.continueOnError);
-    ASSERT_EQ(op.documents.size(), 2u);
-    ASSERT_BSONOBJ_EQ(op.documents[0], obj0);
-    ASSERT_BSONOBJ_EQ(op.documents[1], obj1);
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg(ns.db(), cmd, seq);
+        const auto op = InsertOp::parse(request);
+        ASSERT_EQ(op.getNamespace().ns(), ns.ns());
+        ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+        ASSERT(op.getWriteCommandBase().getOrdered());
+        ASSERT_EQ(op.getDocuments().size(), 2u);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[0], obj0);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[1], obj1);
+        ASSERT_EQ(0, write_ops::getStmtIdForWriteAt(op, 0));
+        ASSERT_EQ(1, write_ops::getStmtIdForWriteAt(op, 1));
+    }
+}
+
+TEST(CommandWriteOpsParsers, MultiInsertWithStmtId) {
+    const auto ns = NamespaceString("test", "foo");
+    const BSONObj obj0 = BSON("x" << 0);
+    const BSONObj obj1 = BSON("x" << 1);
+    auto cmd =
+        BSON("insert" << ns.coll() << "documents" << BSON_ARRAY(obj0 << obj1) << "stmtId" << 10);
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg(ns.db(), cmd, seq);
+        const auto op = InsertOp::parse(request);
+        ASSERT_EQ(op.getNamespace().ns(), ns.ns());
+        ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+        ASSERT(op.getWriteCommandBase().getOrdered());
+        ASSERT_EQ(op.getDocuments().size(), 2u);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[0], obj0);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[1], obj1);
+        ASSERT_EQ(10, write_ops::getStmtIdForWriteAt(op, 0));
+        ASSERT_EQ(11, write_ops::getStmtIdForWriteAt(op, 1));
+    }
+}
+
+TEST(CommandWriteOpsParsers, MultiInsertWithStmtIdsArray) {
+    const auto ns = NamespaceString("test", "foo");
+    const BSONObj obj0 = BSON("x" << 0);
+    const BSONObj obj1 = BSON("x" << 1);
+    auto cmd = BSON("insert" << ns.coll() << "documents" << BSON_ARRAY(obj0 << obj1) << "stmtIds"
+                             << BSON_ARRAY(15 << 17));
+    for (bool seq : {false, true}) {
+        auto request = toOpMsg(ns.db(), cmd, seq);
+        const auto op = InsertOp::parse(request);
+        ASSERT_EQ(op.getNamespace().ns(), ns.ns());
+        ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+        ASSERT(op.getWriteCommandBase().getOrdered());
+        ASSERT_EQ(op.getDocuments().size(), 2u);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[0], obj0);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[1], obj1);
+        ASSERT_EQ(15, write_ops::getStmtIdForWriteAt(op, 0));
+        ASSERT_EQ(17, write_ops::getStmtIdForWriteAt(op, 1));
+    }
 }
 
 TEST(CommandWriteOpsParsers, Update) {
@@ -155,25 +319,35 @@ TEST(CommandWriteOpsParsers, Update) {
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
     const BSONObj collation = BSON("locale"
                                    << "en_US");
+    const BSONObj arrayFilter = BSON("i" << 0);
     for (bool upsert : {false, true}) {
         for (bool multi : {false, true}) {
-            auto cmd = BSON("update" << ns.coll() << "updates"
-                                     << BSON_ARRAY(BSON("q" << query << "u" << update << "collation"
-                                                            << collation
-                                                            << "upsert"
-                                                            << upsert
-                                                            << "multi"
-                                                            << multi)));
-            auto op = parseUpdateCommand(ns.db(), cmd);
-            ASSERT_EQ(op.ns.ns(), ns.ns());
-            ASSERT(!op.bypassDocumentValidation);
-            ASSERT_EQ(op.continueOnError, false);
-            ASSERT_EQ(op.updates.size(), 1u);
-            ASSERT_BSONOBJ_EQ(op.updates[0].query, query);
-            ASSERT_BSONOBJ_EQ(op.updates[0].update, update);
-            ASSERT_BSONOBJ_EQ(op.updates[0].collation, collation);
-            ASSERT_EQ(op.updates[0].upsert, upsert);
-            ASSERT_EQ(op.updates[0].multi, multi);
+            auto rawUpdate =
+                BSON("q" << query << "u" << update << "arrayFilters" << BSON_ARRAY(arrayFilter)
+                         << "multi"
+                         << multi
+                         << "upsert"
+                         << upsert
+                         << "collation"
+                         << collation);
+            auto cmd = BSON("update" << ns.coll() << "updates" << BSON_ARRAY(rawUpdate));
+            for (bool seq : {false, true}) {
+                auto request = toOpMsg(ns.db(), cmd, seq);
+                auto op = UpdateOp::parse(request);
+                ASSERT_EQ(op.getNamespace().ns(), ns.ns());
+                ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+                ASSERT_EQ(op.getWriteCommandBase().getOrdered(), true);
+                ASSERT_EQ(op.getUpdates().size(), 1u);
+                ASSERT_BSONOBJ_EQ(op.getUpdates()[0].getQ(), query);
+                ASSERT_BSONOBJ_EQ(op.getUpdates()[0].getU(), update);
+                ASSERT_BSONOBJ_EQ(write_ops::collationOf(op.getUpdates()[0]), collation);
+                ASSERT_EQ(write_ops::arrayFiltersOf(op.getUpdates()[0]).size(), 1u);
+                ASSERT_BSONOBJ_EQ(write_ops::arrayFiltersOf(op.getUpdates()[0]).front(),
+                                  arrayFilter);
+                ASSERT_EQ(op.getUpdates()[0].getUpsert(), upsert);
+                ASSERT_EQ(op.getUpdates()[0].getMulti(), multi);
+                ASSERT_BSONOBJ_EQ(op.getUpdates()[0].toBSON(), rawUpdate);
+            }
         }
     }
 }
@@ -184,18 +358,21 @@ TEST(CommandWriteOpsParsers, Remove) {
     const BSONObj collation = BSON("locale"
                                    << "en_US");
     for (bool multi : {false, true}) {
-        auto cmd =
-            BSON("delete" << ns.coll() << "deletes"
-                          << BSON_ARRAY(BSON("q" << query << "collation" << collation << "limit"
-                                                 << (multi ? 0 : 1))));
-        auto op = parseDeleteCommand(ns.db(), cmd);
-        ASSERT_EQ(op.ns.ns(), ns.ns());
-        ASSERT(!op.bypassDocumentValidation);
-        ASSERT_EQ(op.continueOnError, false);
-        ASSERT_EQ(op.deletes.size(), 1u);
-        ASSERT_BSONOBJ_EQ(op.deletes[0].query, query);
-        ASSERT_BSONOBJ_EQ(op.deletes[0].collation, collation);
-        ASSERT_EQ(op.deletes[0].multi, multi);
+        auto rawDelete =
+            BSON("q" << query << "limit" << (multi ? 0 : 1) << "collation" << collation);
+        auto cmd = BSON("delete" << ns.coll() << "deletes" << BSON_ARRAY(rawDelete));
+        for (bool seq : {false, true}) {
+            auto request = toOpMsg(ns.db(), cmd, seq);
+            auto op = DeleteOp::parse(request);
+            ASSERT_EQ(op.getNamespace().ns(), ns.ns());
+            ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+            ASSERT_EQ(op.getWriteCommandBase().getOrdered(), true);
+            ASSERT_EQ(op.getDeletes().size(), 1u);
+            ASSERT_BSONOBJ_EQ(op.getDeletes()[0].getQ(), query);
+            ASSERT_BSONOBJ_EQ(write_ops::collationOf(op.getDeletes()[0]), collation);
+            ASSERT_EQ(op.getDeletes()[0].getMulti(), multi);
+            ASSERT_BSONOBJ_EQ(op.getDeletes()[0].toBSON(), rawDelete);
+        }
     }
 }
 
@@ -205,81 +382,38 @@ TEST(CommandWriteOpsParsers, RemoveErrorsWithBadLimit) {
         auto cmd = BSON("delete"
                         << "bar"
                         << "deletes"
-                        << BSON_ARRAY("q" << BSONObj() << "limit" << limit));
-        ASSERT_THROWS_CODE(
-            parseInsertCommand("foo", cmd), UserException, ErrorCodes::FailedToParse);
+                        << BSON_ARRAY(BSON("q" << BSONObj() << "limit" << limit)));
+        for (bool seq : {false, true}) {
+            auto request = toOpMsg("foo", cmd, seq);
+            ASSERT_THROWS_CODE(
+                DeleteOp::parse(request), AssertionException, ErrorCodes::FailedToParse);
+        }
     }
 }
-
-namespace {
-/**
- * A mock DBClient that just captures the Message that is sent for legacy writes.
- */
-class MyMockDBClient final : public DBClientBase {
-public:
-    Message message;  // The last message sent.
-
-    void say(Message& toSend, bool isRetry = false, std::string* actualServer = nullptr) {
-        message = std::move(toSend);
-    }
-
-    // The rest of these are just filling out the pure-virtual parts of the interface.
-    bool lazySupported() const {
-        return false;
-    }
-    std::string getServerAddress() const {
-        return "";
-    }
-    std::string toString() const {
-        return "";
-    }
-    bool call(Message& toSend, Message& response, bool assertOk, std::string* actualServer) {
-        invariant(!"call() not implemented");
-    }
-    virtual int getMinWireVersion() {
-        return 0;
-    }
-    virtual int getMaxWireVersion() {
-        return 0;
-    }
-    virtual bool isFailed() const {
-        return false;
-    }
-    virtual bool isStillConnected() {
-        return true;
-    }
-    virtual double getSoTimeout() const {
-        return 0;
-    }
-    virtual ConnectionString::ConnectionType type() const {
-        return ConnectionString::MASTER;
-    }
-};
-}  // namespace
 
 TEST(LegacyWriteOpsParsers, SingleInsert) {
     const std::string ns = "test.foo";
     const BSONObj obj = BSON("x" << 1);
     for (bool continueOnError : {false, true}) {
-        MyMockDBClient client;
-        client.insert(ns, obj, continueOnError ? InsertOption_ContinueOnError : 0);
-        const auto op = parseLegacyInsert(client.message);
-        ASSERT_EQ(op.ns.ns(), ns);
-        ASSERT(!op.bypassDocumentValidation);
-        ASSERT_EQ(op.continueOnError, continueOnError);
-        ASSERT_EQ(op.documents.size(), 1u);
-        ASSERT_BSONOBJ_EQ(op.documents[0], obj);
+        auto message =
+            makeInsertMessage(ns, obj, continueOnError ? InsertOption_ContinueOnError : 0);
+        const auto op = InsertOp::parseLegacy(message);
+        ASSERT_EQ(op.getNamespace().ns(), ns);
+        ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+        ASSERT_EQ(!op.getWriteCommandBase().getOrdered(), continueOnError);
+        ASSERT_EQ(op.getDocuments().size(), 1u);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[0], obj);
     }
 }
 
 TEST(LegacyWriteOpsParsers, EmptyMultiInsertFails) {
     const std::string ns = "test.foo";
     for (bool continueOnError : {false, true}) {
-        MyMockDBClient client;
-        client.insert(
-            ns, std::vector<BSONObj>{}, continueOnError ? InsertOption_ContinueOnError : 0);
+        auto objs = std::vector<BSONObj>{};
+        auto message = makeInsertMessage(
+            ns, objs.data(), objs.size(), (continueOnError ? InsertOption_ContinueOnError : 0));
         ASSERT_THROWS_CODE(
-            parseLegacyInsert(client.message), UserException, ErrorCodes::InvalidLength);
+            InsertOp::parseLegacy(message), AssertionException, ErrorCodes::InvalidLength);
     }
 }
 
@@ -288,15 +422,16 @@ TEST(LegacyWriteOpsParsers, RealMultiInsert) {
     const BSONObj obj0 = BSON("x" << 0);
     const BSONObj obj1 = BSON("x" << 1);
     for (bool continueOnError : {false, true}) {
-        MyMockDBClient client;
-        client.insert(ns, {obj0, obj1}, continueOnError ? InsertOption_ContinueOnError : 0);
-        const auto op = parseLegacyInsert(client.message);
-        ASSERT_EQ(op.ns.ns(), ns);
-        ASSERT(!op.bypassDocumentValidation);
-        ASSERT_EQ(op.continueOnError, continueOnError);
-        ASSERT_EQ(op.documents.size(), 2u);
-        ASSERT_BSONOBJ_EQ(op.documents[0], obj0);
-        ASSERT_BSONOBJ_EQ(op.documents[1], obj1);
+        auto objs = std::vector<BSONObj>{obj0, obj1};
+        auto message = makeInsertMessage(
+            ns, objs.data(), objs.size(), continueOnError ? InsertOption_ContinueOnError : 0);
+        const auto op = InsertOp::parseLegacy(message);
+        ASSERT_EQ(op.getNamespace().ns(), ns);
+        ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+        ASSERT_EQ(!op.getWriteCommandBase().getOrdered(), continueOnError);
+        ASSERT_EQ(op.getDocuments().size(), 2u);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[0], obj0);
+        ASSERT_BSONOBJ_EQ(op.getDocuments()[1], obj1);
     }
 }
 
@@ -306,17 +441,20 @@ TEST(LegacyWriteOpsParsers, Update) {
     const BSONObj update = BSON("$inc" << BSON("x" << 1));
     for (bool upsert : {false, true}) {
         for (bool multi : {false, true}) {
-            MyMockDBClient client;
-            client.update(ns, query, update, upsert, multi);
-            const auto op = parseLegacyUpdate(client.message);
-            ASSERT_EQ(op.ns.ns(), ns);
-            ASSERT(!op.bypassDocumentValidation);
-            ASSERT_EQ(op.continueOnError, false);
-            ASSERT_EQ(op.updates.size(), 1u);
-            ASSERT_BSONOBJ_EQ(op.updates[0].query, query);
-            ASSERT_BSONOBJ_EQ(op.updates[0].update, update);
-            ASSERT_EQ(op.updates[0].upsert, upsert);
-            ASSERT_EQ(op.updates[0].multi, multi);
+            auto message = makeUpdateMessage(ns,
+                                             query,
+                                             update,
+                                             (upsert ? UpdateOption_Upsert : 0) |
+                                                 (multi ? UpdateOption_Multi : 0));
+            const auto op = UpdateOp::parseLegacy(message);
+            ASSERT_EQ(op.getNamespace().ns(), ns);
+            ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+            ASSERT_EQ(op.getWriteCommandBase().getOrdered(), true);
+            ASSERT_EQ(op.getUpdates().size(), 1u);
+            ASSERT_BSONOBJ_EQ(op.getUpdates()[0].getQ(), query);
+            ASSERT_BSONOBJ_EQ(op.getUpdates()[0].getU(), update);
+            ASSERT_EQ(op.getUpdates()[0].getUpsert(), upsert);
+            ASSERT_EQ(op.getUpdates()[0].getMulti(), multi);
         }
     }
 }
@@ -325,15 +463,16 @@ TEST(LegacyWriteOpsParsers, Remove) {
     const std::string ns = "test.foo";
     const BSONObj query = BSON("x" << 1);
     for (bool multi : {false, true}) {
-        MyMockDBClient client;
-        client.remove(ns, query, multi ? 0 : RemoveOption_JustOne);
-        const auto op = parseLegacyDelete(client.message);
-        ASSERT_EQ(op.ns.ns(), ns);
-        ASSERT(!op.bypassDocumentValidation);
-        ASSERT_EQ(op.continueOnError, false);
-        ASSERT_EQ(op.deletes.size(), 1u);
-        ASSERT_BSONOBJ_EQ(op.deletes[0].query, query);
-        ASSERT_EQ(op.deletes[0].multi, multi);
+        auto message = makeRemoveMessage(ns, query, (multi ? 0 : RemoveOption_JustOne));
+        const auto op = DeleteOp::parseLegacy(message);
+        ASSERT_EQ(op.getNamespace().ns(), ns);
+        ASSERT(!op.getWriteCommandBase().getBypassDocumentValidation());
+        ASSERT_EQ(op.getWriteCommandBase().getOrdered(), true);
+        ASSERT_EQ(op.getDeletes().size(), 1u);
+        ASSERT_BSONOBJ_EQ(op.getDeletes()[0].getQ(), query);
+        ASSERT_EQ(op.getDeletes()[0].getMulti(), multi);
     }
 }
-}
+
+}  // namespace
+}  // namespace mongo

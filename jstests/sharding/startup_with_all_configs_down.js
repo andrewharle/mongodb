@@ -5,6 +5,11 @@
 // This test involves restarting a standalone shard, so cannot be run on ephemeral storage engines.
 // A restarted standalone will lose all data when using an ephemeral storage engine.
 // @tags: [requires_persistence]
+
+// The UUID consistency check uses connections to shards cached on the ShardingTest object, but this
+// test restarts a shard, so the cached connection is not usable.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     "use strict";
 
@@ -18,7 +23,8 @@
         MongoRunner.runMongod(shard);
     }
 
-    var st = new ShardingTest({shards: 2});
+    // TODO: SERVER-33830 remove shardAsReplicaSet: false
+    var st = new ShardingTest({shards: 2, other: {shardAsReplicaSet: false}});
 
     jsTestLog("Setting up initial data");
 
@@ -27,12 +33,12 @@
     }
 
     assert.commandWorked(st.s0.adminCommand({enableSharding: 'test'}));
-    st.ensurePrimaryShard('test', 'shard0000');
+    st.ensurePrimaryShard('test', st.shard0.shardName);
 
     assert.commandWorked(st.s0.adminCommand({shardCollection: 'test.foo', key: {_id: 1}}));
     assert.commandWorked(st.s0.adminCommand({split: 'test.foo', find: {_id: 50}}));
     assert.commandWorked(
-        st.s0.adminCommand({moveChunk: 'test.foo', find: {_id: 75}, to: 'shard0001'}));
+        st.s0.adminCommand({moveChunk: 'test.foo', find: {_id: 75}, to: st.shard1.shardName}));
 
     // Make sure the pre-existing mongos already has the routing information loaded into memory
     assert.eq(100, st.s.getDB('test').foo.find().itcount());
@@ -92,4 +98,5 @@
     assert.eq(100, newMongosConn.getDB('test').foo.find().itcount());
 
     st.stop();
+    MongoRunner.stopMongos(newMongosInfo);
 }());

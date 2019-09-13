@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2012 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,14 +33,17 @@
 #include "mongo/db/geo/geoparser.h"
 
 #include <cmath>
+#include <memory>
 #include <string>
 #include <vector>
 
 #include "mongo/db/bson/dotted_path_support.h"
 #include "mongo/db/geo/shapes.h"
 #include "mongo/db/jsobj.h"
+#include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/transitional_tools_do_not_use/vector_spooling.h"
 #include "third_party/s2/s2polygonbuilder.h"
 
 #define BAD_VALUE(error) Status(ErrorCodes::BadValue, ::mongoutils::str::stream() << error)
@@ -180,7 +185,7 @@ static Status parseGeoJSONPolygonCoordinates(const BSONElement& elem,
         return BAD_VALUE("Polygon coordinates must be an array");
     }
 
-    OwnedPointerVector<S2Loop> loops;
+    std::vector<std::unique_ptr<S2Loop>> loops;
     Status status = Status::OK();
     string err;
 
@@ -209,8 +214,8 @@ static Status parseGeoJSONPolygonCoordinates(const BSONElement& elem,
                 "Loop must have at least 3 different vertices: " << coordinateElt.toString(false));
         }
 
-        S2Loop* loop = new S2Loop(points);
-        loops.push_back(loop);
+        loops.push_back(stdx::make_unique<S2Loop>(points));
+        S2Loop* loop = loops.back().get();
 
         // Check whether this loop is valid.
         // 1. At least 3 vertices.
@@ -239,18 +244,23 @@ static Status parseGeoJSONPolygonCoordinates(const BSONElement& elem,
         return BAD_VALUE("Polygon has no loops.");
     }
 
+
     // Check if the given loops form a valid polygon.
     // 1. If a loop contains an edge AB, then no other loop may contain AB or BA.
     // 2. No loop covers more than half of the sphere.
     // 3. No two loops cross.
-    if (!skipValidation && !S2Polygon::IsValid(loops.vector(), &err))
+    if (!skipValidation &&
+        !S2Polygon::IsValid(transitional_tools_do_not_use::unspool_vector(loops), &err))
         return BAD_VALUE("Polygon isn't valid: " << err << " " << elem.toString(false));
 
     // Given all loops are valid / normalized and S2Polygon::IsValid() above returns true.
     // The polygon must be valid. See S2Polygon member function IsValid().
 
-    // Transfer ownership of the loops and clears loop vector.
-    out->Init(&loops.mutableVector());
+    {
+        // Transfer ownership of the loops and clears loop vector.
+        std::vector<S2Loop*> rawLoops = transitional_tools_do_not_use::leak_vector(loops);
+        out->Init(&rawLoops);
+    }
 
     if (skipValidation)
         return Status::OK();
@@ -715,7 +725,7 @@ Status GeoParser::parseGeometryCollection(const BSONObj& obj,
                 geoObj, skipValidation, out->multiPolygons.mutableVector().back());
         } else {
             // Should not reach here.
-            invariant(false);
+            MONGO_UNREACHABLE;
         }
 
         // Check parsing result.

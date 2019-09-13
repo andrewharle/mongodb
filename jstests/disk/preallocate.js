@@ -1,5 +1,8 @@
 // check that there is preallocation, and there are 2 files
 
+// Preallocation is an mmap only behavior.
+// @tags: [requires_mmapv1]
+
 var baseName = "jstests_preallocate";
 
 var m = MongoRunner.runMongod({});
@@ -44,3 +47,5 @@ m.getDB(baseName).createCollection(baseName + "2");
 sleep(2000);  // give prealloc a chance
 
 assert.eq(size, getTotalNonLocalNonAdminSize());
+
+MongoRunner.stopMongod(m);

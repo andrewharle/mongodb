@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -46,8 +48,9 @@
 
 namespace mongo {
 namespace {
-using std::vector;
 using boost::intrusive_ptr;
+using std::list;
+using std::vector;
 
 /**
  * Fixture to test that $sortByCount returns a DocumentSourceGroup and DocumentSourceSort.
@@ -55,20 +58,20 @@ using boost::intrusive_ptr;
 class SortByCountReturnsGroupAndSort : public AggregationContextFixture {
 public:
     void testCreateFromBsonResult(BSONObj sortByCountSpec, Value expectedGroupExplain) {
-        vector<intrusive_ptr<DocumentSource>> result =
+        list<intrusive_ptr<DocumentSource>> result =
             DocumentSourceSortByCount::createFromBson(sortByCountSpec.firstElement(), getExpCtx());
 
         ASSERT_EQUALS(result.size(), 2UL);
 
-        const auto* groupStage = dynamic_cast<DocumentSourceGroup*>(result[0].get());
+        const auto* groupStage = dynamic_cast<DocumentSourceGroup*>(result.front().get());
         ASSERT(groupStage);
 
-        const auto* sortStage = dynamic_cast<DocumentSourceSort*>(result[1].get());
+        const auto* sortStage = dynamic_cast<DocumentSourceSort*>(result.back().get());
         ASSERT(sortStage);
 
         // Serialize the DocumentSourceGroup and DocumentSourceSort from $sortByCount so that we can
         // check the explain output to make sure $group and $sort have the correct fields.
-        const bool explain = true;
+        const auto explain = ExplainOptions::Verbosity::kQueryPlanner;
         vector<Value> explainedStages;
         groupStage->serializeToArray(explainedStages, explain);
         sortStage->serializeToArray(explainedStages, explain);
@@ -87,7 +90,7 @@ TEST_F(SortByCountReturnsGroupAndSort, ExpressionFieldPathSpec) {
     BSONObj spec = BSON("$sortByCount"
                         << "$x");
     Value expectedGroupExplain =
-        Value{Document{{"_id", "$x"}, {"count", Document{{"$sum", Document{{"$const", 1}}}}}}};
+        Value{Document{{"_id", "$x"_sd}, {"count", Document{{"$sum", Document{{"$const", 1}}}}}}};
     testCreateFromBsonResult(spec, expectedGroupExplain);
 }
 
@@ -111,7 +114,7 @@ TEST_F(SortByCountReturnsGroupAndSort, ExpressionInObjectSpec) {
  */
 class InvalidSortByCountSpec : public AggregationContextFixture {
 public:
-    vector<intrusive_ptr<DocumentSource>> createSortByCount(BSONObj sortByCountSpec) {
+    list<intrusive_ptr<DocumentSource>> createSortByCount(BSONObj sortByCountSpec) {
         auto specElem = sortByCountSpec.firstElement();
         return DocumentSourceSortByCount::createFromBson(specElem, getExpCtx());
     }
@@ -119,22 +122,22 @@ public:
 
 TEST_F(InvalidSortByCountSpec, NonObjectNonStringSpec) {
     BSONObj spec = BSON("$sortByCount" << 1);
-    ASSERT_THROWS_CODE(createSortByCount(spec), UserException, 40149);
+    ASSERT_THROWS_CODE(createSortByCount(spec), AssertionException, 40149);
 
     spec = BSON("$sortByCount" << BSONNULL);
-    ASSERT_THROWS_CODE(createSortByCount(spec), UserException, 40149);
+    ASSERT_THROWS_CODE(createSortByCount(spec), AssertionException, 40149);
 }
 
 TEST_F(InvalidSortByCountSpec, NonExpressionInObjectSpec) {
     BSONObj spec = BSON("$sortByCount" << BSON("field1"
                                                << "$x"));
-    ASSERT_THROWS_CODE(createSortByCount(spec), UserException, 40147);
+    ASSERT_THROWS_CODE(createSortByCount(spec), AssertionException, 40147);
 }
 
 TEST_F(InvalidSortByCountSpec, NonFieldPathStringSpec) {
     BSONObj spec = BSON("$sortByCount"
                         << "test");
-    ASSERT_THROWS_CODE(createSortByCount(spec), UserException, 40148);
+    ASSERT_THROWS_CODE(createSortByCount(spec), AssertionException, 40148);
 }
 
 }  // namespace

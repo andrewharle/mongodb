@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,7 +35,9 @@
 
 #include "mongo/base/status.h"
 #include "mongo/db/repl/repl_set_tag.h"
+#include "mongo/db/repl/split_horizon.h"
 #include "mongo/util/net/hostandport.h"
+#include "mongo/util/string_map.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
@@ -58,26 +62,20 @@ public:
     static const std::string kArbiterOnlyFieldName;
     static const std::string kBuildIndexesFieldName;
     static const std::string kTagsFieldName;
+    static const std::string kHorizonsFieldName;
     static const std::string kInternalVoterTagName;
     static const std::string kInternalElectableTagName;
     static const std::string kInternalAllTagName;
 
     /**
-     * Default constructor, produces a MemberConfig in an undefined state.
-     * Must successfully call initialze() before calling validate() or the
-     * accessors.
-     */
-    MemberConfig() : _slaveDelay(0) {}
-
-    /**
-     * Initializes this MemberConfig from the contents of "mcfg".
+     * Construct a MemberConfig from the contents of "mcfg".
      *
      * If "mcfg" describes any tags, builds ReplSetTags for this
      * configuration using "tagConfig" as the tag's namespace. This may
      * have the effect of altering "tagConfig" when "mcfg" describes a
      * tag not previously added to "tagConfig".
      */
-    Status initialize(const BSONObj& mcfg, ReplSetTagConfig* tagConfig);
+    MemberConfig(const BSONObj& mcfg, ReplSetTagConfig* tagConfig);
 
     /**
      * Performs basic consistency checks on the member configuration.
@@ -95,8 +93,32 @@ public:
      * Gets the canonical name of this member, by which other members and clients
      * will contact it.
      */
-    const HostAndPort& getHostAndPort() const {
-        return _host;
+    const HostAndPort& getHostAndPort(
+        const std::string& horizon = SplitHorizon::kDefaultHorizon) const {
+        return _splitHorizon.getHostAndPort(horizon);
+    }
+
+    /**
+     * Gets the mapping of horizon names to `HostAndPort` for this replica set member.
+     */
+    const auto& getHorizonMappings() const {
+        return _splitHorizon.getForwardMappings();
+    }
+
+    /**
+     * Gets the mapping of host names (not `HostAndPort`) to horizon names for this replica set
+     * member.
+     */
+    const auto& getHorizonReverseHostMappings() const {
+        return _splitHorizon.getReverseHostMappings();
+    }
+
+    /**
+     * Gets the horizon name for which the parameters (captured during the first `isMaster`)
+     * correspond.
+     */
+    StringData determineHorizon(const SplitHorizon::Parameters& params) const {
+        return _splitHorizon.determineHorizon(params);
     }
 
     /**
@@ -190,8 +212,11 @@ public:
     BSONObj toBSON(const ReplSetTagConfig& tagConfig) const;
 
 private:
+    const HostAndPort& _host() const {
+        return getHostAndPort(SplitHorizon::kDefaultHorizon);
+    }
+
     int _id;
-    HostAndPort _host;
     double _priority;  // 0 means can never be primary
     int _votes;        // Can this member vote? Only 0 and 1 are valid.  Default 1.
     bool _arbiterOnly;
@@ -199,6 +224,8 @@ private:
     bool _hidden;                   // if set, don't advertise to drivers in isMaster.
     bool _buildIndexes;             // if false, do not create any non-_id indexes
     std::vector<ReplSetTag> _tags;  // tagging for data center, rack, etc.
+
+    SplitHorizon _splitHorizon;
 };
 
 }  // namespace repl

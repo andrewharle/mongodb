@@ -19,8 +19,28 @@
             },
             runCommand: function(db, cmd, opts) {
                 commandsRan.push({db: db, cmd: cmd, opts: opts});
-            }
+                return {ok: 1};
+            },
+            getMinWireVersion: function() {
+                return mongo.getMinWireVersion();
+            },
+            getMaxWireVersion: function() {
+                return mongo.getMaxWireVersion();
+            },
+            isReplicaSetMember: function() {
+                return mongo.isReplicaSetMember();
+            },
+            isMongos: function() {
+                return mongo.isMongos();
+            },
+            isCausalConsistency: function() {
+                return false;
+            },
+            getClusterTime: function() {
+                return null;
+            },
         };
+        db._session = new _DummyDriverSession(db._mongo);
 
         db.runReadCommand({ping: 1});
         assert.eq(commandsRan.length, 1);
@@ -30,6 +50,7 @@
 
     } finally {
         db._mongo = mongo;
+        db._session = new _DummyDriverSession(mongo);
     }
 
 })();

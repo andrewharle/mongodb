@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -32,112 +32,94 @@
  *	method.  This file is used to populate the API reference with code
  *	fragments.
  */
+#include <test_util.h>
 
-#include <sys/stat.h>
-
-#include <inttypes.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-
-#ifndef _WIN32
-#include <unistd.h>
-#else
-#include "windows_shim.h"
-#endif
-
-#include <wiredtiger.h>
-
-int add_collator(WT_CONNECTION *conn);
-int add_extractor(WT_CONNECTION *conn);
-int backup(WT_SESSION *session);
-int checkpoint_ops(WT_SESSION *session);
-int connection_ops(WT_CONNECTION *conn);
-int cursor_ops(WT_SESSION *session);
-int cursor_search_near(WT_CURSOR *cursor);
-int cursor_statistics(WT_SESSION *session);
-int pack_ops(WT_SESSION *session);
-int named_snapshot_ops(WT_SESSION *session);
-int session_ops(WT_SESSION *session);
-int transaction_ops(WT_CONNECTION *conn, WT_SESSION *session);
-
-static const char * const progname = "ex_all";
 static const char *home;
 
-int
+static void add_collator(WT_CONNECTION *conn);
+static void add_extractor(WT_CONNECTION *conn);
+static void backup(WT_SESSION *session);
+static void checkpoint_ops(WT_SESSION *session);
+static void connection_ops(WT_CONNECTION *conn);
+static int  cursor_ops(WT_SESSION *session);
+static void cursor_search_near(WT_CURSOR *cursor);
+static void cursor_statistics(WT_SESSION *session);
+static void named_snapshot_ops(WT_SESSION *session);
+static void pack_ops(WT_SESSION *session);
+static void session_ops(WT_SESSION *session);
+static void transaction_ops(WT_SESSION *session);
+
+static int
 cursor_ops(WT_SESSION *session)
 {
 	WT_CURSOR *cursor;
 	int ret;
 
 	/*! [Open a cursor] */
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
 	/*! [Open a cursor] */
 
 	/*! [Open a cursor on the metadata] */
-	ret = session->open_cursor(
-	    session, "metadata:", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "metadata:", NULL, NULL, &cursor));
 	/*! [Open a cursor on the metadata] */
+
+	{
+	const char *key = "some key", *value = "some value";
+	/*! [Reconfigure a cursor] */
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, "overwrite=false", &cursor));
+
+	/* Reconfigure the cursor to overwrite the record. */
+	error_check(cursor->reconfigure(cursor, "overwrite=true"));
+
+	cursor->set_key(cursor, key);
+	cursor->set_value(cursor, value);
+	error_check(cursor->insert(cursor));
+	/*! [Reconfigure a cursor] */
+	}
 
 	{
 	WT_CURSOR *duplicate;
 	const char *key = "some key";
 	/*! [Duplicate a cursor] */
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
 	cursor->set_key(cursor, key);
-	ret = cursor->search(cursor);
+	error_check(cursor->search(cursor));
 
 	/* Duplicate the cursor. */
-	ret = session->open_cursor(session, NULL, cursor, NULL, &duplicate);
+	error_check(
+	    session->open_cursor(session, NULL, cursor, NULL, &duplicate));
 	/*! [Duplicate a cursor] */
 	}
 
 	{
-	const char *key = "some key", *value = "some value";
-	/*! [Reconfigure a cursor] */
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, "overwrite=false", &cursor);
-	cursor->set_key(cursor, key);
-	cursor->set_value(cursor, value);
-
-	/* Reconfigure the cursor to overwrite the record. */
-	ret = cursor->reconfigure(cursor, "overwrite=true");
-	ret = cursor->insert(cursor);
-	/*! [Reconfigure a cursor] */
-	}
-
-	{
 	/*! [boolean configuration string example] */
-	ret = session->open_cursor(session, "table:mytable", NULL,
-	    "overwrite", &cursor);
-	ret = session->open_cursor(session, "table:mytable", NULL,
-	    "overwrite=true", &cursor);
-	ret = session->open_cursor(session, "table:mytable", NULL,
-	    "overwrite=1", &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, "overwrite", &cursor));
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, "overwrite=true", &cursor));
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, "overwrite=1", &cursor));
 	/*! [boolean configuration string example] */
 	}
+
+	error_check(session->checkpoint(session, "name=midnight"));
 
 	{
 	/*! [open a named checkpoint] */
-	ret = session->open_cursor(session,
-	    "table:mytable", NULL, "checkpoint=midnight", &cursor);
+	error_check(session->open_cursor(session,
+	    "table:mytable", NULL, "checkpoint=midnight", &cursor));
 	/*! [open a named checkpoint] */
 	}
 
 	{
 	/*! [open the default checkpoint] */
-	ret = session->open_cursor(session,
-	    "table:mytable", NULL, "checkpoint=WiredTigerCheckpoint", &cursor);
+	error_check(session->open_cursor(session,
+	    "table:mytable", NULL, "checkpoint=WiredTigerCheckpoint", &cursor));
 	/*! [open the default checkpoint] */
-	}
-
-	{
-	/*! [Get the cursor's string key] */
-	const char *key;	/* Get the cursor's string key. */
-	ret = cursor->get_key(cursor, &key);
-	/*! [Get the cursor's string key] */
 	}
 
 	{
@@ -149,11 +131,17 @@ cursor_ops(WT_SESSION *session)
 	}
 
 	{
-	/*! [Get the cursor's record number key] */
-	uint64_t recno;		/* Get the cursor's record number key. */
-	ret = cursor->get_key(cursor, &recno);
-	/*! [Get the cursor's record number key] */
+	/*! [Get the cursor's string key] */
+	const char *key;	/* Get the cursor's string key. */
+	error_check(cursor->get_key(cursor, &key));
+	/*! [Get the cursor's string key] */
 	}
+
+	/* Switch to a recno table. */
+	error_check(session->create(
+	    session, "table:recno", "key_format=r,value_format=S"));
+	error_check(session->open_cursor(
+	    session, "table:recno", NULL, NULL, &cursor));
 
 	{
 	/*! [Set the cursor's record number key] */
@@ -163,14 +151,17 @@ cursor_ops(WT_SESSION *session)
 	}
 
 	{
-	/*! [Get the cursor's composite key] */
-			/* Get the cursor's "SiH" format composite key. */
-	const char *first;
-	int32_t second;
-	uint16_t third;
-	ret = cursor->get_key(cursor, &first, &second, &third);
-	/*! [Get the cursor's composite key] */
+	/*! [Get the cursor's record number key] */
+	uint64_t recno;		/* Get the cursor's record number key. */
+	error_check(cursor->get_key(cursor, &recno));
+	/*! [Get the cursor's record number key] */
 	}
+
+	/* Switch to a composite table. */
+	error_check(session->create(
+	    session, "table:composite", "key_format=SiH,value_format=S"));
+	error_check(session->open_cursor(
+	    session, "table:recno", NULL, NULL, &cursor));
 
 	{
 	/*! [Set the cursor's composite key] */
@@ -180,10 +171,13 @@ cursor_ops(WT_SESSION *session)
 	}
 
 	{
-	/*! [Get the cursor's string value] */
-	const char *value;	/* Get the cursor's string value. */
-	ret = cursor->get_value(cursor, &value);
-	/*! [Get the cursor's string value] */
+	/*! [Get the cursor's composite key] */
+			/* Get the cursor's "SiH" format composite key. */
+	const char *first;
+	int32_t second;
+	uint16_t third;
+	error_check(cursor->get_key(cursor, &first, &second, &third));
+	/*! [Get the cursor's composite key] */
 	}
 
 	{
@@ -195,9 +189,16 @@ cursor_ops(WT_SESSION *session)
 	}
 
 	{
+	/*! [Get the cursor's string value] */
+	const char *value;	/* Get the cursor's string value. */
+	error_check(cursor->get_value(cursor, &value));
+	/*! [Get the cursor's string value] */
+	}
+
+	{
 	/*! [Get the cursor's raw value] */
 	WT_ITEM value;		/* Get the cursor's raw value. */
-	ret = cursor->get_value(cursor, &value);
+	error_check(cursor->get_value(cursor, &value));
 	/*! [Get the cursor's raw value] */
 	}
 
@@ -208,25 +209,31 @@ cursor_ops(WT_SESSION *session)
 	value.size = strlen("another value");
 	cursor->set_value(cursor, &value);
 	/*! [Set the cursor's raw value] */
+
+	error_check(cursor->insert(cursor));
 	}
 
 	/*! [Return the next record] */
-	ret = cursor->next(cursor);
+	error_check(cursor->next(cursor));
 	/*! [Return the next record] */
 
-	/*! [Return the previous record] */
-	ret = cursor->prev(cursor);
-	/*! [Return the previous record] */
+	/*! [Reset the cursor] */
+	error_check(cursor->reset(cursor));
+	/*! [Reset the cursor] */
 
-	/*! [Reset the cursor] */
-	ret = cursor->reset(cursor);
-	/*! [Reset the cursor] */
+	/*! [Return the previous record] */
+	error_check(cursor->prev(cursor));
+	/*! [Return the previous record] */
 
 	{
 	WT_CURSOR *other = NULL;
+	error_check(
+	    session->open_cursor(session, NULL, cursor, NULL, &other));
+
+	{
 	/*! [Cursor comparison] */
 	int compare;
-	ret = cursor->compare(cursor, other, &compare);
+	error_check(cursor->compare(cursor, other, &compare));
 	if (compare == 0) {
 		/* Cursors reference the same key */
 	} else if (compare < 0) {
@@ -238,106 +245,166 @@ cursor_ops(WT_SESSION *session)
 	}
 
 	{
-	WT_CURSOR *other = NULL;
 	/*! [Cursor equality] */
 	int equal;
-	ret = cursor->equals(cursor, other, &equal);
+	error_check(cursor->equals(cursor, other, &equal));
 	if (equal) {
 		/* Cursors reference the same key */
-	} else {
-		/* Cursors don't reference the same key */
 	}
 	/*! [Cursor equality] */
+	}
+	}
+
+	{
+	/*! [Insert a new record or overwrite an existing record] */
+	/* Insert a new record or overwrite an existing record. */
+	const char *key = "some key", *value = "some value";
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
+	cursor->set_key(cursor, key);
+	cursor->set_value(cursor, value);
+	error_check(cursor->insert(cursor));
+	/*! [Insert a new record or overwrite an existing record] */
 	}
 
 	{
 	/*! [Search for an exact match] */
 	const char *key = "some key";
 	cursor->set_key(cursor, key);
-	ret = cursor->search(cursor);
+	error_check(cursor->search(cursor));
 	/*! [Search for an exact match] */
 	}
 
-	ret = cursor_search_near(cursor);
-
-	{
-	/*! [Insert a new record or overwrite an existing record] */
-	/* Insert a new record or overwrite an existing record. */
-	const char *key = "some key", *value = "some value";
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &cursor);
-	cursor->set_key(cursor, key);
-	cursor->set_value(cursor, value);
-	ret = cursor->insert(cursor);
-	/*! [Insert a new record or overwrite an existing record] */
-	}
+	cursor_search_near(cursor);
 
 	{
 	/*! [Insert a new record and fail if the record exists] */
 	/* Insert a new record and fail if the record exists. */
-	const char *key = "some key", *value = "some value";
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, "overwrite=false", &cursor);
+	const char *key = "new key", *value = "some value";
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, "overwrite=false", &cursor));
 	cursor->set_key(cursor, key);
 	cursor->set_value(cursor, value);
-	ret = cursor->insert(cursor);
+	error_check(cursor->insert(cursor));
 	/*! [Insert a new record and fail if the record exists] */
 	}
+
+	error_check(session->open_cursor(
+	    session, "table:recno", NULL, "append", &cursor));
 
 	{
 	/*! [Insert a new record and assign a record number] */
 	/* Insert a new record and assign a record number. */
 	uint64_t recno;
 	const char *value = "some value";
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, "append", &cursor);
 	cursor->set_value(cursor, value);
-	ret = cursor->insert(cursor);
-	if (ret == 0)
-		ret = cursor->get_key(cursor, &recno);
+	error_check(cursor->insert(cursor));
+	error_check(cursor->get_key(cursor, &recno));
 	/*! [Insert a new record and assign a record number] */
 	}
 
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
+
+	{
+	/*! [Reserve a record] */
+	const char *key = "some key";
+	error_check(session->begin_transaction(session, NULL));
+	cursor->set_key(cursor, key);
+	error_check(cursor->reserve(cursor));
+	error_check(session->commit_transaction(session, NULL));
+	/*! [Reserve a record] */
+	}
+
+	error_check(session->create(
+	    session, "table:blob", "key_format=S,value_format=u"));
+	error_check(session->open_cursor(
+	    session, "table:blob", NULL, NULL, &cursor));
+	{
+	WT_ITEM value;
+	value.data = "abcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyz"
+	    "abcdefghijklmnopqrstuvwxyz";
+	value.size = strlen(value.data);
+	cursor->set_key(cursor, "some key");
+	cursor->set_value(cursor, &value);
+	error_check(cursor->insert(cursor));
+	}
+
+	/* Modify requires an explicit transaction. */
+	error_check(session->begin_transaction(session, NULL));
+	{
+	/*! [Modify an existing record] */
+	WT_MODIFY entries[3];
+	const char *key = "some key";
+
+	/* Position the cursor. */
+	cursor->set_key(cursor, key);
+	error_check(cursor->search(cursor));
+
+	/* Replace 20 bytes starting at byte offset 5. */
+	entries[0].data.data = "some data";
+	entries[0].data.size = strlen(entries[0].data.data);
+	entries[0].offset = 5;
+	entries[0].size = 20;
+
+	/* Insert data at byte offset 40. */
+	entries[1].data.data = "and more data";
+	entries[1].data.size = strlen(entries[1].data.data);
+	entries[1].offset = 40;
+	entries[1].size = 0;
+
+	/* Replace 2 bytes starting at byte offset 10. */
+	entries[2].data.data = "and more data";
+	entries[2].data.size = strlen(entries[2].data.data);
+	entries[2].offset = 10;
+	entries[2].size = 2;
+
+	error_check(cursor->modify(cursor, entries, 3));
+	/*! [Modify an existing record] */
+	}
+	error_check(session->commit_transaction(session, NULL));
+
 	{
 	/*! [Update an existing record or insert a new record] */
 	const char *key = "some key", *value = "some value";
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
 	cursor->set_key(cursor, key);
 	cursor->set_value(cursor, value);
-	ret = cursor->update(cursor);
+	error_check(cursor->update(cursor));
 	/*! [Update an existing record or insert a new record] */
 	}
 
 	{
 	/*! [Update an existing record and fail if DNE] */
 	const char *key = "some key", *value = "some value";
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, "overwrite=false", &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, "overwrite=false", &cursor));
 	cursor->set_key(cursor, key);
 	cursor->set_value(cursor, value);
-	ret = cursor->update(cursor);
+	error_check(cursor->update(cursor));
 	/*! [Update an existing record and fail if DNE] */
 	}
 
 	{
-	/*! [Remove a record] */
+	/*! [Remove a record and fail if DNE] */
 	const char *key = "some key";
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, "overwrite=false", &cursor));
 	cursor->set_key(cursor, key);
-	ret = cursor->remove(cursor);
-	/*! [Remove a record] */
+	error_check(cursor->remove(cursor));
+	/*! [Remove a record and fail if DNE] */
 	}
 
 	{
-	/*! [Remove a record and fail if DNE] */
+	/*! [Remove a record] */
 	const char *key = "some key";
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, "overwrite=false", &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
 	cursor->set_key(cursor, key);
-	ret = cursor->remove(cursor);
-	/*! [Remove a record and fail if DNE] */
+	error_check(cursor->remove(cursor));
+	/*! [Remove a record] */
 	}
 
 	{
@@ -366,13 +433,13 @@ cursor_ops(WT_SESSION *session)
 	}
 
 	/*! [Close the cursor] */
-	ret = cursor->close(cursor);
+	error_check(cursor->close(cursor));
 	/*! [Close the cursor] */
 
-	return (ret);
+	return (0);
 }
 
-int
+static void
 cursor_search_near(WT_CURSOR *cursor)
 {
 	int exact, ret;
@@ -380,96 +447,95 @@ cursor_search_near(WT_CURSOR *cursor)
 
 	/*! [Search for an exact or adjacent match] */
 	cursor->set_key(cursor, key);
-	ret = cursor->search_near(cursor, &exact);
-	if (ret == 0) {
-		if (exact == 0) {
-			/* an exact match */
-		} else if (exact < 0) {
-			/* returned smaller key */
-		} else if (exact > 0) {
-			/* returned larger key */
-		}
+	error_check(cursor->search_near(cursor, &exact));
+	if (exact == 0) {
+		/* an exact match */
+	} else if (exact < 0) {
+		/* returned smaller key */
+	} else if (exact > 0) {
+		/* returned larger key */
 	}
 	/*! [Search for an exact or adjacent match] */
 
 	/*! [Forward scan greater than or equal] */
 	cursor->set_key(cursor, key);
-	ret = cursor->search_near(cursor, &exact);
-	if (ret == 0 && exact >= 0) {
+	error_check(cursor->search_near(cursor, &exact));
+	if (exact >= 0) {
 		/* include first key returned in the scan */
 	}
 
 	while ((ret = cursor->next(cursor)) == 0) {
 		/* the rest of the scan */
 	}
+	scan_end_check(ret == WT_NOTFOUND);
 	/*! [Forward scan greater than or equal] */
 
 	/*! [Backward scan less than] */
 	cursor->set_key(cursor, key);
-	ret = cursor->search_near(cursor, &exact);
-	if (ret == 0 && exact < 0) {
+	error_check(cursor->search_near(cursor, &exact));
+	if (exact < 0) {
 		/* include first key returned in the scan */
 	}
 
 	while ((ret = cursor->prev(cursor)) == 0) {
 		/* the rest of the scan */
 	}
+	scan_end_check(ret == WT_NOTFOUND);
 	/*! [Backward scan less than] */
-
-	return (ret);
 }
 
-int
+static void
 checkpoint_ops(WT_SESSION *session)
 {
-	int ret;
+	error_check(session->create(session, "table:table1", NULL));
+	error_check(session->create(session, "table:table2", NULL));
 
 	/*! [Checkpoint examples] */
 	/* Checkpoint the database. */
-	ret = session->checkpoint(session, NULL);
+	error_check(session->checkpoint(session, NULL));
 
 	/* Checkpoint of the database, creating a named snapshot. */
-	ret = session->checkpoint(session, "name=June01");
+	error_check(session->checkpoint(session, "name=June01"));
 
 	/*
 	 * Checkpoint a list of objects.
 	 * JSON parsing requires quoting the list of target URIs.
 	 */
-	ret = session->
-	    checkpoint(session, "target=(\"table:table1\",\"table:table2\")");
+	error_check(session->checkpoint(
+	    session, "target=(\"table:table1\",\"table:table2\")"));
 
 	/*
 	 * Checkpoint a list of objects, creating a named snapshot.
 	 * JSON parsing requires quoting the list of target URIs.
 	 */
-	ret = session->
-	    checkpoint(session, "target=(\"table:mytable\"),name=midnight");
+	error_check(session->checkpoint(
+	    session, "target=(\"table:mytable\"),name=midnight"));
 
 	/* Checkpoint the database, discarding all previous snapshots. */
-	ret = session->checkpoint(session, "drop=(from=all)");
+	error_check(session->checkpoint(session, "drop=(from=all)"));
 
 	/* Checkpoint the database, discarding the "midnight" snapshot. */
-	ret = session->checkpoint(session, "drop=(midnight)");
+	error_check(session->checkpoint(session, "drop=(midnight)"));
 
 	/*
 	 * Checkpoint the database, discarding all snapshots after and
 	 * including "noon".
 	 */
-	ret = session->checkpoint(session, "drop=(from=noon)");
+	error_check(session->checkpoint(session, "drop=(from=noon)"));
 
 	/*
 	 * Checkpoint the database, discarding all snapshots before and
 	 * including "midnight".
 	 */
-	ret = session->checkpoint(session, "drop=(to=midnight)");
+	error_check(session->checkpoint(session, "drop=(to=midnight)"));
 
 	/*
 	 * Create a checkpoint of a table, creating the "July01" snapshot and
 	 * discarding the "May01" and "June01" snapshots.
 	 * JSON parsing requires quoting the list of target URIs.
 	 */
-	ret = session->checkpoint(session,
-	    "target=(\"table:mytable\"),name=July01,drop=(May01,June01)");
+	error_check(session->checkpoint(session,
+	    "target=(\"table:mytable\"),name=July01,drop=(May01,June01)"));
 	/*! [Checkpoint examples] */
 
 	/*! [JSON quoting example] */
@@ -477,119 +543,118 @@ checkpoint_ops(WT_SESSION *session)
 	 * Checkpoint a list of objects.
 	 * JSON parsing requires quoting the list of target URIs.
 	 */
-	ret = session->
-	    checkpoint(session, "target=(\"table:table1\",\"table:table2\")");
+	error_check(session->checkpoint(
+	    session, "target=(\"table:table1\",\"table:table2\")"));
 	/*! [JSON quoting example] */
-
-	return (ret);
 }
 
-int
+static void
 cursor_statistics(WT_SESSION *session)
 {
 	WT_CURSOR *cursor;
-	int ret;
 
 	/*! [Statistics cursor database] */
-	ret = session->open_cursor(
-	    session, "statistics:", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "statistics:", NULL, NULL, &cursor));
 	/*! [Statistics cursor database] */
 
 	/*! [Statistics cursor table] */
-	ret = session->open_cursor(
-	    session, "statistics:table:mytable", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "statistics:table:mytable", NULL, NULL, &cursor));
 	/*! [Statistics cursor table] */
 
 	/*! [Statistics cursor table fast] */
-	ret = session->open_cursor(session,
-	    "statistics:table:mytable", NULL, "statistics=(fast)", &cursor);
+	error_check(session->open_cursor(session,
+	    "statistics:table:mytable", NULL, "statistics=(fast)", &cursor));
 	/*! [Statistics cursor table fast] */
 
 	/*! [Statistics clear configuration] */
-	ret = session->open_cursor(session,
-	    "statistics:", NULL, "statistics=(fast,clear)", &cursor);
+	error_check(session->open_cursor(session,
+	    "statistics:", NULL, "statistics=(fast,clear)", &cursor));
 	/*! [Statistics clear configuration] */
 
 	/*! [Statistics cursor clear configuration] */
-	ret = session->open_cursor(session,
+	error_check(session->open_cursor(session,
 	    "statistics:table:mytable",
-	    NULL, "statistics=(all,clear)", &cursor);
+	    NULL, "statistics=(all,clear)", &cursor));
 	/*! [Statistics cursor clear configuration] */
 
-	return (ret);
+	/*! [Statistics cursor session] */
+	error_check(session->open_cursor(
+	    session, "statistics:session", NULL, NULL, &cursor));
+	/*! [Statistics cursor session] */
 }
 
-int
+static void
 named_snapshot_ops(WT_SESSION *session)
 {
-	int ret;
-
 	/*! [Snapshot examples] */
-
 	/* Create a named snapshot */
-	ret = session->snapshot(session, "name=June01");
+	error_check(session->snapshot(session, "name=June01"));
 
 	/* Open a transaction at a given snapshot */
-	ret = session->begin_transaction(session, "snapshot=June01");
+	error_check(session->begin_transaction(session, "snapshot=June01"));
 
 	/* Drop all named snapshots */
-	ret = session->snapshot(session, "drop=(all)");
+	error_check(session->snapshot(session, "drop=(all)"));
 	/*! [Snapshot examples] */
 
-	return (ret);
+	error_check(session->rollback_transaction(session, NULL));
 }
 
-int
+static void
 session_ops(WT_SESSION *session)
 {
-	int ret;
+	WT_CONNECTION *conn;
+
+	conn = session->connection;
 
 	/*! [Reconfigure a session] */
-	ret = session->reconfigure(session, "isolation=snapshot");
+	error_check(session->reconfigure(session, "isolation=snapshot"));
 	/*! [Reconfigure a session] */
 
 	/*! [Create a table] */
-	ret = session->create(session,
-	    "table:mytable", "key_format=S,value_format=S");
+	error_check(session->create(session,
+	    "table:mytable", "key_format=S,value_format=S"));
 	/*! [Create a table] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a column-store table] */
-	ret = session->create(session,
-	    "table:mytable", "key_format=r,value_format=S");
+	error_check(session->create(session,
+	    "table:mytable", "key_format=r,value_format=S"));
 
 	/*! [Alter a table] */
-	ret = session->alter(session,
-	    "table:mytable", "access_pattern_hint=random");
+	error_check(session->alter(session,
+	    "table:mytable", "access_pattern_hint=random"));
 	/*! [Alter a table] */
 
 	/*! [Create a column-store table] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a table with columns] */
 	/*
 	 * Create a table with columns: keys are record numbers, values are
 	 * (string, signed 32-bit integer, unsigned 16-bit integer).
 	 */
-	ret = session->create(session, "table:mytable",
+	error_check(session->create(session, "table:mytable",
 	    "key_format=r,value_format=SiH,"
-	    "columns=(id,department,salary,year-started)");
+	    "columns=(id,department,salary,year-started)"));
 	/*! [Create a table with columns] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a table and configure the page size] */
-	ret = session->create(session,
+	error_check(session->create(session,
 	    "table:mytable", "key_format=S,value_format=S,"
-	    "internal_page_max=16KB,leaf_page_max=1MB,leaf_value_max=64KB");
+	    "internal_page_max=16KB,leaf_page_max=1MB,leaf_value_max=64KB"));
 	/*! [Create a table and configure the page size] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a table and configure a large leaf value max] */
-	ret = session->create(session,
+	error_check(session->create(session,
 	    "table:mytable", "key_format=S,value_format=S,"
-	    "leaf_page_max=16KB,leaf_value_max=256KB");
+	    "leaf_page_max=16KB,leaf_value_max=256KB"));
 	/*! [Create a table and configure a large leaf value max] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*
 	 * This example code gets run, and the compression libraries might not
@@ -598,109 +663,115 @@ session_ops(WT_SESSION *session)
 	 */
 #ifdef MIGHT_NOT_RUN
 	/*! [Create a lz4 compressed table] */
-	ret = session->create(session,
+	error_check(session->create(session,
 	    "table:mytable",
-	    "block_compressor=lz4,key_format=S,value_format=S");
+	    "block_compressor=lz4,key_format=S,value_format=S"));
 	/*! [Create a lz4 compressed table] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a snappy compressed table] */
-	ret = session->create(session,
+	error_check(session->create(session,
 	    "table:mytable",
-	    "block_compressor=snappy,key_format=S,value_format=S");
+	    "block_compressor=snappy,key_format=S,value_format=S"));
 	/*! [Create a snappy compressed table] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a zlib compressed table] */
-	ret = session->create(session,
+	error_check(session->create(session,
 	    "table:mytable",
-	    "block_compressor=zlib,key_format=S,value_format=S");
+	    "block_compressor=zlib,key_format=S,value_format=S"));
 	/*! [Create a zlib compressed table] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a zstd compressed table] */
-	ret = session->create(session,
+	error_check(session->create(session,
 	    "table:mytable",
-	    "block_compressor=zstd,key_format=S,value_format=S");
+	    "block_compressor=zstd,key_format=S,value_format=S"));
 	/*! [Create a zstd compressed table] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 #endif
 
 	/*! [Configure checksums to uncompressed] */
-	ret = session->create(session, "table:mytable",
-	    "key_format=S,value_format=S,checksum=uncompressed");
+	error_check(session->create(session, "table:mytable",
+	    "key_format=S,value_format=S,checksum=uncompressed"));
 	/*! [Configure checksums to uncompressed] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Configure dictionary compression on] */
-	ret = session->create(session, "table:mytable",
-	    "key_format=S,value_format=S,dictionary=1000");
+	error_check(session->create(session, "table:mytable",
+	    "key_format=S,value_format=S,dictionary=1000"));
 	/*! [Configure dictionary compression on] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Configure key prefix compression on] */
-	ret = session->create(session, "table:mytable",
-	    "key_format=S,value_format=S,prefix_compression=true");
+	error_check(session->create(session, "table:mytable",
+	    "key_format=S,value_format=S,prefix_compression=true"));
 	/*! [Configure key prefix compression on] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 #ifdef MIGHT_NOT_RUN
 						/* Requires sync_file_range */
 	/*! [os_cache_dirty_max configuration] */
-	ret = session->create(
-	    session, "table:mytable", "os_cache_dirty_max=500MB");
+	error_check(session->create(
+	    session, "table:mytable", "os_cache_dirty_max=500MB"));
 	/*! [os_cache_dirty_max configuration] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 						/* Requires posix_fadvise */
 	/*! [os_cache_max configuration] */
-	ret = session->create(session, "table:mytable", "os_cache_max=1GB");
+	error_check(session->create(
+	    session, "table:mytable", "os_cache_max=1GB"));
 	/*! [os_cache_max configuration] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 #endif
 	/*! [Configure block_allocation] */
-	ret = session->create(session, "table:mytable",
-	    "key_format=S,value_format=S,block_allocation=first");
+	error_check(session->create(session, "table:mytable",
+	    "key_format=S,value_format=S,block_allocation=first"));
 	/*! [Configure block_allocation] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	/*! [Create a cache-resident object] */
-	ret = session->create(session,
-	    "table:mytable", "key_format=r,value_format=S,cache_resident=true");
+	error_check(session->create(
+	    session, "table:mytable",
+	    "key_format=r,value_format=S,cache_resident=true"));
 	/*! [Create a cache-resident object] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 
 	{
 	/* Create a table for the session operations. */
-	ret = session->create(
-	    session, "table:mytable", "key_format=S,value_format=S");
+	error_check(session->create(
+	    session, "table:mytable", "key_format=S,value_format=S"));
 
 	/*! [Compact a table] */
-	ret = session->compact(session, "table:mytable", NULL);
+	error_check(session->compact(session, "table:mytable", NULL));
 	/*! [Compact a table] */
 
 	/*! [Rebalance a table] */
-	ret = session->rebalance(session, "table:mytable", NULL);
+	error_check(session->rebalance(session, "table:mytable", NULL));
 	/*! [Rebalance a table] */
 
+	error_check(session->create(
+	    session, "table:old",
+	    "key_format=r,value_format=S,cache_resident=true"));
 	/*! [Rename a table] */
-	ret = session->rename(session, "table:old", "table:new", NULL);
+	error_check(session->rename(session, "table:old", "table:new", NULL));
 	/*! [Rename a table] */
 
 	/*! [Salvage a table] */
-	ret = session->salvage(session, "table:mytable", NULL);
+	error_check(session->salvage(session, "table:mytable", NULL));
 	/*! [Salvage a table] */
 
 	/*! [Truncate a table] */
-	ret = session->truncate(session, "table:mytable", NULL, NULL, NULL);
+	error_check(session->truncate(
+	    session, "table:mytable", NULL, NULL, NULL));
 	/*! [Truncate a table] */
 
 	/*! [Transaction sync] */
-	ret = session->transaction_sync(session, NULL);
+	error_check(session->transaction_sync(session, NULL));
 	/*! [Transaction sync] */
 
 	/*! [Reset the session] */
-	ret = session->reset(session);
+	error_check(session->reset(session));
 	/*! [Reset the session] */
 
 	{
@@ -708,60 +779,86 @@ session_ops(WT_SESSION *session)
 	 * Insert a pair of keys so we can truncate a range.
 	 */
 	WT_CURSOR *cursor;
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
 	cursor->set_key(cursor, "June01");
 	cursor->set_value(cursor, "value");
-	ret = cursor->update(cursor);
+	error_check(cursor->update(cursor));
 	cursor->set_key(cursor, "June30");
 	cursor->set_value(cursor, "value");
-	ret = cursor->update(cursor);
-	ret = cursor->close(cursor);
+	error_check(cursor->update(cursor));
+	error_check(cursor->close(cursor));
 
 	{
 	/*! [Truncate a range] */
 	WT_CURSOR *start, *stop;
 
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &start);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &start));
 	start->set_key(start, "June01");
-	ret = start->search(start);
+	error_check(start->search(start));
 
-	ret = session->open_cursor(
-	    session, "table:mytable", NULL, NULL, &stop);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &stop));
 	stop->set_key(stop, "June30");
-	ret = stop->search(stop);
+	error_check(stop->search(stop));
 
-	ret = session->truncate(session, NULL, start, stop, NULL);
+	error_check(session->truncate(session, NULL, start, stop, NULL));
 	/*! [Truncate a range] */
+	error_check(stop->close(stop));
+	error_check(start->close(start));
 	}
 	}
 
 	/*! [Upgrade a table] */
-	ret = session->upgrade(session, "table:mytable", NULL);
+	error_check(session->upgrade(session, "table:mytable", NULL));
 	/*! [Upgrade a table] */
 
 	/*! [Verify a table] */
-	ret = session->verify(session, "table:mytable", NULL);
+	error_check(session->verify(session, "table:mytable", NULL));
 	/*! [Verify a table] */
 
+	/*
+	 * We can't call the backup function because it includes absolute paths
+	 * for documentation purposes that don't exist on test systems.  That
+	 * said, we have to reference the function to avoid build warnings
+	 * about unused static code.
+	 */
+	(void)backup;
+
+	/* Call other functions, where possible. */
+	checkpoint_ops(session);
+	error_check(cursor_ops(session));
+	cursor_statistics(session);
+	named_snapshot_ops(session);
+	pack_ops(session);
+	transaction_ops(session);
+
+	/*! [Close a session] */
+	error_check(session->close(session, NULL));
+	/*! [Close a session] */
+
+	/*
+	 * We close the old session first to close all cursors, open a new one
+	 * for the drop.
+	 */
+	error_check(conn->open_session(conn, NULL, NULL, &session));
+
 	/*! [Drop a table] */
-	ret = session->drop(session, "table:mytable", NULL);
+	error_check(session->drop(session, "table:mytable", NULL));
 	/*! [Drop a table] */
 	}
-
-	/*! [Close a session] */
-	ret = session->close(session, NULL);
-	/*! [Close a session] */
-
-	return (ret);
 }
 
-int
-transaction_ops(WT_CONNECTION *conn, WT_SESSION *session)
+static void
+transaction_ops(WT_SESSION *session_arg)
 {
+	WT_CONNECTION *conn;
 	WT_CURSOR *cursor;
-	int ret;
+	WT_SESSION *session;
+
+	session = session_arg;
+	conn = session->connection;
 
 	/*! [transaction commit/rollback] */
 	/*
@@ -770,15 +867,15 @@ transaction_ops(WT_CONNECTION *conn, WT_SESSION *session)
 	 * Opening cursors before the transaction begins allows applications to
 	 * cache cursors and use them for multiple operations.
 	 */
-	ret =
-	    session->open_cursor(session, "table:mytable", NULL, NULL, &cursor);
-	ret = session->begin_transaction(session, NULL);
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
+	error_check(session->begin_transaction(session, NULL));
 
 	cursor->set_key(cursor, "key");
 	cursor->set_value(cursor, "value");
-	switch (ret = cursor->update(cursor)) {
+	switch (cursor->update(cursor)) {
 	case 0:					/* Update success */
-		ret = session->commit_transaction(session, NULL);
+		error_check(session->commit_transaction(session, NULL));
 		/*
 		 * If commit_transaction succeeds, cursors remain positioned; if
 		 * commit_transaction fails, the transaction was rolled-back and
@@ -787,7 +884,7 @@ transaction_ops(WT_CONNECTION *conn, WT_SESSION *session)
 		break;
 	case WT_ROLLBACK:			/* Update conflict */
 	default:				/* Other error */
-		ret = session->rollback_transaction(session, NULL);
+		error_check(session->rollback_transaction(session, NULL));
 		/* The rollback_transaction call resets all cursors. */
 		break;
 	}
@@ -796,40 +893,94 @@ transaction_ops(WT_CONNECTION *conn, WT_SESSION *session)
 	 * Cursors remain open and may be used for multiple transactions.
 	 */
 	/*! [transaction commit/rollback] */
-	ret = cursor->close(cursor);
+	error_check(cursor->close(cursor));
 
 	/*! [transaction isolation] */
 	/* A single transaction configured for snapshot isolation. */
-	ret =
-	    session->open_cursor(session, "table:mytable", NULL, NULL, &cursor);
-	ret = session->begin_transaction(session, "isolation=snapshot");
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
+	error_check(session->begin_transaction(session, "isolation=snapshot"));
 	cursor->set_key(cursor, "some-key");
 	cursor->set_value(cursor, "some-value");
-	ret = cursor->update(cursor);
-	ret = session->commit_transaction(session, NULL);
+	error_check(cursor->update(cursor));
+	error_check(session->commit_transaction(session, NULL));
 	/*! [transaction isolation] */
+
+	{
+	/*! [transaction prepare] */
+	/*
+	 * Prepare a transaction which guarantees a subsequent commit will
+	 * succeed. Only commit and rollback are allowed on a transaction after
+	 * it has been prepared.
+	 */
+	error_check(session->open_cursor(
+	    session, "table:mytable", NULL, NULL, &cursor));
+	error_check(session->begin_transaction(session, NULL));
+	cursor->set_key(cursor, "key");
+	cursor->set_value(cursor, "value");
+	error_check(session->prepare_transaction(
+	    session, "prepare_timestamp=2a"));
+	error_check(session->commit_transaction(
+	    session, "commit_timestamp=2b"));
+	/*! [transaction prepare] */
+	}
 
 	/*! [session isolation configuration] */
 	/* Open a session configured for read-uncommitted isolation. */
-	ret = conn->open_session(
-	    conn, NULL, "isolation=read_uncommitted", &session);
+	error_check(conn->open_session(
+	    conn, NULL, "isolation=read-uncommitted", &session));
 	/*! [session isolation configuration] */
 
 	/*! [session isolation re-configuration] */
 	/* Re-configure a session for snapshot isolation. */
-	ret = session->reconfigure(session, "isolation=snapshot");
+	error_check(session->reconfigure(session, "isolation=snapshot"));
 	/*! [session isolation re-configuration] */
+
+	error_check(session->close(session, NULL));
+	session = session_arg;
 
 	{
 	/*! [transaction pinned range] */
 	/* Check the transaction ID range pinned by the session handle. */
 	uint64_t range;
 
-	ret = session->transaction_pinned_range(session, &range);
+	error_check(session->transaction_pinned_range(session, &range));
 	/*! [transaction pinned range] */
 	}
 
-	return (ret);
+	error_check(session->begin_transaction(session, NULL));
+
+	{
+	/*! [query timestamp] */
+	char timestamp_buf[2 * sizeof(uint64_t) + 1];
+
+	/*! [transaction timestamp] */
+	error_check(
+	    session->timestamp_transaction(session, "commit_timestamp=2a"));
+	/*! [transaction timestamp] */
+
+	error_check(session->commit_transaction(session, NULL));
+
+	error_check(conn->query_timestamp(
+	    conn, timestamp_buf, "get=all_committed"));
+	/*! [query timestamp] */
+	}
+
+	/*! [set commit timestamp] */
+	error_check(conn->set_timestamp(conn, "commit_timestamp=2a"));
+	/*! [set commit timestamp] */
+
+	/*! [set oldest timestamp] */
+	error_check(conn->set_timestamp(conn, "oldest_timestamp=2a"));
+	/*! [set oldest timestamp] */
+
+	/*! [set stable timestamp] */
+	error_check(conn->set_timestamp(conn, "stable_timestamp=2a"));
+	/*! [set stable timestamp] */
+
+	/*! [rollback to stable] */
+	error_check(conn->rollback_to_stable(conn, NULL));
+	/*! [rollback to stable] */
 }
 
 /*! [Implement WT_COLLATOR] */
@@ -856,17 +1007,14 @@ my_compare(WT_COLLATOR *collator, WT_SESSION *session,
 }
 /*! [Implement WT_COLLATOR] */
 
-int
+static void
 add_collator(WT_CONNECTION *conn)
 {
-	int ret;
-
 	/*! [WT_COLLATOR register] */
 	static WT_COLLATOR my_collator = { my_compare, NULL, NULL };
-	ret = conn->add_collator(conn, "my_collator", &my_collator, NULL);
+	error_check(conn->add_collator(
+	    conn, "my_collator", &my_collator, NULL));
 	/*! [WT_COLLATOR register] */
-
-	return (ret);
 }
 
 /*! [WT_EXTRACTOR] */
@@ -885,40 +1033,35 @@ my_extract(WT_EXTRACTOR *extractor, WT_SESSION *session,
 }
 /*! [WT_EXTRACTOR] */
 
-int
+static void
 add_extractor(WT_CONNECTION *conn)
 {
-	int ret;
-
 	/*! [WT_EXTRACTOR register] */
 	static WT_EXTRACTOR my_extractor = {my_extract, NULL, NULL};
 
-	ret = conn->add_extractor(conn, "my_extractor", &my_extractor, NULL);
+	error_check(conn->add_extractor(
+	    conn, "my_extractor", &my_extractor, NULL));
 	/*! [WT_EXTRACTOR register] */
-
-	return (ret);
 }
 
-int
+static void
 connection_ops(WT_CONNECTION *conn)
 {
-	int ret;
-
 #ifdef MIGHT_NOT_RUN
 	/*! [Load an extension] */
-	ret = conn->load_extension(conn, "my_extension.dll", NULL);
+	error_check(conn->load_extension(conn, "my_extension.dll", NULL));
 
-	ret = conn->load_extension(conn,
+	error_check(conn->load_extension(conn,
 	    "datasource/libdatasource.so",
-	    "config=[device=/dev/sd1,alignment=64]");
+	    "config=[device=/dev/sd1,alignment=64]"));
 	/*! [Load an extension] */
 #endif
 
-	ret = add_collator(conn);
-	ret = add_extractor(conn);
+	add_collator(conn);
+	add_extractor(conn);
 
 	/*! [Reconfigure a connection] */
-	ret = conn->reconfigure(conn, "eviction_target=75");
+	error_check(conn->reconfigure(conn, "eviction_target=75"));
 	/*! [Reconfigure a connection] */
 
 	/*! [Get the database home directory] */
@@ -941,17 +1084,17 @@ connection_ops(WT_CONNECTION *conn)
 	 * period and the method name (for example, session create would be
 	 * "WT_SESSION.create" and cursor close would be WT_CURSOR.close").
 	 */
-	ret = wiredtiger_config_validate(
-	    NULL, NULL, "WT_SESSION.create", "allocation_size=32KB");
+	error_check(wiredtiger_config_validate(
+	    NULL, NULL, "WT_SESSION.create", "allocation_size=32KB"));
 	/*! [Validate a configuration string] */
 
 	{
 	/*! [Open a session] */
 	WT_SESSION *session;
-	ret = conn->open_session(conn, NULL, NULL, &session);
+	error_check(conn->open_session(conn, NULL, NULL, &session));
 	/*! [Open a session] */
 
-	ret = session_ops(session);
+	session_ops(session);
 	}
 
 	/*! [Configure method configuration] */
@@ -963,43 +1106,40 @@ connection_ops(WT_CONNECTION *conn)
 	 * The method being configured is specified using a concatenation of the
 	 * handle name, a period and the method name.
 	 */
-	ret = conn->configure_method(conn,
+	error_check(conn->configure_method(conn,
 	    "WT_SESSION.open_cursor",
-	    "my_data:", "entries=5", "int", "min=1,max=10");
+	    "my_data:", "entries=5", "int", "min=1,max=10"));
 
 	/*
 	 * Applications opening a cursor for the data-source object "my_data"
 	 * have an additional configuration option "devices", which is a list
 	 * of strings.
 	 */
-	ret = conn->configure_method(conn,
-	    "WT_SESSION.open_cursor", "my_data:", "devices", "list", NULL);
+	error_check(conn->configure_method(conn,
+	    "WT_SESSION.open_cursor", "my_data:", "devices", "list", NULL));
 	/*! [Configure method configuration] */
 
 	/*! [Close a connection] */
-	ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 	/*! [Close a connection] */
-
-	return (ret);
 }
 
-int
+static void
 pack_ops(WT_SESSION *session)
 {
-	int ret;
-
 	{
 	/*! [Get the packed size] */
 	size_t size;
-	ret = wiredtiger_struct_size(session, &size, "iSh", 42, "hello", -3);
+	error_check(wiredtiger_struct_size(
+	    session, &size, "iSh", 42, "hello", -3));
 	/*! [Get the packed size] */
 	}
 
 	{
 	/*! [Pack fields into a buffer] */
 	char buf[100];
-	ret = wiredtiger_struct_pack(
-	    session, buf, sizeof(buf), "iSh", 42, "hello", -3);
+	error_check(wiredtiger_struct_pack(
+	    session, buf, sizeof(buf), "iSh", 42, "hello", -3));
 	/*! [Pack fields into a buffer] */
 
 	{
@@ -1007,16 +1147,14 @@ pack_ops(WT_SESSION *session)
 	int i;
 	char *s;
 	short h;
-	ret = wiredtiger_struct_unpack(
-	    session, buf, sizeof(buf), "iSh", &i, &s, &h);
+	error_check(wiredtiger_struct_unpack(
+	    session, buf, sizeof(buf), "iSh", &i, &s, &h));
 	/*! [Unpack fields from a buffer] */
 	}
 	}
-
-	return (ret);
 }
 
-int
+static void
 backup(WT_SESSION *session)
 {
 	char buf[1024];
@@ -1027,66 +1165,52 @@ backup(WT_SESSION *session)
 	int ret;
 
 	/* Create the backup directory. */
-	ret = mkdir("/path/database.backup", 077);
+	error_check(mkdir("/path/database.backup", 077));
 
 	/* Open the backup data source. */
-	ret = session->open_cursor(session, "backup:", NULL, NULL, &cursor);
+	error_check(session->open_cursor(
+	    session, "backup:", NULL, NULL, &cursor));
 
 	/* Copy the list of files. */
-	while (
-	    (ret = cursor->next(cursor)) == 0 &&
-	    (ret = cursor->get_key(cursor, &filename)) == 0) {
+	while ((ret = cursor->next(cursor)) == 0) {
+		error_check(cursor->get_key(cursor, &filename));
 		(void)snprintf(buf, sizeof(buf),
 		    "cp /path/database/%s /path/database.backup/%s",
 		    filename, filename);
-		ret = system(buf);
+		error_check(system(buf));
 	}
-	if (ret == WT_NOTFOUND)
-		ret = 0;
-	if (ret != 0)
-		fprintf(stderr, "%s: cursor next(backup:) failed: %s\n",
-		    progname, session->strerror(session, ret));
+	scan_end_check(ret == WT_NOTFOUND);
 
-	ret = cursor->close(cursor);
+	error_check(cursor->close(cursor));
 	/*! [backup]*/
 
 	/*! [incremental backup]*/
 	/* Open the backup data source for incremental backup. */
-	ret = session->open_cursor(
-	    session, "backup:", NULL, "target=(\"log:\")", &cursor);
+	error_check(session->open_cursor(
+	    session, "backup:", NULL, "target=(\"log:\")", &cursor));
 	/*! [incremental backup]*/
-	ret = cursor->close(cursor);
+	error_check(cursor->close(cursor));
 
 	/*! [backup of a checkpoint]*/
-	ret = session->checkpoint(session, "drop=(from=June01),name=June01");
+	error_check(session->checkpoint(
+	    session, "drop=(from=June01),name=June01"));
 	/*! [backup of a checkpoint]*/
-
-	return (ret);
 }
 
 int
-main(void)
+main(int argc, char *argv[])
 {
 	WT_CONNECTION *conn;
-	int ret;
 
-	/*
-	 * Create a clean test directory for this run of the test program if the
-	 * environment variable isn't already set (as is done by make check).
-	 */
-	if (getenv("WIREDTIGER_HOME") == NULL) {
-		home = "WT_HOME";
-		ret = system("rm -rf WT_HOME && mkdir WT_HOME");
-	} else
-		home = NULL;
+	home = example_setup(argc, argv);
 
 	/*! [Open a connection] */
-	ret = wiredtiger_open(home, NULL,
-	    "create,cache_size=5GB,log=(enabled,recover=on)", &conn);
+	error_check(wiredtiger_open(home, NULL,
+	    "create,cache_size=5GB,log=(enabled,recover=on),statistics=(all)",
+	    &conn));
 	/*! [Open a connection] */
 
-	if (ret == 0)
-		ret = connection_ops(conn);
+	connection_ops(conn);
 	/*
 	 * The connection has been closed.
 	 */
@@ -1098,54 +1222,48 @@ main(void)
 	 * the code snippets, use #ifdef's to avoid running it.
 	 */
 	/*! [Configure lz4 extension] */
-	ret = wiredtiger_open(home, NULL,
+	error_check(wiredtiger_open(home, NULL,
 	    "create,"
-	    "extensions=[/usr/local/lib/libwiredtiger_lz4.so]", &conn);
+	    "extensions=[/usr/local/lib/libwiredtiger_lz4.so]", &conn));
 	/*! [Configure lz4 extension] */
-	if (ret == 0)
-		(void)conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Configure snappy extension] */
-	ret = wiredtiger_open(home, NULL,
+	error_check(wiredtiger_open(home, NULL,
 	    "create,"
-	    "extensions=[/usr/local/lib/libwiredtiger_snappy.so]", &conn);
+	    "extensions=[/usr/local/lib/libwiredtiger_snappy.so]", &conn));
 	/*! [Configure snappy extension] */
-	if (ret == 0)
-		(void)conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Configure zlib extension] */
-	ret = wiredtiger_open(home, NULL,
+	error_check(wiredtiger_open(home, NULL,
 	    "create,"
-	    "extensions=[/usr/local/lib/libwiredtiger_zlib.so]", &conn);
+	    "extensions=[/usr/local/lib/libwiredtiger_zlib.so]", &conn));
 	/*! [Configure zlib extension] */
-	if (ret == 0)
-		(void)conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Configure zlib extension with compression level] */
-	ret = wiredtiger_open(home, NULL,
+	error_check(wiredtiger_open(home, NULL,
 	    "create,"
 	    "extensions=[/usr/local/lib/"
-	    "libwiredtiger_zlib.so=[config=[compression_level=3]]]", &conn);
+	    "libwiredtiger_zlib.so=[config=[compression_level=3]]]", &conn));
 	/*! [Configure zlib extension with compression level] */
-	if (ret == 0)
-		(void)conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Configure zstd extension] */
-	ret = wiredtiger_open(home, NULL,
+	error_check(wiredtiger_open(home, NULL,
 	    "create,"
-	    "extensions=[/usr/local/lib/libwiredtiger_zstd.so]", &conn);
+	    "extensions=[/usr/local/lib/libwiredtiger_zstd.so]", &conn));
 	/*! [Configure zstd extension] */
-	if (ret == 0)
-		(void)conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Configure zstd extension with compression level] */
-	ret = wiredtiger_open(home, NULL,
+	error_check(wiredtiger_open(home, NULL,
 	    "create,"
 	    "extensions=[/usr/local/lib/"
-	    "libwiredtiger_zstd.so=[config=[compression_level=9]]]", &conn);
+	    "libwiredtiger_zstd.so=[config=[compression_level=9]]]", &conn));
 	/*! [Configure zstd extension with compression level] */
-	if (ret == 0)
-		(void)conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*
 	 * This example code gets run, and direct I/O might not be available,
@@ -1154,82 +1272,80 @@ main(void)
 	 */
 	/* Might Not Run: direct I/O may not be available. */
 	/*! [Configure direct_io for data files] */
-	ret = wiredtiger_open(home, NULL, "create,direct_io=[data]", &conn);
+	error_check(wiredtiger_open(
+	    home, NULL, "create,direct_io=[data]", &conn));
 	/*! [Configure direct_io for data files] */
-	if (ret == 0)
-		(void)conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 #endif
 
 	/*! [Configure file_extend] */
-	ret = wiredtiger_open(
-	    home, NULL, "create,file_extend=(data=16MB)", &conn);
+	error_check(wiredtiger_open(
+	    home, NULL, "create,file_extend=(data=16MB)", &conn));
 	/*! [Configure file_extend] */
-	if (ret == 0)
-		ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
+
+	/*! [Configure capacity] */
+	error_check(wiredtiger_open(
+	    home, NULL, "create,io_capacity=(total=40MB)", &conn));
+	/*! [Configure capacity] */
+	error_check(conn->close(conn, NULL));
 
 	/*! [Eviction configuration] */
 	/*
 	 * Configure eviction to begin at 90% full, and run until the cache
 	 * is only 75% dirty.
 	 */
-	ret = wiredtiger_open(home, NULL,
-	    "create,eviction_trigger=90,eviction_dirty_target=75", &conn);
+	error_check(wiredtiger_open(home, NULL,
+	    "create,eviction_trigger=90,eviction_dirty_target=75", &conn));
 	/*! [Eviction configuration] */
-	if (ret == 0)
-		ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Eviction worker configuration] */
 	/* Configure up to four eviction threads */
-	ret = wiredtiger_open(home, NULL,
-	    "create,eviction_trigger=90,eviction=(threads_max=4)", &conn);
+	error_check(wiredtiger_open(home, NULL,
+	    "create,eviction_trigger=90,eviction=(threads_max=4)", &conn));
 	/*! [Eviction worker configuration] */
-	if (ret == 0)
-		ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Statistics configuration] */
-	ret = wiredtiger_open(home, NULL, "create,statistics=(all)", &conn);
+	error_check(wiredtiger_open(
+	    home, NULL, "create,statistics=(all)", &conn));
 	/*! [Statistics configuration] */
-	if (ret == 0)
-		ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*! [Statistics logging] */
-	ret = wiredtiger_open(
-	    home, NULL, "create,statistics_log=(wait=30)", &conn);
+	error_check(wiredtiger_open(
+	    home, NULL, "create,statistics_log=(wait=30)", &conn));
 	/*! [Statistics logging] */
-	if (ret == 0)
-		ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 #ifdef MIGHT_NOT_RUN
 	/*
 	 * Don't run this code, statistics logging doesn't yet support tables.
 	 */
 	/*! [Statistics logging with a table] */
-	ret = wiredtiger_open(home, NULL,
+	error_check(wiredtiger_open(home, NULL,
 	    "create, statistics_log=("
-	    "sources=(\"table:table1\",\"table:table2\"), wait=5)",
-	    &conn);
+	    "sources=(\"table:table1\",\"table:table2\"), wait=5)", &conn));
 	/*! [Statistics logging with a table] */
-	if (ret == 0)
-		ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*
 	 * Don't run this code, statistics logging doesn't yet support indexes.
 	 */
 	/*! [Statistics logging with a source type] */
-	ret = wiredtiger_open(home, NULL,
-	    "create, statistics_log=(sources=(\"index:\"), wait=5)",
-	    &conn);
+	error_check(wiredtiger_open(home, NULL,
+	    "create, statistics_log=(sources=(\"index:\"), wait=5)", &conn));
 	/*! [Statistics logging with a source type] */
-	if (ret == 0)
-		ret = conn->close(conn, NULL);
+	error_check(conn->close(conn, NULL));
 
 	/*
 	 * Don't run this code, because memory checkers get very upset when we
 	 * leak memory.
 	 */
-	(void)wiredtiger_open(home, NULL, "create", &conn);
+	error_check(wiredtiger_open(home, NULL, "create", &conn));
 	/*! [Connection close leaking memory] */
-	ret = conn->close(conn, "leak_memory=true");
+	error_check(conn->close(conn, "leak_memory=true"));
 	/*! [Connection close leaking memory] */
 #endif
 
@@ -1246,5 +1362,36 @@ main(void)
 	/*! [Get the WiredTiger library version #2] */
 	}
 
-	return (ret == 0 ? EXIT_SUCCESS : EXIT_FAILURE);
+	{
+	/*! [Calculate a modify operation] */
+	WT_MODIFY mod[3];
+	int nmod = 3;
+	WT_ITEM prev, newv;
+	prev.data = "the quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. " \
+		"the quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. ";
+	prev.size = strlen(prev.data);
+	newv.data = "A quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. " \
+		"then a quick brown fox jumped over the lazy dog. " \
+		"THE QUICK BROWN FOX JUMPED OVER THE LAZY DOG. " \
+		"then what?";
+	newv.size = strlen(newv.data);
+	error_check(wiredtiger_calc_modify(NULL, &prev, &newv, 20, mod, &nmod));
+	/*! [Calculate a modify operation] */
+	}
+
+	{
+	const char *buffer = "some string";
+	size_t len = strlen(buffer);
+	/*! [Checksum a buffer] */
+	uint32_t crc32c, (*func)(const void *, size_t);
+	func = wiredtiger_crc32c_func();
+	crc32c = func(buffer, len);
+	/*! [Checksum a buffer] */
+	(void)crc32c;
+	}
+
+	return (EXIT_SUCCESS);
 }

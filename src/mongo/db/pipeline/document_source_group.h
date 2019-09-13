@@ -1,29 +1,31 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -38,7 +40,7 @@
 
 namespace mongo {
 
-class DocumentSourceGroup final : public DocumentSource, public SplittableDocumentSource {
+class DocumentSourceGroup final : public DocumentSource, public NeedsMergerDocumentSource {
 public:
     using Accumulators = std::vector<boost::intrusive_ptr<Accumulator>>;
     using GroupsMap = ValueUnorderedMap<Accumulators>;
@@ -48,9 +50,8 @@ public:
     // Virtuals from DocumentSource.
     boost::intrusive_ptr<DocumentSource> optimize() final;
     GetDepsReturn getDependencies(DepsTracker* deps) const final;
-    Value serialize(bool explain = false) const final;
+    Value serialize(boost::optional<ExplainOptions::Verbosity> explain = boost::none) const final;
     GetNextResult getNext() final;
-    void dispose() final;
     const char* getSourceName() const final;
     BSONObjSet getOutputSorts() final;
 
@@ -61,15 +62,23 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx,
         const boost::intrusive_ptr<Expression>& groupByExpression,
         std::vector<AccumulationStatement> accumulationStatements,
-        Variables::Id numVariables,
         size_t maxMemoryUsageBytes = kDefaultMaxMemoryUsageBytes);
 
     /**
-     * Parses 'elem' into a $group stage, or throws a UserException if 'elem' was an invalid
+     * Parses 'elem' into a $group stage, or throws a AssertionException if 'elem' was an invalid
      * specification.
      */
     static boost::intrusive_ptr<DocumentSource> createFromBson(
         BSONElement elem, const boost::intrusive_ptr<ExpressionContext>& pExpCtx);
+
+    StageConstraints constraints(Pipeline::SplitState pipeState) const final {
+        return {StreamType::kBlocking,
+                PositionRequirement::kNone,
+                HostTypeRequirement::kNone,
+                DiskUseRequirement::kWritesTmpData,
+                FacetRequirement::kAllowed,
+                TransactionRequirement::kAllowed};
+    }
 
     /**
      * Add an accumulator, which will become a field in each Document that results from grouping.
@@ -92,13 +101,18 @@ public:
         return _streaming;
     }
 
-    // Virtuals for SplittableDocumentSource.
+    // Virtuals for NeedsMergerDocumentSource.
     boost::intrusive_ptr<DocumentSource> getShardSource() final;
-    boost::intrusive_ptr<DocumentSource> getMergeSource() final;
+    std::list<boost::intrusive_ptr<DocumentSource>> getMergeSources() final;
+
+protected:
+    void doDispose() final;
 
 private:
     explicit DocumentSourceGroup(const boost::intrusive_ptr<ExpressionContext>& pExpCtx,
                                  size_t maxMemoryUsageBytes = kDefaultMaxMemoryUsageBytes);
+
+    ~DocumentSourceGroup();
 
     /**
      * getNext() dispatches to one of these three depending on what type of $group it is. All three
@@ -139,7 +153,7 @@ private:
     /**
      * Computes the internal representation of the group key.
      */
-    Value computeId(Variables* vars);
+    Value computeId(const Document& root);
 
     /**
      * Converts the internal representation of the group key to the _id shape specified by the
@@ -147,20 +161,15 @@ private:
      */
     Value expandId(const Value& val);
 
-    /**
-     * 'vFieldName' contains the field names for the result documents, 'vpAccumulatorFactory'
-     * contains the accumulator factories for the result documents, and 'vpExpression' contains the
-     * common expressions used by each instance of each accumulator in order to find the right-hand
-     * side of what gets added to the accumulator. These three vectors parallel each other.
-     */
-    std::vector<std::string> vFieldName;
-    std::vector<Accumulator::Factory> vpAccumulatorFactory;
-    std::vector<boost::intrusive_ptr<Expression>> vpExpression;
+    std::vector<AccumulationStatement> _accumulatedFields;
 
     bool _doingMerge;
     size_t _memoryUsageBytes = 0;
     size_t _maxMemoryUsageBytes;
-    std::unique_ptr<Variables> _variables;
+    std::string _fileName;
+    unsigned int _nextSortedFileWriterOffset = 0;
+    bool _ownsFileDeletion = true;  // unless a MergeIterator is made that takes over.
+
     std::vector<std::string> _idFieldNames;  // used when id is a document
     std::vector<boost::intrusive_ptr<Expression>> _idExpressions;
 
@@ -184,7 +193,7 @@ private:
 
     // Only used when '_spilled' is true.
     std::unique_ptr<Sorter<Value, Value>::Iterator> _sorterIterator;
-    const bool _extSortAllowed;
+    const bool _allowDiskUse;
 
     std::pair<Value, Value> _firstPartOfNextGroup;
     // Only used when '_sorted' is true.

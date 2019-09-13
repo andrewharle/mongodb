@@ -13,12 +13,6 @@
 (function() {
     load("jstests/libs/check_log.js");
 
-    var parameters = TestData.setParameters;
-    if (parameters && parameters.indexOf("use3dot2InitialSync=true") != -1) {
-        jsTest.log("Skipping this test because use3dot2InitialSync was provided.");
-        return;
-    }
-
     var name = 'initial_sync_update_missing_doc1';
     var replSet = new ReplSetTest({
         name: name,
@@ -78,10 +72,13 @@
               'collection successfully synced to secondary');
 
     res = assert.commandWorked(secondary.adminCommand({replSetGetStatus: 1, initialSync: 1}));
-    assert.eq(res.initialSyncStatus.fetchedMissingDocs, 1);
+
+    // Fetch count stays at zero because we are unable to get the document from the sync source.
+    assert.eq(res.initialSyncStatus.fetchedMissingDocs, 0);
+
     var finalOplogEnd = res.initialSyncStatus.initialSyncOplogEnd;
-    assert(!friendlyEqual(firstOplogEnd, finalOplogEnd),
-           "minValid was not moved forward when missing document was fetched");
+    assert(friendlyEqual(firstOplogEnd, finalOplogEnd),
+           "minValid was moved forward when missing document was not fetched");
 
     assert.eq(0,
               secondary.getDB('local')['temp_oplog_buffer'].find().itcount(),

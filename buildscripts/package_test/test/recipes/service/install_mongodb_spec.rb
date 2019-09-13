@@ -15,24 +15,56 @@ describe command("#{service} mongod start") do
   its('exit_status') { should eq 0 }
 end
 
-describe service('mongod') do
-  it { should be_running }
+# Inspec treats all amazon linux as upstart, we explicitly make it use
+# systemd_service https://github.com/chef/inspec/issues/2639
+if (os[:name] == 'amazon' and os[:release] == '2.0')
+  describe systemd_service('mongod') do
+    it { should be_running }
+  end
+else
+  describe service('mongod') do
+    it { should be_running }
+  end
 end
 
 describe command("#{service} mongod stop") do
   its('exit_status') { should eq 0 }
 end
 
-describe service('mongod') do
-  it { should_not be_running }
+if (os[:name] == 'amazon' and os[:release] == '2.0')
+  describe systemd_service('mongod') do
+    it { should_not be_running }
+  end
+else
+  describe service('mongod') do
+    it { should_not be_running }
+  end
 end
 
 describe command("#{service} mongod restart") do
   its('exit_status') { should eq 0 }
 end
 
-describe service('mongod') do
-  it { should be_running }
+if (os[:name] == 'amazon' and os[:release] == '2.0')
+  describe systemd_service('mongod') do
+    it { should be_running }
+  end
+else
+  describe service('mongod') do
+    it { should be_running }
+  end
+end
+
+if os[:arch] == 'x86_64' and os[:name] != 'amazon' and
+  ((os[:name] == 'ubuntu' and os[:release].split('.')[0].to_i > 12) or 
+    (os[:family] == 'redhat' and os[:release].split('.')[0].to_i >= 7))
+  describe command("install_compass") do
+    its('exit_status') { should eq 0 }
+  end
+else
+  describe command("install_compass") do
+    its('exit_status') { should_not eq 0 }
+  end
 end
 
 # wait to make sure mongod is ready
@@ -112,10 +144,18 @@ if deb
     it { should be_directory }
   end
 
-  describe user('mongodb') do
-    it { should exist }
-    its('groups') { should include 'mongodb' }
-    its('shell') { should eq '/bin/false' }
+  if os[:release] == '18.04'
+    describe user('mongodb') do
+      it { should exist }
+      its('groups') { should include 'mongodb' }
+      its('shell') { should eq '/usr/sbin/nologin' }
+    end
+  else
+    describe user('mongodb') do
+      it { should exist }
+      its('groups') { should include 'mongodb' }
+      its('shell') { should eq '/bin/false' }
+    end
   end
 end
 

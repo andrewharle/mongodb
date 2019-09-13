@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -59,7 +61,6 @@
 
 #pragma once
 
-#include "mongo/base/disallow_copying.h"
 #include "mongo/util/decoration_container.h"
 #include "mongo/util/decoration_registry.h"
 
@@ -67,7 +68,8 @@ namespace mongo {
 
 template <typename D>
 class Decorable {
-    MONGO_DISALLOW_COPYING(Decorable);
+    Decorable(const Decorable&) = delete;
+    Decorable& operator=(const Decorable&) = delete;
 
 public:
     template <typename T>
@@ -76,46 +78,72 @@ public:
         Decoration() = delete;
 
         T& operator()(D& d) const {
-            return static_cast<Decorable&>(d)._decorations.getDecoration(_raw);
+            return static_cast<Decorable&>(d)._decorations.getDecoration(this->_raw);
         }
 
-        T& operator()(D* d) const {
+        T& operator()(D* const d) const {
             return (*this)(*d);
         }
 
         const T& operator()(const D& d) const {
-            return static_cast<const Decorable&>(d)._decorations.getDecoration(_raw);
+            return static_cast<const Decorable&>(d)._decorations.getDecoration(this->_raw);
         }
 
-        const T& operator()(const D* d) const {
+        const T& operator()(const D* const d) const {
             return (*this)(*d);
         }
 
+        const D* owner(const T* const t) const {
+            return static_cast<const D*>(getOwnerImpl(t));
+        }
+
+        D* owner(T* const t) const {
+            return static_cast<D*>(getOwnerImpl(t));
+        }
+
+        const D& owner(const T& t) const {
+            return *owner(&t);
+        }
+
+        D& owner(T& t) const {
+            return *owner(&t);
+        }
+
     private:
+        const Decorable* getOwnerImpl(const T* const t) const {
+            return *reinterpret_cast<const Decorable* const*>(
+                reinterpret_cast<const unsigned char* const>(t) - _raw._raw._index);
+        }
+
+        Decorable* getOwnerImpl(T* const t) const {
+            return const_cast<Decorable*>(getOwnerImpl(const_cast<const T*>(t)));
+        }
+
         friend class Decorable;
 
-        explicit Decoration(DecorationContainer::DecorationDescriptorWithType<T> raw)
+        explicit Decoration(
+            typename DecorationContainer<D>::template DecorationDescriptorWithType<T> raw)
             : _raw(std::move(raw)) {}
 
-        DecorationContainer::DecorationDescriptorWithType<T> _raw;
+        typename DecorationContainer<D>::template DecorationDescriptorWithType<T> _raw;
     };
 
     template <typename T>
     static Decoration<T> declareDecoration() {
-        return Decoration<T>(getRegistry()->declareDecoration<T>());
+        return Decoration<T>(getRegistry()->template declareDecoration<T>());
     }
 
 protected:
-    Decorable() : _decorations(getRegistry()) {}
+    Decorable() : _decorations(this, getRegistry()) {}
     ~Decorable() = default;
 
 private:
-    static DecorationRegistry* getRegistry() {
-        static DecorationRegistry* theRegistry = new DecorationRegistry();
+    static DecorationRegistry<D>* getRegistry() {
+        static DecorationRegistry<D>* theRegistry = new DecorationRegistry<D>();
         return theRegistry;
     }
 
-    DecorationContainer _decorations;
+    DecorationContainer<D> _decorations;
 };
 
 }  // namespace mongo

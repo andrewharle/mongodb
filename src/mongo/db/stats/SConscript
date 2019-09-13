@@ -2,6 +2,8 @@
 
 Import("env")
 
+env = env.Clone()
+
 env.Library(
     target='timer_stats',
     source=[
@@ -66,6 +68,22 @@ env.Library(
 )
 
 env.Library(
+    target='server_read_concern_write_concern_metrics',
+    source=[
+        'server_read_concern_metrics.cpp',
+        'server_write_concern_metrics.cpp',
+        env.Idlc('read_concern_stats.idl')[0],
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/commands/server_status',
+        '$BUILD_DIR/mongo/db/repl/read_concern_args',
+        '$BUILD_DIR/mongo/db/write_concern_options',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+    ],
+)
+
+env.Library(
     target='fill_locker_info',
     source=[
         'fill_locker_info.cpp',
@@ -87,23 +105,20 @@ env.CppUnitTest(
 )
 
 env.Library(
-    target='serveronly',
+    target='serveronly_stats',
     source=[
         "latency_server_status_section.cpp",
         "lock_server_status_section.cpp",
-        "range_deleter_server_status.cpp",
-        "snapshots.cpp",
         'storage_stats.cpp',
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
-        '$BUILD_DIR/mongo/db/commands/core',
-        '$BUILD_DIR/mongo/db/range_deleter',
+        '$BUILD_DIR/mongo/db/db_raii',
+        '$BUILD_DIR/mongo/db/index/index_access_method',
         'fill_locker_info',
         'top',
     ],
-    LIBDEPS_TAGS=[
-        # Depends on mongo::getDeleter from db/serveronly
-        'incomplete',
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/commands/server_status',
     ],
 )

@@ -9,14 +9,14 @@
     var db = s.getDB(dbname);
 
     assert.commandWorked(db.adminCommand({enablesharding: dbname}));
-    s.ensurePrimaryShard(dbname, 'shard0001');
+    s.ensurePrimaryShard(dbname, s.shard1.shardName);
 
     assert.commandWorked(db.adminCommand(
         {shardcollection: dbname + "." + coll, key: {a: "hashed"}, numInitialChunks: 500}));
 
     s.printShardingStatus();
 
-    var numChunks = s.config.chunks.count();
+    var numChunks = s.config.chunks.count({"ns": "test.foo"});
     assert.eq(numChunks, 500, "should be exactly 500 chunks");
 
     s.config.shards.find().forEach(

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -19,17 +19,14 @@ __wt_curstat_colgroup_init(WT_SESSION_IMPL *session,
 	WT_COLGROUP *colgroup;
 	WT_DECL_ITEM(buf);
 	WT_DECL_RET;
-	WT_TABLE *table;
 
-	WT_RET(__wt_schema_get_colgroup(
-	    session, uri, false, &table, &colgroup));
+	WT_RET(__wt_schema_get_colgroup(session, uri, false, NULL, &colgroup));
 
 	WT_RET(__wt_scr_alloc(session, 0, &buf));
 	WT_ERR(__wt_buf_fmt(session, buf, "statistics:%s", colgroup->source));
 	ret = __wt_curstat_init(session, buf->data, NULL, cfg, cst);
 
 err:	__wt_scr_free(session, &buf);
-	WT_TRET(__wt_schema_release_table(session, table));
 	return (ret);
 }
 
@@ -44,16 +41,14 @@ __wt_curstat_index_init(WT_SESSION_IMPL *session,
 	WT_DECL_ITEM(buf);
 	WT_DECL_RET;
 	WT_INDEX *idx;
-	WT_TABLE *table;
 
-	WT_RET(__wt_schema_get_index(session, uri, false, &table, &idx));
+	WT_RET(__wt_schema_get_index(session, uri, false, false, &idx));
 
 	WT_RET(__wt_scr_alloc(session, 0, &buf));
 	WT_ERR(__wt_buf_fmt(session, buf, "statistics:%s", idx->source));
 	ret = __wt_curstat_init(session, buf->data, NULL, cfg, cst);
 
 err:	__wt_scr_free(session, &buf);
-	WT_TRET(__wt_schema_release_table(session, table));
 	return (ret);
 }
 
@@ -150,7 +145,7 @@ __wt_curstat_table_init(WT_SESSION_IMPL *session,
 
 	name = uri + strlen("table:");
 	WT_RET(__wt_schema_get_table(
-	    session, name, strlen(name), false, &table));
+	    session, name, strlen(name), false, 0, &table));
 
 	WT_ERR(__wt_scr_alloc(session, 0, &buf));
 

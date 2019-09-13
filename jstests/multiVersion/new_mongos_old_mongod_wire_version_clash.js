@@ -10,11 +10,12 @@
  * ErrorCodes.IncompatibleServerVersion here would generally be an improvement.
  */
 
+// Checking UUID consistency involves talking to a shard node, which in this test is shutdown
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
 
-    "use strict";
-
-    load('jstests/libs/override_methods/multiversion_override_balancer_control.js');
+    'use strict';
 
     /*  Start a ShardingTest with a 'last-stable' mongos so that a 'last-stable'
      *  shard can be added.  (A 'last-stable' shard cannot be added from a
@@ -23,8 +24,9 @@
     var st = new ShardingTest({
         shards: 1,
         other: {
-            mongosOptions: {binVersion: "last-stable"},
-            shardOptions: {binVersion: "last-stable"},
+            mongosOptions: {binVersion: 'last-stable'},
+            shardOptions: {binVersion: 'last-stable'},
+            shardAsReplicaSet: false
         }
     });
 
@@ -37,34 +39,27 @@
     // Write commands report failure by returning writeError:
 
     assert.writeErrorWithCode(newMongos.getDB('test').foo.insert({x: 1}),
-                              ErrorCodes.RemoteResultsUnavailable);
+                              ErrorCodes.IncompatibleServerVersion);
 
     assert.writeErrorWithCode(newMongos.getDB('test').foo.update({x: 1}, {x: 1, y: 2}),
-                              ErrorCodes.RemoteResultsUnavailable);
+                              ErrorCodes.IncompatibleServerVersion);
 
     assert.writeErrorWithCode(newMongos.getDB('test').foo.remove({x: 1}),
-                              ErrorCodes.RemoteResultsUnavailable);
+                              ErrorCodes.IncompatibleServerVersion);
 
     // Query commands, on failure, throw instead:
 
-    var thrownException = assert.throws(function() {
-        newMongos.getDB('test').foo.find({}).next();
-    });
-    assert.eq(ErrorCodes.IncompatibleServerVersion, thrownException.code);
+    let res;
+    res = newMongos.getDB('test').runCommand({find: 'foo'});
+    assert.eq(res.code, ErrorCodes.IncompatibleServerVersion);
 
-    var socketExceptionErrorCode = 11002;
+    res = newMongos.getDB('test').runCommand({find: 'foo', filter: {x: 1}});
+    assert.eq(res.code, ErrorCodes.IncompatibleServerVersion);
 
-    thrownException = assert.throws(function() {
-        newMongos.getDB('test').foo.find({x: 1}).count();
-    });
-    assert.eq(socketExceptionErrorCode, thrownException.code);
+    res = newMongos.getDB('test').runCommand({aggregate: 'foo', pipeline: [], cursor: {}});
+    assert.eq(res.code, ErrorCodes.IncompatibleServerVersion);
 
-    thrownException = assert.throws(function() {
-        newMongos.getDB('test').foo.aggregate([]);
-    });
-    assert.eq(socketExceptionErrorCode, thrownException.code);
-
-    MongoRunner.stopMongos(newMongos.port);
+    MongoRunner.stopMongos(newMongos);
     st.stop();
 
 })();

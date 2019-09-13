@@ -1,3 +1,7 @@
+// Cannot implicitly shard accessed collections because unsupported use of sharded collection
+// for target collection of $lookup and $graphLookup.
+// @tags: [assumes_unsharded_collection]
+
 // In SERVER-24714, the 'restrictSearchWithMatch' option was added to $graphLookup. In this file,
 // we test the functionality and correctness of the option.
 
@@ -66,6 +70,22 @@
                       connectToField: "from",
                       as: "results",
                       restrictSearchWithMatch: {shouldBeIncluded: true}
+                  }
+              })
+              .toArray()[0];
+
+    assert.eq(res.results.length, 1);
+
+    // $expr is allowed inside the 'restrictSearchWithMatch' match expression.
+    res = local
+              .aggregate({
+                  $graphLookup: {
+                      from: "foreign",
+                      startWith: "$starting",
+                      connectFromField: "to",
+                      connectToField: "from",
+                      as: "results",
+                      restrictSearchWithMatch: {$expr: {$eq: ["$shouldBeIncluded", true]}}
                   }
               })
               .toArray()[0];

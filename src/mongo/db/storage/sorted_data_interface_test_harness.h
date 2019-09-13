@@ -1,25 +1,25 @@
-// sorted_data_interface_test_harness.h
 
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -37,8 +37,8 @@
 #include "mongo/db/operation_context_noop.h"
 #include "mongo/db/record_id.h"
 #include "mongo/db/service_context.h"
-#include "mongo/db/service_context_noop.h"
 #include "mongo/db/storage/sorted_data_interface.h"
+#include "mongo/db/storage/test_harness_helper.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/unowned_ptr.h"
 
@@ -84,23 +84,9 @@ const RecordId loc8(0, 56);
 
 class RecoveryUnit;
 
-class HarnessHelper {
+class SortedDataInterfaceHarnessHelper : public virtual HarnessHelper {
 public:
-    HarnessHelper() : _serviceContext(), _client(_serviceContext.makeClient("hh")) {}
-    virtual ~HarnessHelper() {}
-
     virtual std::unique_ptr<SortedDataInterface> newSortedDataInterface(bool unique) = 0;
-    virtual std::unique_ptr<RecoveryUnit> newRecoveryUnit() = 0;
-
-    ServiceContext::UniqueOperationContext newOperationContext(Client* client) {
-        auto opCtx = client->makeOperationContext();
-        opCtx->setRecoveryUnit(newRecoveryUnit().release(), OperationContext::kNotInUnitOfWork);
-        return opCtx;
-    }
-
-    ServiceContext::UniqueOperationContext newOperationContext() {
-        return newOperationContext(_client.get());
-    }
 
     /**
      * Creates a new SDI with some initial data.
@@ -109,18 +95,6 @@ public:
      */
     std::unique_ptr<SortedDataInterface> newSortedDataInterface(
         bool unique, std::initializer_list<IndexKeyEntry> toInsert);
-
-    Client* client() {
-        return _client.get();
-    }
-
-    ServiceContext* serviceContext() {
-        return &_serviceContext;
-    }
-
-private:
-    ServiceContextNoop _serviceContext;
-    ServiceContext::UniqueClient _client;
 };
 
 /**
@@ -130,7 +104,7 @@ private:
  *
  * Should be used for declaring and changing conditions, not for testing inserts.
  */
-void insertToIndex(unowned_ptr<OperationContext> txn,
+void insertToIndex(unowned_ptr<OperationContext> opCtx,
                    unowned_ptr<SortedDataInterface> index,
                    std::initializer_list<IndexKeyEntry> toInsert);
 
@@ -147,7 +121,7 @@ inline void insertToIndex(unowned_ptr<HarnessHelper> harness,
  *
  * Should be used for declaring and changing conditions, not for testing removes.
  */
-void removeFromIndex(unowned_ptr<OperationContext> txn,
+void removeFromIndex(unowned_ptr<OperationContext> opCtx,
                      unowned_ptr<SortedDataInterface> index,
                      std::initializer_list<IndexKeyEntry> toRemove);
 
@@ -158,5 +132,7 @@ inline void removeFromIndex(unowned_ptr<HarnessHelper> harness,
     removeFromIndex(harness->newOperationContext(client.get()), index, toRemove);
 }
 
-std::unique_ptr<HarnessHelper> newHarnessHelper();
+inline std::unique_ptr<SortedDataInterfaceHarnessHelper> newSortedDataInterfaceHarnessHelper() {
+    return dynamic_ptr_cast<SortedDataInterfaceHarnessHelper>(newHarnessHelper());
 }
+}  // namespace mongo

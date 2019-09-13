@@ -1,4 +1,3 @@
-
 t = db.geo9;
 t.drop();
 

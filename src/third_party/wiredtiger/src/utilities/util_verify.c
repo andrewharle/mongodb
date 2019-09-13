@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -16,8 +16,8 @@ util_verify(WT_SESSION *session, int argc, char *argv[])
 	WT_DECL_RET;
 	size_t size;
 	int ch;
-	bool dump_address, dump_blocks, dump_layout, dump_pages;
 	char *config, *dump_offsets, *uri;
+	bool dump_address, dump_blocks, dump_layout, dump_pages;
 
 	dump_address = dump_blocks = dump_layout = dump_pages = false;
 	config = dump_offsets = uri = NULL;

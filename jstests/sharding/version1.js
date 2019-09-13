@@ -39,19 +39,19 @@
         configdb: s._configDB,
         version: new Timestamp(2, 0),
         authoritative: true,
-        shard: "shard0000",
+        shard: "s.shard0.shardName",
         shardHost: s.s.host
     }),
                          "should have failed because version is config is 1|0");
 
-    var epoch = s.getDB('config').chunks.findOne().lastmodEpoch;
+    var epoch = s.getDB('config').chunks.findOne({"ns": "alleyinsider.foo"}).lastmodEpoch;
     assert.commandWorked(a.runCommand({
         setShardVersion: "alleyinsider.foo",
         configdb: s._configDB,
         version: new Timestamp(1, 0),
         versionEpoch: epoch,
         authoritative: true,
-        shard: "shard0000",
+        shard: s.shard0.shardName,
         shardHost: s.s.host
     }),
                          "should have worked");

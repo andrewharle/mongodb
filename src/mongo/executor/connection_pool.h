@@ -1,22 +1,25 @@
-/** *    Copyright (C) 2015 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,10 +34,15 @@
 #include <queue>
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/executor/egress_tag_closer.h"
+#include "mongo/executor/egress_tag_closer_manager.h"
 #include "mongo/stdx/chrono.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
+#include "mongo/transport/session.h"
+#include "mongo/transport/transport_layer.h"
+#include "mongo/util/future.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
 
@@ -55,8 +63,7 @@ struct ConnectionPoolStats;
  * The overall workflow here is to manage separate pools for each unique
  * HostAndPort. See comments on the various Options for how the pool operates.
  */
-class ConnectionPool {
-    class ConnectionHandleDeleter;
+class ConnectionPool : public EgressTagCloser {
     class SpecificPool;
 
 public:
@@ -64,6 +71,7 @@ public:
     class DependentTypeFactoryInterface;
     class TimerInterface;
 
+    using ConnectionHandleDeleter = stdx::function<void(ConnectionInterface* connection)>;
     using ConnectionHandle = std::unique_ptr<ConnectionInterface, ConnectionHandleDeleter>;
 
     using GetConnectionCallback = stdx::function<void(StatusWith<ConnectionHandle>)>;
@@ -117,17 +125,38 @@ public:
          * out connections or new requests
          */
         Milliseconds hostTimeout = kDefaultHostTimeout;
+
+        /**
+         * An egress tag closer manager which will provide global access to this connection pool.
+         * The manager set's tags and potentially drops connections that don't match those tags.
+         *
+         * The manager will hold this pool for the lifetime of the pool.
+         */
+        EgressTagCloserManager* egressTagCloserManager = nullptr;
     };
 
-    explicit ConnectionPool(std::unique_ptr<DependentTypeFactoryInterface> impl,
+    explicit ConnectionPool(std::shared_ptr<DependentTypeFactoryInterface> impl,
                             std::string name,
                             Options options = Options{});
 
     ~ConnectionPool();
 
+    void shutdown();
+
     void dropConnections(const HostAndPort& hostAndPort);
 
-    void get(const HostAndPort& hostAndPort, Milliseconds timeout, GetConnectionCallback cb);
+    void dropConnections(transport::Session::TagMask tags) override;
+
+    void mutateTags(const HostAndPort& hostAndPort,
+                    const stdx::function<transport::Session::TagMask(transport::Session::TagMask)>&
+                        mutateFunc) override;
+
+    Future<ConnectionHandle> get(const HostAndPort& hostAndPort,
+                                 transport::ConnectSSLMode sslMode,
+                                 Milliseconds timeout);
+    void get_forTest(const HostAndPort& hostAndPort,
+                     Milliseconds timeout,
+                     GetConnectionCallback cb);
 
     void appendConnectionStats(ConnectionPoolStats* stats) const;
 
@@ -142,25 +171,13 @@ private:
     // accessed outside the lock
     const Options _options;
 
-    const std::unique_ptr<DependentTypeFactoryInterface> _factory;
+    const std::shared_ptr<DependentTypeFactoryInterface> _factory;
 
     // The global mutex for specific pool access and the generation counter
     mutable stdx::mutex _mutex;
-    stdx::unordered_map<HostAndPort, std::unique_ptr<SpecificPool>> _pools;
-};
+    stdx::unordered_map<HostAndPort, std::shared_ptr<SpecificPool>> _pools;
 
-class ConnectionPool::ConnectionHandleDeleter {
-public:
-    ConnectionHandleDeleter() = default;
-    ConnectionHandleDeleter(ConnectionPool* pool) : _pool(pool) {}
-
-    void operator()(ConnectionInterface* connection) {
-        if (_pool && connection)
-            _pool->returnConnection(connection);
-    }
-
-private:
-    ConnectionPool* _pool = nullptr;
+    EgressTagCloserManager* _manager;
 };
 
 /**
@@ -188,6 +205,11 @@ public:
      * It should be safe to cancel a previously canceled, or never set, timer.
      */
     virtual void cancelTimeout() = 0;
+
+    /**
+     * Returns the current time for the clock used by the timer
+     */
+    virtual Date_t now() = 0;
 };
 
 /**
@@ -203,32 +225,65 @@ class ConnectionPool::ConnectionInterface : public TimerInterface {
     friend class ConnectionPool;
 
 public:
-    ConnectionInterface() = default;
+    explicit ConnectionInterface(size_t generation) : _generation(generation) {}
+
     virtual ~ConnectionInterface() = default;
 
     /**
      * Indicates that the user is now done with this connection. Users MUST call either
      * this method or indicateFailure() before returning the connection to its pool.
      */
-    virtual void indicateSuccess() = 0;
+    void indicateSuccess();
 
     /**
      * Indicates that a connection has failed. This will prevent the connection
      * from re-entering the connection pool. Users MUST call either this method or
      * indicateSuccess() before returning connections to the pool.
      */
-    virtual void indicateFailure(Status status) = 0;
+    void indicateFailure(Status status);
+
+    /**
+     * This method updates a 'liveness' timestamp to avoid unnecessarily refreshing
+     * the connection.
+     *
+     * This method should be invoked whenever we perform an operation on the connection that must
+     * have done work.  I.e. actual networking was performed.  If a connection was checked out, then
+     * back in without use, one would expect an indicateSuccess without an indicateUsed.  Only if we
+     * checked it out and did work would we call indicateUsed.
+     */
+    void indicateUsed();
 
     /**
      * The HostAndPort for the connection. This should be the same as the
      * HostAndPort passed to DependentTypeFactoryInterface::makeConnection.
      */
     virtual const HostAndPort& getHostAndPort() const = 0;
+    virtual transport::ConnectSSLMode getSslMode() const = 0;
 
     /**
      * Check if the connection is healthy using some implementation defined condition.
      */
     virtual bool isHealthy() = 0;
+
+    /**
+     * Returns the last used time point for the connection
+     */
+    Date_t getLastUsed() const;
+
+    /**
+     * Returns the status associated with the connection. If the status is not
+     * OK, the connection will not be returned to the pool.
+     */
+    const Status& getStatus() const;
+
+    /**
+     * Get the generation of the connection. This is used to track whether to
+     * continue using a connection after a call to dropConnections() by noting
+     * if the generation on the specific pool is the same as the generation on
+     * a connection (if not the connection is from a previous era and should
+     * not be re-used).
+     */
+    size_t getGeneration() const;
 
 protected:
     /**
@@ -237,24 +292,6 @@ protected:
      */
     using SetupCallback = stdx::function<void(ConnectionInterface*, Status)>;
     using RefreshCallback = stdx::function<void(ConnectionInterface*, Status)>;
-
-private:
-    /**
-     * This method updates a 'liveness' timestamp to avoid unnecessarily refreshing
-     * the connection.
-     */
-    virtual void indicateUsed() = 0;
-
-    /**
-     * Returns the last used time point for the connection
-     */
-    virtual Date_t getLastUsed() const = 0;
-
-    /**
-     * Returns the status associated with the connection. If the status is not
-     * OK, the connection will not be returned to the pool.
-     */
-    virtual const Status& getStatus() const = 0;
 
     /**
      * Sets up the connection. This should include connection + auth + any
@@ -265,7 +302,7 @@ private:
     /**
      * Resets the connection's state to kConnectionStateUnknown for the next user.
      */
-    virtual void resetToUnknown() = 0;
+    void resetToUnknown();
 
     /**
      * Refreshes the connection. This should involve a network round trip and
@@ -273,14 +310,10 @@ private:
      */
     virtual void refresh(Milliseconds timeout, RefreshCallback cb) = 0;
 
-    /**
-     * Get the generation of the connection. This is used to track whether to
-     * continue using a connection after a call to dropConnections() by noting
-     * if the generation on the specific pool is the same as the generation on
-     * a connection (if not the connection is from a previous era and should
-     * not be re-used).
-     */
-    virtual size_t getGeneration() const = 0;
+private:
+    size_t _generation;
+    Date_t _lastUsed;
+    Status _status = ConnectionPool::kConnectionStateUnknown;
 };
 
 /**
@@ -300,18 +333,24 @@ public:
     /**
      * Makes a new connection given a host and port
      */
-    virtual std::unique_ptr<ConnectionInterface> makeConnection(const HostAndPort& hostAndPort,
+    virtual std::shared_ptr<ConnectionInterface> makeConnection(const HostAndPort& hostAndPort,
+                                                                transport::ConnectSSLMode sslMode,
                                                                 size_t generation) = 0;
 
     /**
      * Makes a new timer
      */
-    virtual std::unique_ptr<TimerInterface> makeTimer() = 0;
+    virtual std::shared_ptr<TimerInterface> makeTimer() = 0;
 
     /**
      * Returns the current time point
      */
     virtual Date_t now() = 0;
+
+    /**
+     * shutdown
+     */
+    virtual void shutdown() = 0;
 };
 
 }  // namespace executor

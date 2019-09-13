@@ -6,6 +6,8 @@
  * Tests that dropping the shard key index while migrating a chunk doesn't cause the shard to abort.
  *
  * This workload was designed to reproduce SERVER-24994.
+ *
+ * @tags: [requires_sharding, assumes_balancer_off]
  */
 
 var $config = (function() {
@@ -75,7 +77,7 @@ var $config = (function() {
         data: data,
         states: states,
         transitions: transitions,
-        setup: setup
+        setup: setup,
     };
 
 })();

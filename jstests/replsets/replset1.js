@@ -29,17 +29,8 @@ var doTest = function(signal) {
     // elected master.
     var master = replTest.getPrimary();
 
-    var isPV1 = (replTest.getReplSetConfigFromNode().protocolVersion == 1);
-    if (isPV1) {
-        // Ensure the primary logs an n-op to the oplog upon transitioning to primary.
-        assert.gt(master.getDB("local").oplog.rs.count({op: 'n', o: {msg: 'new primary'}}), 0);
-    }
-    // Calling getPrimary also makes available the liveNodes structure,
-    // which looks like this:
-    // liveNodes = {master: masterNode,
-    //              slaves: [slave1, slave2]
-    //             }
-    printjson(replTest.liveNodes);
+    // Ensure the primary logs an n-op to the oplog upon transitioning to primary.
+    assert.gt(master.getDB("local").oplog.rs.count({op: 'n', o: {msg: 'new primary'}}), 0);
 
     // Here's how you save something to master
     master.getDB("foo").foo.save({a: 1000});
@@ -104,7 +95,7 @@ var doTest = function(signal) {
     replTest.awaitSecondaryNodes();
     replTest.awaitReplication();
 
-    var slaves = replTest.liveNodes.slaves;
+    var slaves = replTest._slaves;
     assert(slaves.length == 2, "Expected 2 slaves but length was " + slaves.length);
     slaves.forEach(function(slave) {
         slave.setSlaveOk();
@@ -115,8 +106,7 @@ var doTest = function(signal) {
 
     // last error
     master = replTest.getPrimary();
-    slaves = replTest.liveNodes.slaves;
-    printjson(replTest.liveNodes);
+    slaves = replTest._slaves;
 
     var db = master.getDB("foo");
     var t = db.foo;
@@ -133,12 +123,8 @@ var doTest = function(signal) {
     printjson(result);
     var lastOp = result.lastOp;
     var lastOplogOp = master.getDB("local").oplog.rs.find().sort({$natural: -1}).limit(1).next();
-    if (replTest.getReplSetConfigFromNode().protocolVersion != 1) {
-        assert.eq(lastOplogOp['ts'], lastOp);
-    } else {
-        assert.eq(lastOplogOp['ts'], lastOp['ts']);
-        assert.eq(lastOplogOp['t'], lastOp['t']);
-    }
+    assert.eq(lastOplogOp['ts'], lastOp['ts']);
+    assert.eq(lastOplogOp['t'], lastOp['t']);
 
     ts.forEach(function(z) {
         assert.eq(2, z.getIndexKeys().length, "A " + z.getMongo());

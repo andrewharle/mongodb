@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -45,10 +47,10 @@ public:
      * Returns Status::OK() if it's a valid spec.
      * Returns a Status indicating how it's invalid otherwise.
      */
-    static Status make(const BSONObj& spec,
+    static Status make(OperationContext* opCtx,
+                       const BSONObj& spec,
                        const MatchExpression* const query,
-                       ParsedProjection** out,
-                       const ExtensionsCallback& extensionsCallback);
+                       ParsedProjection** out);
 
     /**
      * Returns true if the projection requires match details from the query,
@@ -82,6 +84,10 @@ public:
         return _source;
     }
 
+    bool wantTextScore() const {
+        return _wantTextScore;
+    }
+
     /**
      * Does the projection want geoNear metadata?  If so any geoNear stage should include them.
      */
@@ -107,6 +113,14 @@ public:
      * 'a.b', and the projection {'a.b': 0} will not preserve the element located at 'a'.
      */
     bool isFieldRetainedExactly(StringData path) const;
+
+    /**
+     * Returns true if the project contains any paths with multiple path pieces (e.g. returns true
+     * for {_id: 0, "a.b": 1} and returns false for {_id: 0, a: 1, b: 1}).
+     */
+    bool hasDottedFieldPath() const {
+        return _hasDottedFieldPath;
+    }
 
 private:
     /**
@@ -172,6 +186,8 @@ private:
 
     BSONObj _source;
 
+    bool _wantTextScore = false;
+
     bool _wantGeoNearDistance = false;
 
     bool _wantGeoNearPoint = false;
@@ -180,6 +196,8 @@ private:
 
     // Whether this projection includes a sortKey meta-projection.
     bool _wantSortKey = false;
+
+    bool _hasDottedFieldPath = false;
 };
 
 }  // namespace mongo

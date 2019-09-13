@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -57,7 +59,7 @@ public:
      * Returns true if the notification has been set (i.e., the call to get/waitFor would not
      * block).
      */
-    explicit operator bool() {
+    explicit operator bool() const {
         stdx::unique_lock<stdx::mutex> lock(_mutex);
         return !!_value;
     }
@@ -66,9 +68,9 @@ public:
      * If the notification has been set, returns immediately. Otherwise blocks until it becomes set.
      * If the wait is interrupted, throws an exception.
      */
-    T& get(OperationContext* txn) {
+    T& get(OperationContext* opCtx) {
         stdx::unique_lock<stdx::mutex> lock(_mutex);
-        txn->waitForConditionOrInterrupt(_condVar, lock, [this]() -> bool { return !!_value; });
+        opCtx->waitForConditionOrInterrupt(_condVar, lock, [this]() -> bool { return !!_value; });
         return _value.get();
     }
 
@@ -102,14 +104,14 @@ public:
      * set (in which case a subsequent call to get is guaranteed to not block) or false otherwise.
      * If the wait is interrupted, throws an exception.
      */
-    bool waitFor(OperationContext* txn, Milliseconds waitTimeout) {
+    bool waitFor(OperationContext* opCtx, Milliseconds waitTimeout) {
         stdx::unique_lock<stdx::mutex> lock(_mutex);
-        return txn->waitForConditionOrInterruptFor(
+        return opCtx->waitForConditionOrInterruptFor(
             _condVar, lock, waitTimeout, [&]() { return !!_value; });
     }
 
 private:
-    stdx::mutex _mutex;
+    mutable stdx::mutex _mutex;
     stdx::condition_variable _condVar;
 
     // Protected by mutex and only moves from not-set to set once
@@ -119,12 +121,12 @@ private:
 template <>
 class Notification<void> {
 public:
-    explicit operator bool() {
+    explicit operator bool() const {
         return _notification.operator bool();
     }
 
-    void get(OperationContext* txn) {
-        _notification.get(txn);
+    void get(OperationContext* opCtx) {
+        _notification.get(opCtx);
     }
 
     void get() {
@@ -135,8 +137,8 @@ public:
         _notification.set(true);
     }
 
-    bool waitFor(OperationContext* txn, Milliseconds waitTimeout) {
-        return _notification.waitFor(txn, waitTimeout);
+    bool waitFor(OperationContext* opCtx, Milliseconds waitTimeout) {
+        return _notification.waitFor(opCtx, waitTimeout);
     }
 
 private:

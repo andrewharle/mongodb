@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -122,9 +122,9 @@ __bm_checkpoint_load(WT_BM *bm, WT_SESSION_IMPL *session,
  *	Resolve the checkpoint.
  */
 static int
-__bm_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session)
+__bm_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session, bool failed)
 {
-	return (__wt_block_checkpoint_resolve(session, bm->block));
+	return (__wt_block_checkpoint_resolve(session, bm->block, failed));
 }
 
 /*
@@ -132,7 +132,30 @@ __bm_checkpoint_resolve(WT_BM *bm, WT_SESSION_IMPL *session)
  *	Resolve the checkpoint; readonly version.
  */
 static int
-__bm_checkpoint_resolve_readonly(WT_BM *bm, WT_SESSION_IMPL *session)
+__bm_checkpoint_resolve_readonly(
+    WT_BM *bm, WT_SESSION_IMPL *session, bool failed)
+{
+	WT_UNUSED(failed);
+
+	return (__bm_readonly(bm, session));
+}
+
+/*
+ * __bm_checkpoint_start --
+ *	Start the checkpoint.
+ */
+static int
+__bm_checkpoint_start(WT_BM *bm, WT_SESSION_IMPL *session)
+{
+	return (__wt_block_checkpoint_start(session, bm->block));
+}
+
+/*
+ * __bm_checkpoint_start_readonly --
+ *	Start the checkpoint; readonly version.
+ */
+static int
+__bm_checkpoint_start_readonly(WT_BM *bm, WT_SESSION_IMPL *session)
 {
 	return (__bm_readonly(bm, session));
 }
@@ -482,6 +505,8 @@ static int
 __bm_write(WT_BM *bm, WT_SESSION_IMPL *session, WT_ITEM *buf,
     uint8_t *addr, size_t *addr_sizep, bool data_checksum, bool checkpoint_io)
 {
+	__wt_capacity_throttle(session, buf->size,
+	     checkpoint_io ? WT_THROTTLE_CKPT : WT_THROTTLE_EVICT);
 	return (__wt_block_write(session,
 	    bm->block, buf, addr, addr_sizep, data_checksum, checkpoint_io));
 }
@@ -539,12 +564,14 @@ __bm_method_set(WT_BM *bm, bool readonly)
 	bm->checkpoint = __bm_checkpoint;
 	bm->checkpoint_load = __bm_checkpoint_load;
 	bm->checkpoint_resolve = __bm_checkpoint_resolve;
+	bm->checkpoint_start = __bm_checkpoint_start;
 	bm->checkpoint_unload = __bm_checkpoint_unload;
 	bm->close = __bm_close;
 	bm->compact_end = __bm_compact_end;
 	bm->compact_page_skip = __bm_compact_page_skip;
 	bm->compact_skip = __bm_compact_skip;
 	bm->compact_start = __bm_compact_start;
+	bm->corrupt = __wt_bm_corrupt;
 	bm->free = __bm_free;
 	bm->is_mapped = __bm_is_mapped;
 	bm->map_discard = __bm_map_discard;
@@ -566,6 +593,7 @@ __bm_method_set(WT_BM *bm, bool readonly)
 	if (readonly) {
 		bm->checkpoint = __bm_checkpoint_readonly;
 		bm->checkpoint_resolve = __bm_checkpoint_resolve_readonly;
+		bm->checkpoint_start = __bm_checkpoint_start_readonly;
 		bm->compact_end = __bm_compact_end_readonly;
 		bm->compact_page_skip = __bm_compact_page_skip_readonly;
 		bm->compact_skip = __bm_compact_skip_readonly;
@@ -613,20 +641,9 @@ err:	WT_TRET(bm->close(bm, session));
  * 	Report an error, then panic the handle and the system.
  */
 int
-__wt_block_panic(WT_SESSION_IMPL *session, int error, const char *fmt, ...)
+__wt_block_panic(WT_SESSION_IMPL *session)
     WT_GCC_FUNC_ATTRIBUTE((cold))
-    WT_GCC_FUNC_ATTRIBUTE((format (printf, 3, 4)))
 {
-	va_list ap;
-
-	/*
-	 * Ignore error returns from underlying event handlers, we already have
-	 * an error value to return.
-	 */
-	va_start(ap, fmt);
-	WT_IGNORE_RET(__wt_eventv(session, false, error, NULL, 0, fmt, ap));
-	va_end(ap);
-
 	/* Switch the handle into read-only mode. */
 	__bm_method_set(S2BT(session)->bm, true);
 

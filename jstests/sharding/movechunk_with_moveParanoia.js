@@ -1,10 +1,15 @@
 /**
  * This test sets moveParanoia flag and then check that the directory is created with the moved data
  */
+
 var st = new ShardingTest({
     shards: 2,
     mongos: 1,
-    other: {chunkSize: 1, enableAutoSplit: true, shardOptions: {moveParanoia: ""}}
+    other: {
+        chunkSize: 1,
+        enableAutoSplit: true,
+        shardOptions: {moveParanoia: ""},
+    }
 });
 
 load("jstests/sharding/movechunk_include.js");

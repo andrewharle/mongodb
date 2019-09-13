@@ -2,6 +2,8 @@
 
 Import("env")
 
+env = env.Clone()
+
 # We only use the utf8 stemmers.
 stemming_packages = [
     #"ISO_8859_1_danish",
@@ -48,4 +50,10 @@ if myEnv.ToolchainIs('GCC', 'clang'):
     # Machine generated code generates overflow warnings.
     myEnv.Append(CCFLAGS=['-fno-strict-overflow'])
 
-myEnv.Library( "stemmer", stemmer_files )
+myEnv.Library(
+    target="stemmer",
+    source=stemmer_files,
+    LIBDEPS_TAGS=[
+        'init-no-global-side-effects',
+    ],
+)

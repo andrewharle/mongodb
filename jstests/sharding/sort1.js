@@ -1,18 +1,19 @@
 (function() {
+    'use strict';
 
     var s = new ShardingTest({name: "sort1", shards: 2, mongos: 2});
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
     s.adminCommand({shardcollection: "test.data", key: {'sub.num': 1}});
 
-    db = s.getDB("test");
+    var db = s.getDB("test");
 
-    N = 100;
+    const N = 100;
 
-    forward = [];
-    backward = [];
-    for (i = 0; i < N; i++) {
+    var forward = [];
+    var backward = [];
+    for (var i = 0; i < N; i++) {
         db.data.insert({_id: i, sub: {num: i, x: N - i}});
         forward.push(i);
         backward.push((N - 1) - i);
@@ -25,15 +26,15 @@
         movechunk: "test.data",
         find: {'sub.num': 50},
         to: s.getOther(s.getPrimaryShard("test")).name,
-        waitForDelete: true
+        _waitForDelete: true
     });
 
-    assert.lte(3, s.config.chunks.find().itcount(), "A1");
+    assert.lte(3, s.config.chunks.find({ns: 'test.data'}).itcount(), "A1");
 
-    temp = s.config.chunks.find().sort({min: 1}).toArray();
+    var temp = s.config.chunks.find({ns: 'test.data'}).sort({min: 1}).toArray();
     temp.forEach(printjsononeline);
 
-    z = 0;
+    var z = 0;
     for (; z < temp.length; z++)
         if (temp[z].min["sub.num"] <= 50 && temp[z].max["sub.num"] > 50)
             break;
@@ -50,11 +51,12 @@
     db.data.find().sort({'sub.num': 1}).toArray();
     s.getPrimaryShard("test").getDB("test").data.find().sort({'sub.num': 1}).toArray();
 
-    a = Date.timeFunc(function() {
+    var a = Date.timeFunc(function() {
         z = db.data.find().sort({'sub.num': 1}).toArray();
     }, 200);
     assert.eq(100, z.length, "C1");
-    b = 1.5 * Date.timeFunc(function() {
+
+    var b = 1.5 * Date.timeFunc(function() {
         z = s.getPrimaryShard("test").getDB("test").data.find().sort({'sub.num': 1}).toArray();
     }, 200);
     assert.eq(67, z.length, "C2");
@@ -105,5 +107,4 @@
     assert.eq(forward, getSorted("sub.x", -1, {'_id': 0, 'sub.num': 1}), "D12");
 
     s.stop();
-
 })();

@@ -1,31 +1,33 @@
 // windows_basic.h
 
-/*
- *    Copyright 2010 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -46,11 +48,11 @@
 #if !defined(_WIN32_WINNT)
 // Can't use symbolic versions here, since we may not have seen sdkddkver.h yet.
 #if defined(_WIN64)
-// 64-bit builds default to Windows Server 2003 support.
-#define _WIN32_WINNT 0x0502
+// 64-bit builds default to Windows 7/Windows Server 2008 R2 support.
+#define _WIN32_WINNT 0x0601
 #else
-// 32-bit builds default to Windows XP support.
-#define _WIN32_WINNT 0x0501
+// 32-bit builds default to Windows 7/Windows Server 2008 R2 support.
+#define _WIN32_WINNT 0x0601
 #endif
 #endif
 
@@ -59,11 +61,11 @@
 #if !defined(NTDDI_VERSION)
 // Can't use symbolic versions here, since we may not have seen sdkddkver.h yet.
 #if defined(_WIN64)
-// 64-bit builds default to Windows Server 2003 SP 2 support.
-#define NTDDI_VERSION 0x05020200
+// 64-bit builds default to Windows 7/Windows Server 2008 R2 support.
+#define NTDDI_VERSION 0x06010000
 #else
-// 32-bit builds default to Windows XP SP 3 support.
-#define NTDDI_VERSION 0x05010300
+// 32-bit builds default to Windows 7/Windows Server 2008 R2 support.
+#define NTDDI_VERSION 0x06010000
 #endif
 #endif
 
@@ -90,6 +92,15 @@
 #include <winsock2.h>  //this must be included before the first windows.h include
 #include <ws2tcpip.h>
 
+// We must define SECURITY_WIN32 before include sspi.h
+#define SECURITY_WIN32
+
+#include <sspi.h>
+
+#define CERT_CHAIN_PARA_HAS_EXTRA_FIELDS
+
+#include <schannel.h>
+
 #undef WIN32_NO_STATUS
 
 // Obtain a definition for the ntstatus type.
@@ -114,6 +125,6 @@
 #error "MongoDB requires Windows SDK 8.1 or higher to build"
 #endif
 
-#if !defined(NTDDI_VISTA) || NTDDI_VERSION < NTDDI_VISTA
-#error "MongoDB does not support Windows versions older than Windows Vista"
+#if !defined(NTDDI_WIN7) || NTDDI_VERSION < NTDDI_WIN7
+#error "MongoDB does not support Windows versions older than Windows 7/Windows Server 2008 R2."
 #endif

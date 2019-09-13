@@ -2,34 +2,32 @@
 config_variables:
 - &keyFile src/mongo/db/modules/enterprise/jstests/encryptdb/libs/ekf2
 
+test_kind: js_test
+
 selector:
-  js_test:
-    roots:
-    - jstests/aggregation/*.js
-    - jstests/aggregation/bugs/*.js
-    - jstests/aggregation/expressions/*.js
-    - jstests/aggregation/sources/*/*.js
-    - src/mongo/db/modules/*/jstests/aggregation/*.js
-    exclude_files:
-    # Skip any tests that run with auth explicitly.
-    - jstests/aggregation/*[aA]uth*.js
+  roots:
+  - jstests/aggregation/**/*.js
+  exclude_files:
+  - jstests/aggregation/extras/*.js
+  - jstests/aggregation/data/*.js
+  # Skip any tests that run with auth explicitly.
+  - jstests/aggregation/*[aA]uth*.js
 
 executor:
-  js_test:
-    archive:
-      hooks:
-        - ValidateCollections
-    config:
-      shell_options:
-        readMode: commands
+  archive:
     hooks:
-    - class: ValidateCollections
-    - class: CleanEveryN
-      n: 20
-    fixture:
-      class: MongoDFixture
-      mongod_options:
-        enableEncryption: ''
-        encryptionKeyFile: *keyFile
-        set_parameters:
-          enableTestCommands: 1
+      - ValidateCollections
+  config:
+    shell_options:
+      readMode: commands
+  hooks:
+  - class: ValidateCollections
+  - class: CleanEveryN
+    n: 20
+  fixture:
+    class: MongoDFixture
+    mongod_options:
+      enableEncryption: ''
+      encryptionKeyFile: *keyFile
+      set_parameters:
+        enableTestCommands: 1

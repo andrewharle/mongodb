@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -94,10 +94,11 @@ __wt_bm_read(WT_BM *bm, WT_SESSION_IMPL *session,
 	 * In diagnostic mode, verify the block we're about to read isn't on
 	 * the available list, or for live systems, the discard list.
 	 */
-	WT_RET(__wt_block_misplaced(
-	    session, block, "read", offset, size, bm->is_live));
+	WT_RET(__wt_block_misplaced(session,
+	    block, "read", offset, size, bm->is_live, __func__, __LINE__));
 #endif
 	/* Read the block. */
+	__wt_capacity_throttle(session, size, WT_THROTTLE_READ);
 	WT_RET(
 	    __wt_block_read_off(session, block, buf, offset, size, checksum));
 
@@ -107,42 +108,109 @@ __wt_bm_read(WT_BM *bm, WT_SESSION_IMPL *session,
 	return (0);
 }
 
+/*
+ * __wt_bm_corrupt_dump --
+ *	Dump a block into the log in 1KB chunks.
+ */
+static int
+__wt_bm_corrupt_dump(WT_SESSION_IMPL *session,
+    WT_ITEM *buf, wt_off_t offset, uint32_t size, uint32_t checksum)
+    WT_GCC_FUNC_ATTRIBUTE((cold))
+{
+	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
+	size_t chunk, i, nchunks;
+
+#define	WT_CORRUPT_FMT	"{%" PRIuMAX ", %" PRIu32 ", %" PRIu32 "}"
+	if (buf->size == 0) {
+		__wt_errx(session,
+		    WT_CORRUPT_FMT ": empty buffer, no dump available",
+		    (uintmax_t)offset, size, checksum);
+		return (0);
+	}
+
+	WT_RET(__wt_scr_alloc(session, 4 * 1024, &tmp));
+
+	nchunks = buf->size / 1024 + (buf->size % 1024 == 0 ? 0 : 1);
+	for (chunk = i = 0;;) {
+		WT_ERR(__wt_buf_catfmt(
+		    session, tmp, "%02x ", ((uint8_t *)buf->data)[i]));
+		if (++i == buf->size || i % 1024 == 0) {
+			__wt_errx(session,
+			    WT_CORRUPT_FMT
+			    ": (chunk %" WT_SIZET_FMT " of %" WT_SIZET_FMT
+			    "): %.*s",
+			    (uintmax_t)offset, size, checksum,
+			    ++chunk, nchunks,
+			    (int)tmp->size, (char *)tmp->data);
+			if (i == buf->size)
+				break;
+			WT_ERR(__wt_buf_set(session, tmp, "", 0));
+		}
+	}
+
+err:	__wt_scr_free(session, &tmp);
+	return (ret);
+}
+
+/*
+ * __wt_bm_corrupt --
+ *	Report a block has been corrupted, external API.
+ */
+int
+__wt_bm_corrupt(WT_BM *bm,
+    WT_SESSION_IMPL *session, const uint8_t *addr, size_t addr_size)
+{
+	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
+	wt_off_t offset;
+	uint32_t checksum, size;
+
+	/* Read the block. */
+	WT_RET(__wt_scr_alloc(session, 0, &tmp));
+	WT_ERR(__wt_bm_read(bm, session, tmp, addr, addr_size));
+
+	/* Crack the cookie, dump the block. */
+	WT_ERR(__wt_block_buffer_to_addr(
+	    bm->block, addr, &offset, &size, &checksum));
+	WT_ERR(__wt_bm_corrupt_dump(session, tmp, offset, size, checksum));
+
+err:	__wt_scr_free(session, &tmp);
+	return (ret);
+}
+
 #ifdef HAVE_DIAGNOSTIC
 /*
  * __wt_block_read_off_blind --
- *	Read the block at an offset, try to figure out what it looks like,
- * debugging only.
+ *	Read the block at an offset, return the size and checksum, debugging
+ * only.
  */
 int
-__wt_block_read_off_blind(
-    WT_SESSION_IMPL *session, WT_BLOCK *block, WT_ITEM *buf, wt_off_t offset)
+__wt_block_read_off_blind(WT_SESSION_IMPL *session,
+    WT_BLOCK *block, wt_off_t offset, uint32_t *sizep, uint32_t *checksump)
 {
 	WT_BLOCK_HEADER *blk;
-	uint32_t checksum, size;
+	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
+
+	*sizep = 0;
+	*checksump = 0;
 
 	/*
 	 * Make sure the buffer is large enough for the header and read the
 	 * the first allocation-size block.
 	 */
-	WT_RET(__wt_buf_init(session, buf, block->allocsize));
-	WT_RET(__wt_read(
-	    session, block->fh, offset, (size_t)block->allocsize, buf->mem));
-	blk = WT_BLOCK_HEADER_REF(buf->mem);
+	WT_RET(__wt_scr_alloc(session, block->allocsize, &tmp));
+	WT_ERR(__wt_read(
+	    session, block->fh, offset, (size_t)block->allocsize, tmp->mem));
+	blk = WT_BLOCK_HEADER_REF(tmp->mem);
 	__wt_block_header_byteswap(blk);
 
-	/*
-	 * Copy out the size and checksum (we're about to re-use the buffer),
-	 * and if the size isn't insane, read the rest of the block.
-	 */
-	size = blk->disk_size;
-	checksum = blk->checksum;
-	if (__wt_block_offset_invalid(block, offset, size))
-		WT_RET_MSG(session, EINVAL,
-		    "block at offset %" PRIuMAX " cannot be a valid block, no "
-		    "read attempted",
-		    (uintmax_t)offset);
-	return (
-	    __wt_block_read_off(session, block, buf, offset, size, checksum));
+	*sizep = blk->disk_size;
+	*checksump = blk->checksum;
+
+err:	__wt_scr_free(session, &tmp);
+	return (ret);
 }
 #endif
 
@@ -156,7 +224,6 @@ __wt_block_read_off(WT_SESSION_IMPL *session, WT_BLOCK *block,
 {
 	WT_BLOCK_HEADER *blk, swap;
 	size_t bufsize;
-	uint32_t page_checksum;
 
 	__wt_verbose(session, WT_VERB_READ,
 	    "off %" PRIuMAX ", size %" PRIu32 ", checksum %" PRIu32,
@@ -193,10 +260,9 @@ __wt_block_read_off(WT_SESSION_IMPL *session, WT_BLOCK *block,
 	__wt_block_header_byteswap_copy(blk, &swap);
 	if (swap.checksum == checksum) {
 		blk->checksum = 0;
-		page_checksum = __wt_checksum(buf->mem,
+		if (__wt_checksum_match(buf->mem,
 		    F_ISSET(&swap, WT_BLOCK_DATA_CKSUM) ?
-		    size : WT_BLOCK_COMPRESS_SKIP);
-		if (page_checksum == checksum) {
+		    size : WT_BLOCK_COMPRESS_SKIP, checksum)) {
 			/*
 			 * Swap the page-header as needed; this doesn't belong
 			 * here, but it's the best place to catch all callers.
@@ -207,22 +273,27 @@ __wt_block_read_off(WT_SESSION_IMPL *session, WT_BLOCK *block,
 
 		if (!F_ISSET(session, WT_SESSION_QUIET_CORRUPT_FILE))
 			__wt_errx(session,
-			    "read checksum error for %" PRIu32 "B block at "
+			    "%s: read checksum error for %" PRIu32 "B block at "
 			    "offset %" PRIuMAX ": calculated block checksum "
-			    "of %" PRIu32 " doesn't match expected checksum "
-			    "of %" PRIu32,
-			    size, (uintmax_t)offset, page_checksum, checksum);
+			    " doesn't match expected checksum",
+			    block->name, size, (uintmax_t)offset);
 	} else
 		if (!F_ISSET(session, WT_SESSION_QUIET_CORRUPT_FILE))
 			__wt_errx(session,
-			    "read checksum error for %" PRIu32 "B block at "
+			    "%s: read checksum error for %" PRIu32 "B block at "
 			    "offset %" PRIuMAX ": block header checksum "
 			    "of %" PRIu32 " doesn't match expected checksum "
 			    "of %" PRIu32,
+			    block->name,
 			    size, (uintmax_t)offset, swap.checksum, checksum);
 
+	if (!F_ISSET(session, WT_SESSION_QUIET_CORRUPT_FILE))
+		WT_IGNORE_RET(
+		    __wt_bm_corrupt_dump(session, buf, offset, size, checksum));
+
 	/* Panic if a checksum fails during an ordinary read. */
-	return (block->verify ||
-	    F_ISSET(session, WT_SESSION_QUIET_CORRUPT_FILE) ?
-	    WT_ERROR : __wt_illegal_value(session, block->name));
+	F_SET(S2C(session), WT_CONN_DATA_CORRUPTION);
+	if (block->verify || F_ISSET(session, WT_SESSION_QUIET_CORRUPT_FILE))
+		return (WT_ERROR);
+	WT_PANIC_RET(session, WT_ERROR, "%s: fatal read error", block->name);
 }

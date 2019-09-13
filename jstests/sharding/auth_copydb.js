@@ -1,14 +1,22 @@
 // Tests the copydb command on mongos with auth
 (function() {
     'use strict';
+    load('jstests/libs/feature_compatibility_version.js');
 
-    var st = new ShardingTest({shards: 1, mongos: 1, other: {keyFile: 'jstests/libs/key1'}});
+    // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+    var st = new ShardingTest(
+        {shards: 1, mongos: 1, other: {keyFile: 'jstests/libs/key1', shardAsReplicaSet: false}});
     var mongos = st.s0;
     var destAdminDB = mongos.getDB('admin');
     var destTestDB = mongos.getDB('test');
 
     var sourceMongodConn = MongoRunner.runMongod({});
     var sourceTestDB = sourceMongodConn.getDB('test');
+
+    // Ensure sourceMongodConn has featureCompatibilityVersion=lastStableFCV so that the sharded
+    // cluster can communicate with it if it has featureCompatibilityVersion=lastStableFCV
+    assert.commandWorked(
+        sourceMongodConn.adminCommand({setFeatureCompatibilityVersion: lastStableFCV}));
 
     sourceTestDB.foo.insert({a: 1});
 
@@ -37,4 +45,5 @@
     assert.eq(1, destTestDB.foo.findOne().a);
 
     st.stop();
+    MongoRunner.stopMongod(sourceMongodConn);
 })();

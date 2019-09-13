@@ -1,30 +1,33 @@
 // bsonelement.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -35,6 +38,7 @@
 #include <string>
 #include <vector>
 
+#include "mongo/base/data_range.h"
 #include "mongo/base/data_type_endian.h"
 #include "mongo/base/data_view.h"
 #include "mongo/base/string_data_comparator_interface.h"
@@ -55,13 +59,6 @@ class Timestamp;
 typedef BSONElement be;
 typedef BSONObj bo;
 typedef BSONObjBuilder bob;
-
-/** l and r MUST have same type when called: check that first.
-    If comparator is non-null, it is used for all comparisons between two strings.
-*/
-int compareElementValues(const BSONElement& l,
-                         const BSONElement& r,
-                         const StringData::ComparatorInterface* comparator = nullptr);
 
 /** BSONElement represents an "element" in a BSONObj.  So for the object { a : 3, b : "abc" },
     'a : 3' is the first element (key+value).
@@ -87,7 +84,26 @@ public:
      */
     using DeferredComparison = BSONComparatorInterfaceBase<BSONElement>::DeferredComparison;
 
-    /** These functions, which start with a capital letter, throw a MsgAssertionException if the
+    /**
+     * Set of rules that dictate the behavior of the comparison APIs.
+     */
+    using ComparisonRules = BSONComparatorInterfaceBase<BSONElement>::ComparisonRules;
+    using ComparisonRulesSet = BSONComparatorInterfaceBase<BSONElement>::ComparisonRulesSet;
+
+    /**
+     * Compares two BSON elements of the same canonical type.
+     *
+     * Returns <0 if 'l' is less than the element 'r'.
+     *         >0 if 'l' is greater than the element 'r'.
+     *          0 if 'l' is equal to the element 'r'.
+     */
+    static int compareElements(const BSONElement& l,
+                               const BSONElement& r,
+                               ComparisonRulesSet rules,
+                               const StringData::ComparatorInterface* comparator);
+
+
+    /** These functions, which start with a capital letter, throw if the
         element is not of the required type. Example:
 
         std::string foo = obj["foo"].String(); // std::exception if not a std::string type or DNE
@@ -102,7 +118,12 @@ public:
         return chk(mongo::Date).date();
     }
     double Number() const {
-        return chk(isNumber()).number();
+        uassert(13118,
+                str::stream() << "expected " << fieldName()
+                              << " to have a numeric type, but it is a "
+                              << type(),
+                isNumber());
+        return number();
     }
     Decimal128 Decimal() const {
         return chk(NumberDecimal)._numberDecimal();
@@ -123,18 +144,12 @@ public:
     mongo::OID OID() const {
         return chk(jstOID).__oid();
     }
-    void Null() const {
-        chk(isNull());
-    }  // throw MsgAssertionException if not null
-    void OK() const {
-        chk(ok());
-    }  // throw MsgAssertionException if element DNE
 
     /** @return the embedded object associated with this field.
         Note the returned object is a reference to within the parent bson object. If that
         object is out of scope, this pointer will no longer be valid. Call getOwned() on the
         returned BSONObj if you need your own copy.
-        throws UserException if the element is not of type object.
+        throws AssertionException if the element is not of type object.
     */
     BSONObj Obj() const;
 
@@ -211,7 +226,7 @@ public:
     /** retrieve a field within this element
         throws exception if *this is not an embedded object
     */
-    BSONElement operator[](const std::string& field) const;
+    BSONElement operator[](StringData field) const;
 
     /** See canonicalizeBSONType in bsontypes.h */
     int canonicalType() const {
@@ -225,11 +240,12 @@ public:
         return type() == EOO;
     }
 
-    /** Size of the element.
-        @param maxLen If maxLen is specified, don't scan more than maxLen bytes to calculate size.
-    */
-    int size(int maxLen) const;
-    int size() const;
+    /**
+     * Size of the element.
+     */
+    int size() const {
+        return totalSize;
+    }
 
     /** Wrap this element up as a singleton object. */
     BSONObj wrap() const;
@@ -251,8 +267,6 @@ public:
      * NOTE: size includes the NULL terminator.
      */
     int fieldNameSize() const {
-        if (fieldNameSize_ == -1)
-            fieldNameSize_ = (int)strlen(fieldName()) + 1;
         return fieldNameSize_;
     }
 
@@ -335,6 +349,11 @@ public:
      *  very large doubles -> LLONG_MAX
      *  very small doubles -> LLONG_MIN  */
     long long safeNumberLong() const;
+
+    /** This safeNumberLongForHash() function does the same thing as safeNumberLong, but it
+     *  preserves edge-case behavior from older versions.
+     */
+    long long safeNumberLongForHash() const;
 
     /** Retrieve decimal value for the element safely. */
     Decimal128 numberDecimal() const;
@@ -468,6 +487,19 @@ public:
         return (BinDataType)c;
     }
 
+    std::vector<uint8_t> _binDataVector() const {
+        if (binDataType() != ByteArrayDeprecated) {
+            return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(value()) + 5,
+                                        reinterpret_cast<const uint8_t*>(value()) + 5 +
+                                            valuestrsize());
+        } else {
+            // Skip the extra int32 size
+            return std::vector<uint8_t>(reinterpret_cast<const uint8_t*>(value()) + 4,
+                                        reinterpret_cast<const uint8_t*>(value()) + 4 +
+                                            valuestrsize() - 4);
+        }
+    }
+
     /** Retrieve the regex std::string for a Regex element */
     const char* regex() const {
         verify(type() == RegEx);
@@ -505,14 +537,16 @@ public:
      */
     bool binaryEqualValues(const BSONElement& rhs) const;
 
-    /** Well ordered comparison.
-        @return <0: l<r. 0:l==r. >0:l>r
-        order by type, field name, and field value.
-        If considerFieldName is true, pay attention to the field name.
-        If comparator is non-null, it is used for all comparisons between two strings.
-    */
-    int woCompare(const BSONElement& e,
-                  bool considerFieldName = true,
+    /**
+     * Compares two BSON Elements using the rules specified by 'rules' and the 'comparator' for
+     * string comparisons.
+     *
+     * Returns <0 if 'this' is less than 'elem'.
+     *         >0 if 'this' is greater than 'elem'.
+     *          0 if 'this' is equal to 'elem'.
+     */
+    int woCompare(const BSONElement& elem,
+                  ComparisonRulesSet rules = ComparisonRules::kConsiderFieldName,
                   const StringData::ComparatorInterface* comparator = nullptr) const;
 
     DeferredComparison operator<(const BSONElement& other) const {
@@ -542,9 +576,6 @@ public:
     const char* rawdata() const {
         return data;
     }
-
-    /** 0 == Equality, just not defined yet */
-    int getGtLtOp(int def = 0) const;
 
     /** Constructs an empty element */
     BSONElement();
@@ -579,6 +610,37 @@ public:
         return Timestamp();
     }
 
+    bool isBinData(BinDataType bdt) const {
+        return (type() == BinData) && (binDataType() == bdt);
+    }
+
+    const std::array<unsigned char, 16> uuid() const {
+        int len = 0;
+        const char* data = nullptr;
+        if (isBinData(BinDataType::newUUID)) {
+            data = binData(len);
+        }
+        uassert(ErrorCodes::InvalidUUID,
+                "uuid must be a 16-byte binary field with UUID (4) subtype",
+                len == 16);
+        std::array<unsigned char, 16> result;
+        memcpy(&result, data, len);
+        return result;
+    }
+
+    const std::array<unsigned char, 16> md5() const {
+        int len = 0;
+        const char* data = nullptr;
+        if (isBinData(BinDataType::MD5Type)) {
+            data = binData(len);
+        }
+        uassert(40437, "md5 must be a 16-byte binary field with MD5 (5) subtype", len == 16);
+        std::array<unsigned char, 16> result;
+        memcpy(&result, data, len);
+        return result;
+    }
+
+
     Date_t timestampTime() const {
         unsigned long long t = ConstDataView(value() + 4).read<LittleEndian<unsigned int>>();
         return Date_t::fromMillisSinceEpoch(t * 1000);
@@ -604,71 +666,78 @@ public:
     }
 
     // @param maxLen don't scan more than maxLen bytes
-    explicit BSONElement(const char* d, int maxLen) : data(d) {
+    explicit BSONElement(const char* d) : data(d) {
         if (eoo()) {
-            totalSize = 1;
             fieldNameSize_ = 0;
+            totalSize = 1;
         } else {
-            totalSize = -1;
-            fieldNameSize_ = -1;
-            if (maxLen != -1) {
-                size_t size = strnlen(fieldName(), maxLen - 1);
-                uassert(10333, "Invalid field name", size < size_t(maxLen - 1));
-                fieldNameSize_ = size + 1;
+            fieldNameSize_ = strlen(d + 1 /*skip type*/) + 1 /*include NUL byte*/;
+            totalSize = computeSize();
+        }
+    }
+
+    struct CachedSizeTag {};  // Opts in to next constructor.
+
+    /**
+     * Construct a BSONElement where you already know the length of the name and/or the total size
+     * of the element. fieldNameSize includes the null terminator. You may pass -1 for either or
+     * both sizes to indicate that they are unknown and should be computed.
+     */
+    BSONElement(const char* d, int fieldNameSize, int totalSize, CachedSizeTag) : data(d) {
+        if (eoo()) {
+            fieldNameSize_ = 0;
+            this->totalSize = 1;
+        } else {
+            if (fieldNameSize == -1) {
+                fieldNameSize_ = strlen(d + 1 /*skip type*/) + 1 /*include NUL byte*/;
+            } else {
+                fieldNameSize_ = fieldNameSize;
+            }
+            if (totalSize == -1) {
+                this->totalSize = computeSize();
+            } else {
+                this->totalSize = totalSize;
             }
         }
     }
-
-    explicit BSONElement(const char* d) : data(d) {
-        fieldNameSize_ = -1;
-        totalSize = -1;
-        if (eoo()) {
-            fieldNameSize_ = 0;
-            totalSize = 1;
-        }
-    }
-
-    struct FieldNameSizeTag {};  // For disambiguation with ctor taking 'maxLen' above.
-
-    /** Construct a BSONElement where you already know the length of the name. The value
-     *  passed here includes the null terminator. The data pointed to by 'd' must not
-     *  represent an EOO. You may pass -1 to indicate that you don't actually know the
-     *  size.
-     */
-    BSONElement(const char* d, int fieldNameSize, FieldNameSizeTag)
-        : data(d),
-          fieldNameSize_(fieldNameSize)  // internal size includes null terminator
-          ,
-          totalSize(-1) {}
 
     std::string _asCode() const;
 
     template <typename T>
     bool coerce(T* out) const;
 
+    /**
+     * Constant double representation of 2^63, the smallest value that will overflow a long long.
+     *
+     * It is not safe to obtain this value by casting std::numeric_limits<long long>::max() to
+     * double, because the conversion loses precision, and the C++ standard leaves it up to the
+     * implementation to decide whether to round up to 2^63 or round down to the next representable
+     * value (2^63 - 2^10).
+     */
+    static const double kLongLongMaxPlusOneAsDouble;
+
 private:
     const char* data;
-    mutable int fieldNameSize_;  // cached value
-
-    mutable int totalSize; /* caches the computed size */
+    int fieldNameSize_;  // internal size includes null terminator
+    int totalSize;
 
     friend class BSONObjIterator;
+    friend class BSONObjStlIterator;
     friend class BSONObj;
-    const BSONElement& chk(int t) const {
+    const BSONElement& chk(BSONType t) const {
         if (t != type()) {
             StringBuilder ss;
             if (eoo())
                 ss << "field not found, expected type " << t;
             else
                 ss << "wrong type for field (" << fieldName() << ") " << type() << " != " << t;
-            msgasserted(13111, ss.str());
+            uasserted(13111, ss.str());
         }
         return *this;
     }
-    const BSONElement& chk(bool expr) const {
-        massert(13118, "unexpected or missing type value in BSON object", expr);
-        return *this;
-    }
+
+    // Only called from constructors.
+    int computeSize() const;
 };
 
 inline bool BSONElement::trueValue() const {
@@ -781,7 +850,7 @@ inline long long BSONElement::safeNumberLong() const {
             if (std::isnan(d)) {
                 return 0;
             }
-            if (d > (double)std::numeric_limits<long long>::max()) {
+            if (!(d < kLongLongMaxPlusOneAsDouble)) {
                 return std::numeric_limits<long long>::max();
             }
             if (d < std::numeric_limits<long long>::min()) {
@@ -805,6 +874,38 @@ inline long long BSONElement::safeNumberLong() const {
         default:
             return numberLong();
     }
+}
+
+/**
+ * This safeNumberLongForHash() function does the same thing as safeNumberLong, but it preserves
+ * edge-case behavior from older versions. It's provided for use by hash functions that need to
+ * maintain compatibility with older versions. Don't make any changes to safeNumberLong() without
+ * ensuring that this function (which is implemented in terms of safeNumberLong()) has exactly the
+ * same behavior.
+ *
+ * Historically, safeNumberLong() used a check that would consider 2^63 to be safe to cast to
+ * int64_t, but that value actually overflows. That overflow is preserved here.
+ *
+ * The new safeNumberLong() function uses a tight bound, allowing it to correctly clamp double 2^63
+ * to the max 64-bit int (2^63 - 1).
+ */
+inline long long BSONElement::safeNumberLongForHash() const {
+    if (NumberDouble == type()) {
+        double d = numberDouble();
+        if (std::isnan(d)) {
+            return 0;
+        }
+        if (d > (double)std::numeric_limits<long long>::max()) {
+            return std::numeric_limits<long long>::max();
+        }
+        if (d < std::numeric_limits<long long>::min()) {
+            return std::numeric_limits<long long>::min();
+        }
+        return (long long)d;
+    }
+
+    // safeNumberLong() and safeNumberLongForHash() have identical behavior for non-long value.
+    return safeNumberLong();
 }
 
 inline BSONElement::BSONElement() {

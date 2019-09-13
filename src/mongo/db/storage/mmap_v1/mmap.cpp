@@ -1,30 +1,33 @@
 // mmap.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
@@ -36,8 +39,10 @@
 #include <boost/filesystem/operations.hpp>
 
 #include "mongo/base/owned_pointer_vector.h"
+#include "mongo/db/client.h"
+#include "mongo/db/concurrency/locker.h"
+#include "mongo/db/operation_context.h"
 #include "mongo/db/storage/storage_options.h"
-#include "mongo/util/concurrency/rwlock.h"
 #include "mongo/util/log.h"
 #include "mongo/util/map_util.h"
 #include "mongo/util/mongoutils/str.h"
@@ -67,20 +72,35 @@ map<string, MongoFile*> pathToFile;
 mongo::AtomicUInt64 mmfNextId(0);
 }  // namespace
 
-MemoryMappedFile::MemoryMappedFile(OptionSet options)
+MemoryMappedFile::MemoryMappedFile(OperationContext* opCtx, OptionSet options)
     : MongoFile(options), _uniqueId(mmfNextId.fetchAndAdd(1)) {
-    created();
+    created(opCtx);
 }
 
-/* Create. Must not exist.
-@param zero fill file with zeros when true
-*/
-void* MemoryMappedFile::create(const std::string& filename, unsigned long long len, bool zero) {
+MemoryMappedFile::~MemoryMappedFile() {
+    invariant(isClosed());
+
+    auto opCtx = cc().getOperationContext();
+    invariant(opCtx);
+
+    LockMongoFilesShared lock(opCtx);
+    for (std::set<MongoFile*>::const_iterator it = mmfiles.begin(); it != mmfiles.end(); it++) {
+        invariant(*it != this);
+    }
+}
+
+/*static*/ AtomicUInt64 MemoryMappedFile::totalMappedLength;
+
+void* MemoryMappedFile::create(OperationContext* opCtx,
+                               const std::string& filename,
+                               unsigned long long len,
+                               bool zero) {
     uassert(13468,
             string("can't create file already exists ") + filename,
             !boost::filesystem::exists(filename));
-    void* p = map(filename.c_str(), len);
-    if (p && zero) {
+    void* p = map(opCtx, filename.c_str(), len);
+    fassert(16331, p);
+    if (zero) {
         size_t sz = (size_t)len;
         verify(len == sz);
         memset(p, 0, sz);
@@ -96,7 +116,7 @@ void* MemoryMappedFile::create(const std::string& filename, unsigned long long l
     length = l;
 }
 
-void* MemoryMappedFile::map(const char* filename) {
+void* MemoryMappedFile::map(OperationContext* opCtx, const char* filename) {
     unsigned long long l;
     try {
         l = boost::filesystem::file_size(filename);
@@ -107,7 +127,10 @@ void* MemoryMappedFile::map(const char* filename) {
                                             << ' '
                                             << e.what());
     }
-    return map(filename, l);
+
+    void* ret = map(opCtx, filename, l);
+    fassert(16334, ret);
+    return ret;
 }
 
 /* --- MongoFile -------------------------------------------------
@@ -118,7 +141,7 @@ MongoFile::MongoFile(OptionSet options)
     : _options(storageGlobalParams.readOnly ? (options | READONLY) : options) {}
 
 
-RWLockRecursiveNongreedy LockMongoFilesShared::mmmutex("mmmutex", 10 * 60 * 1000 /* 10 minutes */);
+Lock::ResourceMutex LockMongoFilesShared::mmmutex("MMapMutex");
 unsigned LockMongoFilesShared::era = 99;  // note this rolls over
 
 set<MongoFile*>& MongoFile::getAllFiles() {
@@ -130,14 +153,14 @@ set<MongoFile*>& MongoFile::getAllFiles() {
     safe to call more than once, albeit might be wasted work
     ideal to call close to the close, if the close is well before object destruction
 */
-void MongoFile::destroyed() {
-    LockMongoFilesShared::assertExclusivelyLocked();
+void MongoFile::destroyed(OperationContext* opCtx) {
+    LockMongoFilesShared::assertExclusivelyLocked(opCtx);
     mmfiles.erase(this);
     pathToFile.erase(filename());
 }
 
 /*static*/
-void MongoFile::closeAllFiles(stringstream& message) {
+void MongoFile::closeAllFiles(OperationContext* opCtx, stringstream& message) {
     static int closingAllFiles = 0;
     if (closingAllFiles) {
         message << "warning closingAllFiles=" << closingAllFiles << endl;
@@ -145,37 +168,26 @@ void MongoFile::closeAllFiles(stringstream& message) {
     }
     ++closingAllFiles;
 
-    LockMongoFilesExclusive lk;
+    LockMongoFilesExclusive lk(opCtx);
 
     ProgressMeter pm(mmfiles.size(), 2, 1, "files", "File Closing Progress");
     set<MongoFile*> temp = mmfiles;
     for (set<MongoFile*>::iterator i = temp.begin(); i != temp.end(); i++) {
-        (*i)->close();  // close() now removes from mmfiles
+        (*i)->close(opCtx);  // close() now removes from mmfiles
         pm.hit();
     }
     message << "closeAllFiles() finished";
     --closingAllFiles;
 }
 
-/*static*/ long long MongoFile::totalMappedLength() {
-    unsigned long long total = 0;
-
-    LockMongoFilesShared lk;
-
-    for (set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++)
-        total += (*i)->length();
-
-    return total;
+/*static*/ int MongoFile::flushAll(OperationContext* opCtx, bool sync) {
+    return _flushAll(opCtx, sync);
 }
 
-/*static*/ int MongoFile::flushAll(bool sync) {
-    return _flushAll(sync);
-}
-
-/*static*/ int MongoFile::_flushAll(bool sync) {
+/*static*/ int MongoFile::_flushAll(OperationContext* opCtx, bool sync) {
     if (!sync) {
         int num = 0;
-        LockMongoFilesShared lk;
+        LockMongoFilesShared lk(opCtx);
         for (set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++) {
             num++;
             MongoFile* mmf = *i;
@@ -195,7 +207,7 @@ void MongoFile::closeAllFiles(stringstream& message) {
     OwnedPointerVector<Flushable> thingsToFlushWrapper;
     vector<Flushable*>& thingsToFlush = thingsToFlushWrapper.mutableVector();
     {
-        LockMongoFilesShared lk;
+        LockMongoFilesShared lk(opCtx);
         for (set<MongoFile*>::iterator i = mmfiles.begin(); i != mmfiles.end(); i++) {
             MongoFile* mmf = *i;
             if (!mmf)
@@ -205,22 +217,22 @@ void MongoFile::closeAllFiles(stringstream& message) {
     }
 
     for (size_t i = 0; i < thingsToFlush.size(); i++) {
-        thingsToFlush[i]->flush();
+        thingsToFlush[i]->flush(opCtx);
     }
 
     return thingsToFlush.size();
 }
 
-void MongoFile::created() {
+void MongoFile::created(OperationContext* opCtx) {
     // If we're a READONLY mapping, we don't want to ever flush.
     if (!isOptionSet(READONLY)) {
-        LockMongoFilesExclusive lk;
+        LockMongoFilesExclusive lk(opCtx);
         mmfiles.insert(this);
     }
 }
 
-void MongoFile::setFilename(const std::string& fn) {
-    LockMongoFilesExclusive lk;
+void MongoFile::setFilename(OperationContext* opCtx, const std::string& fn) {
+    LockMongoFilesExclusive lk(opCtx);
     verify(_filename.empty());
     _filename = boost::filesystem::absolute(fn).generic_string();
     MongoFile*& ptf = pathToFile[_filename];
@@ -232,23 +244,6 @@ MongoFile* MongoFileFinder::findByPath(const std::string& path) const {
     return mapFindWithDefault(pathToFile,
                               boost::filesystem::absolute(path).generic_string(),
                               static_cast<MongoFile*>(NULL));
-}
-
-
-void printMemInfo(const char* where) {
-    LogstreamBuilder out = log();
-    out << "mem info: ";
-    if (where)
-        out << where << " ";
-
-    ProcessInfo pi;
-    if (!pi.supported()) {
-        out << " not supported";
-        return;
-    }
-
-    out << "vsize: " << pi.getVirtualMemorySize() << " resident: " << pi.getResidentSize()
-        << " mapped: " << (MemoryMappedFile::totalMappedLength() / (1024 * 1024));
 }
 
 void dataSyncFailedHandler() {

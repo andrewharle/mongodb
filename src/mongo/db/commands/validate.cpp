@@ -1,25 +1,27 @@
 // validate.cpp
 
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,6 +35,7 @@
 #include "mongo/platform/basic.h"
 
 #include "mongo/db/catalog/collection.h"
+#include "mongo/db/catalog/collection_catalog_entry.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
 #include "mongo/db/db_raii.h"
@@ -40,6 +43,7 @@
 #include "mongo/db/storage/record_store.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
+#include "mongo/util/scopeguard.h"
 
 namespace mongo {
 
@@ -47,20 +51,34 @@ using std::endl;
 using std::string;
 using std::stringstream;
 
-MONGO_FP_DECLARE(validateCmdCollectionNotValid);
+MONGO_FAIL_POINT_DEFINE(validateCmdCollectionNotValid);
 
-class ValidateCmd : public Command {
+namespace {
+
+// Protects `_validationQueue`
+stdx::mutex _validationMutex;
+
+// Wakes up `_validationQueue`
+stdx::condition_variable _validationNotifier;
+
+// Holds the set of full `database.collections` namespace strings in progress.
+std::set<std::string> _validationsInProgress;
+}  // namespace
+
+class ValidateCmd : public BasicCommand {
 public:
-    ValidateCmd() : Command("validate") {}
+    ValidateCmd() : BasicCommand("validate") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-    virtual void help(stringstream& h) const {
-        h << "Validate contents of a namespace by scanning its data structures for correctness.  "
-             "Slow.\n"
-             "Add full:true option to do a more thorough check";
+    std::string help() const override {
+        return "Validate contents of a namespace by scanning its data structures for correctness.  "
+               "Slow.\n"
+               "Add full:true option to do a more thorough check\n"
+               "Add scandata:false to skip the scan of the collection data without skipping scans "
+               "of any indexes";
     }
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
@@ -68,28 +86,24 @@ public:
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::validate);
         out->push_back(Privilege(parseResourcePattern(dbname, cmdObj), actions));
     }
     //{ validate: "collectionnamewithoutthedbpart" [, scandata: <bool>] [, full: <bool> } */
 
-    bool run(OperationContext* txn,
+    bool run(OperationContext* opCtx,
              const string& dbname,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
+             const BSONObj& cmdObj,
              BSONObjBuilder& result) {
         if (MONGO_FAIL_POINT(validateCmdCollectionNotValid)) {
-            errmsg = "validateCmdCollectionNotValid fail point was triggered";
             result.appendBool("valid", false);
             return true;
         }
 
-        string ns = dbname + "." + cmdObj.firstElement().valuestrsafe();
+        const NamespaceString nss(CommandHelpers::parseNsCollectionRequired(dbname, cmdObj));
 
-        NamespaceString ns_string(ns);
         const bool full = cmdObj["full"].trueValue();
         const bool scanData = cmdObj["scandata"].trueValue();
 
@@ -101,34 +115,99 @@ public:
             level = kValidateRecordStore;
         }
 
-        if (!ns_string.isNormal() && full) {
-            errmsg = "Can only run full validate on a regular collection";
-            return false;
+        if (!nss.isNormal() && full) {
+            uasserted(ErrorCodes::CommandFailed,
+                      "Can only run full validate on a regular collection");
         }
 
-        if (!serverGlobalParams.quiet) {
-            LOG(0) << "CMD: validate " << ns;
+        if (!serverGlobalParams.quiet.load()) {
+            LOG(0) << "CMD: validate " << nss.ns();
         }
 
-        AutoGetDb ctx(txn, ns_string.db(), MODE_IX);
-        Lock::CollectionLock collLk(txn->lockState(), ns_string.ns(), MODE_X);
-        Collection* collection = ctx.getDb() ? ctx.getDb()->getCollection(ns_string) : NULL;
+        AutoGetDb ctx(opCtx, nss.db(), MODE_IX);
+        auto collLk = stdx::make_unique<Lock::CollectionLock>(opCtx->lockState(), nss.ns(), MODE_X);
+        Collection* collection = ctx.getDb() ? ctx.getDb()->getCollection(opCtx, nss) : NULL;
         if (!collection) {
-            if (ctx.getDb() && ctx.getDb()->getViewCatalog()->lookup(txn, ns_string.ns())) {
-                errmsg = "Cannot validate a view";
-                return appendCommandStatus(result, {ErrorCodes::CommandNotSupportedOnView, errmsg});
+            if (ctx.getDb() && ctx.getDb()->getViewCatalog()->lookup(opCtx, nss.ns())) {
+                uasserted(ErrorCodes::CommandNotSupportedOnView, "Cannot validate a view");
             }
 
-            errmsg = "ns not found";
+            uasserted(ErrorCodes::NamespaceNotFound, "ns not found");
+        }
+
+        // Omit background validation logic until it is fully implemented and vetted.
+        const bool background = false;
+        /*
+        bool isInRecordIdOrder = collection->getRecordStore()->isInRecordIdOrder();
+        if (isInRecordIdOrder && !full) {
+            background = true;
+        }
+
+        if (cmdObj.hasElement("background")) {
+            background = cmdObj["background"].trueValue();
+        }
+
+        if (!isInRecordIdOrder && background) {
+            uasserted(ErrorCodes::CommandFailed,
+                      "This storage engine does not support the background option, use "
+                      "background:false");
             return false;
         }
 
-        result.append("ns", ns);
+        if (full && background) {
+            uasserted(ErrorCodes::CommandFailed,
+                      "A full validate cannot run in the background, use full:false");
+        }
+        */
+
+        result.append("ns", nss.ns());
+
+        // Only one validation per collection can be in progress, the rest wait in order.
+        {
+            stdx::unique_lock<stdx::mutex> lock(_validationMutex);
+            try {
+                while (_validationsInProgress.find(nss.ns()) != _validationsInProgress.end()) {
+                    opCtx->waitForConditionOrInterrupt(_validationNotifier, lock);
+                }
+            } catch (AssertionException& e) {
+                CommandHelpers::appendCommandStatusNoThrow(
+                    result,
+                    {ErrorCodes::CommandFailed,
+                     str::stream() << "Exception during validation: " << e.toString()});
+                return false;
+            }
+
+            _validationsInProgress.insert(nss.ns());
+        }
+
+        ON_BLOCK_EXIT([&] {
+            stdx::lock_guard<stdx::mutex> lock(_validationMutex);
+            _validationsInProgress.erase(nss.ns());
+            _validationNotifier.notify_all();
+        });
 
         ValidateResults results;
-        Status status = collection->validate(txn, level, &results, &result);
-        if (!status.isOK())
-            return appendCommandStatus(result, status);
+        Status status =
+            collection->validate(opCtx, level, background, std::move(collLk), &results, &result);
+        if (!status.isOK()) {
+            return CommandHelpers::appendCommandStatusNoThrow(result, status);
+        }
+
+        CollectionCatalogEntry* catalogEntry = collection->getCatalogEntry();
+        CollectionOptions opts = catalogEntry->getCollectionOptions(opCtx);
+
+        // Skip checking UUID on system.indexes and system.namespaces until SERVER-30095 and
+        // SERVER-29926 are resolved.
+        bool skipUUIDCheck = nss.coll() == "system.indexes" || nss.coll() == "system.namespaces";
+
+        if (!skipUUIDCheck) {
+            // All collections must have a UUID.
+            if (!opts.uuid) {
+                results.errors.push_back(str::stream() << "UUID missing on collection " << nss.ns()
+                                                       << " but SchemaVersion=3.6");
+                results.valid = false;
+            }
+        }
 
         if (!full) {
             results.warnings.push_back(
@@ -138,6 +217,8 @@ public:
         result.appendBool("valid", results.valid);
         result.append("warnings", results.warnings);
         result.append("errors", results.errors);
+        result.append("extraIndexEntries", results.extraIndexEntries);
+        result.append("missingIndexEntries", results.missingIndexEntries);
 
         if (!results.valid) {
             result.append("advice",

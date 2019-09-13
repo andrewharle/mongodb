@@ -5,10 +5,18 @@
  * across a restart.
  * @tags: [requires_persistence]
  */
+
+// Checking UUID consistency involves talking to the config server primary, but there is no config
+// server primary by the end of this test.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+TestData.skipCheckDBHashes = true;
+
 (function() {
     'use strict';
 
-    var st = new ShardingTest({shards: 1, other: {keyFile: 'jstests/libs/key1'}});
+    // TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+    var st = new ShardingTest(
+        {shards: 1, other: {keyFile: 'jstests/libs/key1', shardAsReplicaSet: false}});
 
     st.s.getDB('admin').createUser({user: 'root', pwd: 'pass', roles: ['root']});
     st.s.getDB('admin').auth('root', 'pass');
@@ -17,7 +25,7 @@
 
     // Kill all secondaries, forcing the current primary to step down.
     st.configRS.getSecondaries().forEach(function(secondaryConn) {
-        MongoRunner.stopMongod(secondaryConn.port);
+        MongoRunner.stopMongod(secondaryConn);
     });
 
     // Test authenticate through a fresh connection.
@@ -46,4 +54,5 @@
     assert.eq('world', res.hello);
 
     st.stop();
+    MongoRunner.stopMongos(otherMongos);
 })();

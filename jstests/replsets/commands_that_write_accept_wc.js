@@ -1,5 +1,3 @@
-load('jstests/libs/write_concern_util.js');
-
 /**
  * This file tests that commands that do writes accept a write concern. This file does not test
  * mongos commands or user management commands, both of which are tested separately. This test
@@ -10,7 +8,12 @@ load('jstests/libs/write_concern_util.js');
 
 (function() {
     "use strict";
-    var replTest = new ReplSetTest({name: 'WCSet', nodes: 3, settings: {chainingAllowed: false}});
+    var replTest = new ReplSetTest({
+        name: 'WCSet',
+        // Set priority of secondaries to zero to prevent spurious elections.
+        nodes: [{}, {rsConfig: {priority: 0}}, {rsConfig: {priority: 0}}],
+        settings: {chainingAllowed: false}
+    });
     replTest.startSet();
     replTest.initiate();
 
@@ -79,7 +82,7 @@ load('jstests/libs/write_concern_util.js');
     });
 
     commands.push({
-        req: {aggregate: collName, pipeline: [{$sort: {type: 1}}, {$out: "foo"}]},
+        req: {aggregate: collName, pipeline: [{$sort: {type: 1}}, {$out: "foo"}], cursor: {}},
         setupFunc: function() {
             coll.insert({_id: 1, type: 'oak'});
             coll.insert({_id: 2, type: 'maple'});
@@ -138,8 +141,7 @@ load('jstests/libs/write_concern_util.js');
         dropTestCollection();
         cmd.setupFunc();
         var res = coll.runCommand(cmd.req);
-        assert.commandWorked(res);
-        assertWriteConcernError(res);
+        assert.commandFailedWithCode(res, ErrorCodes.UnknownReplWriteConcern);
         cmd.confirmFunc();
     }
 
@@ -148,4 +150,5 @@ load('jstests/libs/write_concern_util.js');
         testInvalidWriteConcern(cmd);
     });
 
+    replTest.stopSet();
 })();

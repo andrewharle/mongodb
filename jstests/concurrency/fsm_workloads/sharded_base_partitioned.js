@@ -17,6 +17,8 @@
  *   ---)[--)[----)[---) | [---)[---)[----)[-)[) | [-------)[-)[--------
  *
  *                         <===t2's partition==>
+ *
+ * @tags: [requires_sharding, assumes_balancer_off, assumes_autosplit_off]
  */
 
 load('jstests/concurrency/fsm_workload_helpers/chunks.js');  // for chunk helpers
@@ -31,8 +33,8 @@ var $config = (function() {
         shardKey: {_id: 1},
     };
 
-    data.makePartition = function makePartition(tid, partitionSize) {
-        var partition = {};
+    data.makePartition = function makePartition(ns, tid, partitionSize) {
+        var partition = {ns: ns};
         partition.lower = tid * partitionSize;
         partition.upper = (tid * partitionSize) + partitionSize;
 
@@ -67,18 +69,23 @@ var $config = (function() {
         // This may be due to SERVER-18341, where the Matcher returns false positives in
         // comparison predicates with MinKey/MaxKey.
         if (this.partition.isLowChunk && this.partition.isHighChunk) {
-            return coll.aggregate([{$sample: {size: 1}}]).toArray()[0];
+            return coll
+                .aggregate([
+                    {$match: {ns: this.partition.ns}},
+                    {$sample: {size: 1}},
+                ])
+                .toArray()[0];
         } else if (this.partition.isLowChunk) {
             return coll
                 .aggregate([
-                    {$match: {'max._id': {$lte: this.partition.chunkUpper}}},
+                    {$match: {ns: this.partition.ns, 'max._id': {$lte: this.partition.chunkUpper}}},
                     {$sample: {size: 1}}
                 ])
                 .toArray()[0];
         } else if (this.partition.isHighChunk) {
             return coll
                 .aggregate([
-                    {$match: {'min._id': {$gte: this.partition.chunkLower}}},
+                    {$match: {ns: this.partition.ns, 'min._id': {$gte: this.partition.chunkLower}}},
                     {$sample: {size: 1}}
                 ])
                 .toArray()[0];
@@ -87,6 +94,7 @@ var $config = (function() {
                 .aggregate([
                     {
                       $match: {
+                          ns: this.partition.ns,
                           'min._id': {$gte: this.partition.chunkLower},
                           'max._id': {$lte: this.partition.chunkUpper}
                       }
@@ -105,16 +113,18 @@ var $config = (function() {
         // Inform this thread about its partition,
         // and verify that its partition is encapsulated in a single chunk.
         function init(db, collName, connCache) {
+            var ns = db[collName].getFullName();
+
             // Inform this thread about its partition.
             // The tid of each thread is assumed to be in the range [0, this.threadCount).
-            this.partition = this.makePartition(this.tid, this.partitionSize);
+            this.partition = this.makePartition(ns, this.tid, this.partitionSize);
             Object.freeze(this.partition);
 
             // Verify that there is exactly 1 chunk in our partition.
             var config = ChunkHelper.getPrimary(connCache.config);
             var numChunks = ChunkHelper.getNumChunks(
-                config, this.partition.chunkLower, this.partition.chunkUpper);
-            var chunks = ChunkHelper.getChunks(config, MinKey, MaxKey);
+                config, ns, this.partition.chunkLower, this.partition.chunkUpper);
+            var chunks = ChunkHelper.getChunks(config, ns, MinKey, MaxKey);
             var msg = tojson({tid: this.tid, data: this.data, chunks: chunks});
             assertWhenOwnColl.eq(numChunks, 1, msg);
         }
@@ -145,7 +155,7 @@ var $config = (function() {
         for (var tid = 0; tid < this.threadCount; ++tid) {
             // Define this thread's partition.
             // The tid of each thread is assumed to be in the range [0, this.threadCount).
-            var partition = this.makePartition(tid, this.partitionSize);
+            var partition = this.makePartition(ns, tid, this.partitionSize);
 
             // Populate this thread's partition.
             var bulk = db[collName].initializeUnorderedBulkOp();
@@ -169,16 +179,6 @@ var $config = (function() {
 
     };
 
-    var skip = function skip(cluster) {
-        if (!cluster.isSharded() || cluster.isAutoSplitEnabled() || cluster.isBalancerEnabled()) {
-            return {
-                skip: true,
-                msg: 'only runs in a sharded cluster with autoSplit & balancer disabled.'
-            };
-        }
-        return {skip: false};
-    };
-
     return {
         threadCount: 1,
         iterations: 1,
@@ -187,7 +187,6 @@ var $config = (function() {
         transitions: transitions,
         data: data,
         setup: setup,
-        skip: skip,
         passConnectionCache: true
     };
 })();

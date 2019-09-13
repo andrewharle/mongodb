@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 #
-# Public Domain 2014-2016 MongoDB, Inc.
+# Public Domain 2014-2019 MongoDB, Inc.
 # Public Domain 2008-2014 WiredTiger, Inc.
 #
 # This is free and unencumbered software released into the public domain.
@@ -133,7 +133,7 @@ class tabconfig:
         rand = suite_random.suite_random(ncolumns, totalindices)
 
         # Initially, all indices get one column from the collist.
-        # Overlaps are allowed.  Then probalistically, add some
+        # Overlaps are allowed.  Then probabalistically, add some
         # more columns.
         for idx in self.idxlist:
             prob = 1.0

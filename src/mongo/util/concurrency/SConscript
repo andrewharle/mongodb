@@ -2,10 +2,11 @@
 
 Import("env")
 
+env = env.Clone()
+
 env.Library(
     target='thread_pool',
     source=[
-        'old_thread_pool.cpp',
         'thread_pool.cpp',
     ],
     LIBDEPS=[
@@ -35,8 +36,11 @@ env.CppUnitTest(
 
 env.Library('ticketholder',
             ['ticketholder.cpp'],
-            LIBDEPS=['$BUILD_DIR/mongo/base',
-                     '$BUILD_DIR/third_party/shim_boost'])
+            LIBDEPS=[
+                '$BUILD_DIR/mongo/base',
+                '$BUILD_DIR/mongo/db/service_context',
+                '$BUILD_DIR/third_party/shim_boost',
+            ])
 
 
 env.CppUnitTest(
@@ -65,12 +69,8 @@ env.CppUnitTest(
     ],
 )
 
-env.Library(
-    target='rwlock',
+env.CppUnitTest(
+    target='with_lock_test',
     source=[
-        'rwlockimpl.cpp',
-    ],
-    LIBDEPS=[
-        '$BUILD_DIR/third_party/shim_boost',
-    ],
-)
+        'with_lock_test.cpp',
+    ])

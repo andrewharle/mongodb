@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -31,9 +31,9 @@
 static void
 check(const char *fmt, ...)
 {
+	size_t len;
 	char buf[200], *end, *p;
 	va_list ap;
-	size_t len;
 
 	len = 0;			/* -Werror=maybe-uninitialized */
 
@@ -51,13 +51,19 @@ check(const char *fmt, ...)
 
 	printf("%s ", fmt);
 	for (p = buf, end = p + len; p < end; p++)
-		printf("%02x", *p & 0xff);
+		printf("%02x", (u_char)*p & 0xff);
 	printf("\n");
 }
 
 int
 main(void)
 {
+	/*
+	 * Required on some systems to pull in parts of the library
+	 * for which we have data references.
+	 */
+	testutil_check(__wt_library_init());
+
 	check("iii", 0, 101, -99);
 	check("3i", 0, 101, -99);
 	check("iS", 42, "forty two");

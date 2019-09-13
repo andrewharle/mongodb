@@ -1,29 +1,34 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
+
+#include "mongo/platform/basic.h"
 
 #include "mongo/s/shard_key_pattern.h"
 
@@ -32,78 +37,57 @@
 #include "mongo/db/query/query_test_service_context.h"
 #include "mongo/unittest/unittest.h"
 
+namespace mongo {
 namespace {
 
 using std::string;
 
-using namespace mongo;
+TEST(ShardKeyPattern, SingleFieldShardKeyPatternsValidityCheck) {
+    ShardKeyPattern(BSON("a" << 1));
+    ShardKeyPattern(BSON("a" << 1.0f));
+    ShardKeyPattern(BSON("a" << (long long)1L));
+    ShardKeyPattern(BSON("a"
+                         << "hashed"));
 
-TEST(ShardKeyPattern, ValidShardKeyPatternSingle) {
-    BSONObj empty;
-    ASSERT(!ShardKeyPattern(empty).isValid());
-
-    //
-    // Single field ShardKeyPatterns
-    //
-
-    ASSERT(ShardKeyPattern(BSON("a" << 1)).isValid());
-    ASSERT(ShardKeyPattern(BSON("a" << 1)).isValid());
-    ASSERT(ShardKeyPattern(BSON("a" << 1.0f)).isValid());
-    ASSERT(ShardKeyPattern(BSON("a" << (long long)1L)).isValid());
-
-    ASSERT(!ShardKeyPattern(BSON("a" << -1)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a" << -1.0)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a"
-                                 << "1"))
-                .isValid());
-
-    ASSERT(ShardKeyPattern(BSON("a"
-                                << "hashed"))
-               .isValid());
-    ASSERT(!ShardKeyPattern(BSON("a"
-                                 << "hash"))
-                .isValid());
-    ASSERT(!ShardKeyPattern(BSON("" << 1)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("." << 1)).isValid());
+    ASSERT_THROWS(ShardKeyPattern({}), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << -1)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << -1.0)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a"
+                                       << "1")),
+                  DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a"
+                                       << "hash")),
+                  DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("" << 1)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("." << 1)), DBException);
 }
 
-TEST(ShardKeyPattern, ValidShardKeyPatternComposite) {
-    //
-    // Composite ShardKeyPatterns
-    //
+TEST(ShardKeyPattern, CompositeShardKeyPatternsValidityCheck) {
+    ShardKeyPattern(BSON("a" << 1 << "b" << 1));
+    ShardKeyPattern(BSON("a" << 1.0f << "b" << 1.0));
+    ShardKeyPattern(BSON("a" << 1 << "b" << 1.0 << "c" << 1.0f));
 
-    ASSERT(ShardKeyPattern(BSON("a" << 1 << "b" << 1)).isValid());
-    ASSERT(ShardKeyPattern(BSON("a" << 1.0f << "b" << 1.0)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a" << 1 << "b" << -1)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a" << 1 << "b"
-                                     << "1"))
-                .isValid());
-
-    ASSERT(ShardKeyPattern(BSON("a" << 1 << "b" << 1.0 << "c" << 1.0f)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a" << 1 << "b." << 1.0)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a" << 1 << "" << 1.0)).isValid());
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << 1 << "b" << -1)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << 1 << "b"
+                                           << "1")),
+                  DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << 1 << "b." << 1.0)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << 1 << "" << 1.0)), DBException);
 }
 
-TEST(ShardKeyPattern, ValidShardKeyPatternNested) {
-    //
-    // Nested ShardKeyPatterns
-    //
+TEST(ShardKeyPattern, NestedShardKeyPatternsValidtyCheck) {
+    ShardKeyPattern(BSON("a.b" << 1));
+    ShardKeyPattern(BSON("a.b.c.d" << 1.0));
+    ShardKeyPattern(BSON("a" << 1 << "c.d" << 1.0 << "e.f.g" << 1.0f));
+    ShardKeyPattern(BSON("a" << 1 << "a.b" << 1.0 << "a.b.c" << 1.0f));
 
-    ASSERT(ShardKeyPattern(BSON("a.b" << 1)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a.b" << -1)).isValid());
-    ASSERT(ShardKeyPattern(BSON("a.b.c.d" << 1.0)).isValid());
-
-    ASSERT(!ShardKeyPattern(BSON("a" << BSON("b" << 1))).isValid());
-
-    ASSERT(!ShardKeyPattern(BSON("a.b." << 1)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a.b.." << 1)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a..b" << 1)).isValid());
-
-    ASSERT(ShardKeyPattern(BSON("a" << 1 << "c.d" << 1.0 << "e.f.g" << 1.0f)).isValid());
-    ASSERT(ShardKeyPattern(BSON("a" << 1 << "a.b" << 1.0 << "a.b.c" << 1.0f)).isValid());
-
-    ASSERT(!ShardKeyPattern(BSON("a" << 1 << "a.b." << 1.0)).isValid());
-    ASSERT(!ShardKeyPattern(BSON("a" << BSON("b" << 1) << "c.d" << 1.0)).isValid());
+    ASSERT_THROWS(ShardKeyPattern(BSON("a.b" << -1)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << BSON("b" << 1))), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a.b." << 1)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a.b.." << 1)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a..b" << 1)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << 1 << "a.b." << 1.0)), DBException);
+    ASSERT_THROWS(ShardKeyPattern(BSON("a" << BSON("b" << 1) << "c.d" << 1.0)), DBException);
 }
 
 TEST(ShardKeyPattern, IsShardKey) {
@@ -269,9 +253,9 @@ TEST(ShardKeyPattern, ExtractDocShardKeyHashed) {
 
 static BSONObj queryKey(const ShardKeyPattern& pattern, const BSONObj& query) {
     QueryTestServiceContext serviceContext;
-    auto txn = serviceContext.makeOperationContext();
+    auto opCtx = serviceContext.makeOperationContext();
 
-    StatusWith<BSONObj> status = pattern.extractShardKeyFromQuery(txn.get(), query);
+    StatusWith<BSONObj> status = pattern.extractShardKeyFromQuery(opCtx.get(), query);
     if (!status.isOK())
         return BSONObj();
     return status.getValue();
@@ -509,4 +493,6 @@ TEST(ShardKeyPattern, UniqueIndexCompatibleHashed) {
     ASSERT(!indexComp(pattern, BSON("c" << 1)));
     ASSERT(!indexComp(pattern, BSON("c" << -1 << "a.b" << 1)));
 }
-}
+
+}  // namespace
+}  // namespace mongo

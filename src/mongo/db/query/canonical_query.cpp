@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -33,6 +35,7 @@
 #include "mongo/db/query/canonical_query.h"
 
 #include "mongo/db/jsobj.h"
+#include "mongo/db/matcher/expression_array.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/query/collation/collator_factory_interface.h"
@@ -97,25 +100,39 @@ bool matchExpressionLessThan(const MatchExpression* lhs, const MatchExpression* 
     return matchExpressionComparator(lhs, rhs) < 0;
 }
 
+bool parsingCanProduceNoopMatchNodes(const ExtensionsCallback& extensionsCallback,
+                                     MatchExpressionParser::AllowedFeatureSet allowedFeatures) {
+    return extensionsCallback.hasNoopExtensions() &&
+        (allowedFeatures & MatchExpressionParser::AllowedFeatures::kText ||
+         allowedFeatures & MatchExpressionParser::AllowedFeatures::kJavascript);
+}
+
 }  // namespace
 
 // static
 StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
-    OperationContext* txn, const QueryMessage& qm, const ExtensionsCallback& extensionsCallback) {
+    OperationContext* opCtx,
+    const QueryMessage& qm,
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const ExtensionsCallback& extensionsCallback,
+    MatchExpressionParser::AllowedFeatureSet allowedFeatures) {
     // Make QueryRequest.
     auto qrStatus = QueryRequest::fromLegacyQueryMessage(qm);
     if (!qrStatus.isOK()) {
         return qrStatus.getStatus();
     }
 
-    return CanonicalQuery::canonicalize(txn, std::move(qrStatus.getValue()), extensionsCallback);
+    return CanonicalQuery::canonicalize(
+        opCtx, std::move(qrStatus.getValue()), expCtx, extensionsCallback, allowedFeatures);
 }
 
 // static
 StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
-    OperationContext* txn,
+    OperationContext* opCtx,
     std::unique_ptr<QueryRequest> qr,
-    const ExtensionsCallback& extensionsCallback) {
+    const boost::intrusive_ptr<ExpressionContext>& expCtx,
+    const ExtensionsCallback& extensionsCallback,
+    MatchExpressionParser::AllowedFeatureSet allowedFeatures) {
     auto qrStatus = qr->validate();
     if (!qrStatus.isOK()) {
         return qrStatus;
@@ -123,7 +140,7 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
 
     std::unique_ptr<CollatorInterface> collator;
     if (!qr->getCollation().isEmpty()) {
-        auto statusWithCollator = CollatorFactoryInterface::get(txn->getServiceContext())
+        auto statusWithCollator = CollatorFactoryInterface::get(opCtx->getServiceContext())
                                       ->makeFromBSON(qr->getCollation());
         if (!statusWithCollator.isOK()) {
             return statusWithCollator.getStatus();
@@ -132,8 +149,15 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     }
 
     // Make MatchExpression.
-    StatusWithMatchExpression statusWithMatcher =
-        MatchExpressionParser::parse(qr->getFilter(), extensionsCallback, collator.get());
+    boost::intrusive_ptr<ExpressionContext> newExpCtx;
+    if (!expCtx.get()) {
+        newExpCtx.reset(new ExpressionContext(opCtx, collator.get()));
+    } else {
+        newExpCtx = expCtx;
+        invariant(CollatorInterface::collatorsMatch(collator.get(), expCtx->getCollator()));
+    }
+    StatusWithMatchExpression statusWithMatcher = MatchExpressionParser::parse(
+        qr->getFilter(), newExpCtx, extensionsCallback, allowedFeatures);
     if (!statusWithMatcher.isOK()) {
         return statusWithMatcher.getStatus();
     }
@@ -143,7 +167,11 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     std::unique_ptr<CanonicalQuery> cq(new CanonicalQuery());
 
     Status initStatus =
-        cq->init(std::move(qr), extensionsCallback, me.release(), std::move(collator));
+        cq->init(opCtx,
+                 std::move(qr),
+                 parsingCanProduceNoopMatchNodes(extensionsCallback, allowedFeatures),
+                 std::move(me),
+                 std::move(collator));
 
     if (!initStatus.isOK()) {
         return initStatus;
@@ -153,14 +181,11 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
 
 // static
 StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
-    OperationContext* txn,
-    const CanonicalQuery& baseQuery,
-    MatchExpression* root,
-    const ExtensionsCallback& extensionsCallback) {
-    // TODO: we should be passing the filter corresponding to 'root' to the QR rather than the base
-    // query's filter, baseQuery.getQueryRequest().getFilter().
+    OperationContext* opCtx, const CanonicalQuery& baseQuery, MatchExpression* root) {
     auto qr = stdx::make_unique<QueryRequest>(baseQuery.nss());
-    qr->setFilter(baseQuery.getQueryRequest().getFilter());
+    BSONObjBuilder builder;
+    root->serialize(&builder);
+    qr->setFilter(builder.obj());
     qr->setProj(baseQuery.getQueryRequest().getProj());
     qr->setSort(baseQuery.getQueryRequest().getSort());
     qr->setCollation(baseQuery.getQueryRequest().getCollation());
@@ -177,8 +202,11 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
 
     // Make the CQ we'll hopefully return.
     std::unique_ptr<CanonicalQuery> cq(new CanonicalQuery());
-    Status initStatus = cq->init(
-        std::move(qr), extensionsCallback, root->shallowClone().release(), std::move(collator));
+    Status initStatus = cq->init(opCtx,
+                                 std::move(qr),
+                                 baseQuery.canHaveNoopMatchNodes(),
+                                 root->shallowClone(),
+                                 std::move(collator));
 
     if (!initStatus.isOK()) {
         return initStatus;
@@ -186,22 +214,20 @@ StatusWith<std::unique_ptr<CanonicalQuery>> CanonicalQuery::canonicalize(
     return std::move(cq);
 }
 
-Status CanonicalQuery::init(std::unique_ptr<QueryRequest> qr,
-                            const ExtensionsCallback& extensionsCallback,
-                            MatchExpression* root,
+Status CanonicalQuery::init(OperationContext* opCtx,
+                            std::unique_ptr<QueryRequest> qr,
+                            bool canHaveNoopMatchNodes,
+                            std::unique_ptr<MatchExpression> root,
                             std::unique_ptr<CollatorInterface> collator) {
     _qr = std::move(qr);
     _collator = std::move(collator);
 
-    _hasNoopExtensions = extensionsCallback.hasNoopExtensions();
-    _isIsolated = QueryRequest::isQueryIsolated(_qr->getFilter());
+    _canHaveNoopMatchNodes = canHaveNoopMatchNodes;
 
     // Normalize, sort and validate tree.
-    root = normalizeTree(root);
-
-    sortTree(root);
-    _root.reset(root);
-    Status validStatus = isValid(root, *_qr);
+    _root = MatchExpression::optimize(std::move(root));
+    sortTree(_root.get());
+    Status validStatus = isValid(_root.get(), *_qr);
     if (!validStatus.isOK()) {
         return validStatus;
     }
@@ -209,8 +235,7 @@ Status CanonicalQuery::init(std::unique_ptr<QueryRequest> qr,
     // Validate the projection if there is one.
     if (!_qr->getProj().isEmpty()) {
         ParsedProjection* pp;
-        Status projStatus =
-            ParsedProjection::make(_qr->getProj(), _root.get(), &pp, extensionsCallback);
+        Status projStatus = ParsedProjection::make(opCtx, _qr->getProj(), _root.get(), &pp);
         if (!projStatus.isOK()) {
             return projStatus;
         }
@@ -255,123 +280,12 @@ bool CanonicalQuery::isSimpleIdQuery(const BSONObj& query) {
                 // But it can be BinData.
                 return false;
             }
-        } else if (elt.fieldName()[0] == '$' && (str::equals("$isolated", elt.fieldName()) ||
-                                                 str::equals("$atomic", elt.fieldName()))) {
-            // ok, passthrough
         } else {
-            // If the field is not _id, it must be $isolated/$atomic.
             return false;
         }
     }
 
     return hasID;
-}
-
-// static
-MatchExpression* CanonicalQuery::normalizeTree(MatchExpression* root) {
-    if (MatchExpression::AND == root->matchType() || MatchExpression::OR == root->matchType()) {
-        // We could have AND of AND of AND.  Make sure we clean up our children before merging them.
-        for (size_t i = 0; i < root->getChildVector()->size(); ++i) {
-            (*root->getChildVector())[i] = normalizeTree(root->getChild(i));
-        }
-
-        // If any of our children are of the same logical operator that we are, we remove the
-        // child's children and append them to ourselves after we examine all children.
-        std::vector<MatchExpression*> absorbedChildren;
-
-        for (size_t i = 0; i < root->numChildren();) {
-            MatchExpression* child = root->getChild(i);
-            if (child->matchType() == root->matchType()) {
-                // AND of an AND or OR of an OR.  Absorb child's children into ourself.
-                for (size_t j = 0; j < child->numChildren(); ++j) {
-                    absorbedChildren.push_back(child->getChild(j));
-                }
-                // TODO(opt): this is possibly n^2-ish
-                root->getChildVector()->erase(root->getChildVector()->begin() + i);
-                child->getChildVector()->clear();
-                // Note that this only works because we cleared the child's children
-                delete child;
-                // Don't increment 'i' as the current child 'i' used to be child 'i+1'
-            } else {
-                ++i;
-            }
-        }
-
-        root->getChildVector()->insert(
-            root->getChildVector()->end(), absorbedChildren.begin(), absorbedChildren.end());
-
-        // AND of 1 thing is the thing, OR of 1 thing is the thing.
-        if (1 == root->numChildren()) {
-            MatchExpression* ret = root->getChild(0);
-            root->getChildVector()->clear();
-            delete root;
-            return ret;
-        }
-    } else if (MatchExpression::NOR == root->matchType()) {
-        // First clean up children.
-        for (size_t i = 0; i < root->getChildVector()->size(); ++i) {
-            (*root->getChildVector())[i] = normalizeTree(root->getChild(i));
-        }
-
-        // NOR of one thing is NOT of the thing.
-        if (1 == root->numChildren()) {
-            // Detach the child and assume ownership.
-            std::unique_ptr<MatchExpression> child(root->getChild(0));
-            root->getChildVector()->clear();
-
-            // Delete the root when this goes out of scope.
-            std::unique_ptr<NorMatchExpression> ownedRoot(static_cast<NorMatchExpression*>(root));
-
-            // Make a NOT to be the new root and transfer ownership of the child to it.
-            auto newRoot = stdx::make_unique<NotMatchExpression>();
-            newRoot->init(child.release());
-
-            return newRoot.release();
-        }
-    } else if (MatchExpression::NOT == root->matchType()) {
-        // Normalize the rest of the tree hanging off this NOT node.
-        NotMatchExpression* nme = static_cast<NotMatchExpression*>(root);
-        MatchExpression* child = nme->releaseChild();
-        // normalizeTree(...) takes ownership of 'child', and then
-        // transfers ownership of its return value to 'nme'.
-        nme->resetChild(normalizeTree(child));
-    } else if (MatchExpression::ELEM_MATCH_VALUE == root->matchType()) {
-        // Just normalize our children.
-        for (size_t i = 0; i < root->getChildVector()->size(); ++i) {
-            (*root->getChildVector())[i] = normalizeTree(root->getChild(i));
-        }
-    } else if (MatchExpression::MATCH_IN == root->matchType()) {
-        std::unique_ptr<InMatchExpression> in(static_cast<InMatchExpression*>(root));
-
-        // IN of 1 regex is the regex.
-        if (in->getRegexes().size() == 1 && in->getEqualities().empty()) {
-            RegexMatchExpression* childRe = in->getRegexes().begin()->get();
-            invariant(!childRe->getTag());
-
-            // Create a new RegexMatchExpression, because 'childRe' does not have a path.
-            auto re = stdx::make_unique<RegexMatchExpression>();
-            re->init(in->path(), childRe->getString(), childRe->getFlags());
-            if (in->getTag()) {
-                re->setTag(in->getTag()->clone());
-            }
-            return normalizeTree(re.release());
-        }
-
-        // IN of 1 equality is the equality.
-        if (in->getEqualities().size() == 1 && in->getRegexes().empty()) {
-            auto eq = stdx::make_unique<EqualityMatchExpression>();
-            eq->init(in->path(), *(in->getEqualities().begin()));
-            eq->setCollator(in->getCollator());
-            if (in->getTag()) {
-                eq->setTag(in->getTag()->clone());
-            }
-            return eq.release();
-        }
-
-        return in.release();
-    }
-
-    return root;
 }
 
 // static
@@ -485,11 +399,6 @@ Status CanonicalQuery::isValid(MatchExpression* root, const QueryRequest& parsed
         return Status(ErrorCodes::BadValue, "text and hint not allowed in same query");
     }
 
-    // TEXT and snapshot cannot both be in the query.
-    if (numText > 0 && parsed.isSnapshot()) {
-        return Status(ErrorCodes::BadValue, "text and snapshot not allowed in same query");
-    }
-
     // TEXT and tailable are incompatible.
     if (numText > 0 && parsed.isTailable()) {
         return Status(ErrorCodes::BadValue, "text and tailable cursor not allowed in same query");
@@ -513,7 +422,7 @@ Status CanonicalQuery::isValid(MatchExpression* root, const QueryRequest& parsed
 
 std::string CanonicalQuery::toString() const {
     str::stream ss;
-    ss << "ns=" << _qr->ns();
+    ss << "ns=" << _qr->nss().ns();
 
     if (_qr->getBatchSize()) {
         ss << " batchSize=" << *_qr->getBatchSize();

@@ -1,29 +1,31 @@
-/*
- *    Copyright (C) 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault;
@@ -39,14 +41,15 @@
 #include "mongo/base/status.h"
 #include "mongo/bson/util/builder.h"
 #include "mongo/client/mongo_uri.h"
-#include "mongo/client/sasl_client_authenticate.h"
 #include "mongo/config.h"
+#include "mongo/db/auth/sasl_command_constants.h"
 #include "mongo/db/server_options.h"
 #include "mongo/rpc/protocol.h"
 #include "mongo/shell/shell_utils.h"
 #include "mongo/transport/message_compressor_registry.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
+#include "mongo/util/net/socket_utils.h"
 #include "mongo/util/net/ssl_options.h"
 #include "mongo/util/options_parser/startup_options.h"
 #include "mongo/util/version.h"
@@ -122,7 +125,7 @@ Status addMongoShellOptions(moe::OptionSection* options) {
                            "gssapiServiceName",
                            moe::String,
                            "Service name to use when authenticating using GSSAPI/Kerberos")
-        .setDefault(moe::Value(std::string(saslDefaultServiceName)));
+        .setDefault(moe::Value(saslDefaultServiceName.toString()));
 
     authenticationOptions.addOptionChaining(
         "gssapiHostName",
@@ -130,7 +133,7 @@ Status addMongoShellOptions(moe::OptionSection* options) {
         moe::String,
         "Remote host name to use for purpose of GSSAPI/Kerberos authentication");
 
-    options->addSection(authenticationOptions);
+    options->addSection(authenticationOptions).transitional_ignore();
 
     options->addOptionChaining("help", "help,h", moe::Switch, "show this usage information");
 
@@ -141,10 +144,19 @@ Status addMongoShellOptions(moe::OptionSection* options) {
     options->addOptionChaining(
         "ipv6", "ipv6", moe::Switch, "enable IPv6 support (disabled by default)");
 
-    options->addOptionChaining("disableJavaScriptJIT",
-                               "disableJavaScriptJIT",
-                               moe::Switch,
-                               "disable the Javascript Just In Time compiler");
+    options
+        ->addOptionChaining("disableJavaScriptJIT",
+                            "disableJavaScriptJIT",
+                            moe::Switch,
+                            "disable the Javascript Just In Time compiler")
+        .incompatibleWith("enableJavaScriptJIT");
+
+    options
+        ->addOptionChaining("enableJavaScriptJIT",
+                            "enableJavaScriptJIT",
+                            moe::Switch,
+                            "enable the Javascript Just In Time compiler")
+        .incompatibleWith("disableJavaScriptJIT");
 
     options
         ->addOptionChaining("disableJavaScriptProtection",
@@ -207,6 +219,17 @@ Status addMongoShellOptions(moe::OptionSection* options) {
                             " commands, compatibility, legacy")
         .hidden();
 
+    options->addOptionChaining(
+        "retryWrites",
+        "retryWrites",
+        moe::Switch,
+        "automatically retry write operations upon transient network errors");
+
+    options->addOptionChaining("disableImplicitSessions",
+                               "disableImplicitSessions",
+                               moe::Switch,
+                               "do not automatically create and use implicit sessions");
+
     options
         ->addOptionChaining(
             "rpcProtocols", "rpcProtocols", moe::String, " none, opQueryOnly, opCommandOnly, all")
@@ -255,7 +278,7 @@ Status storeMongoShellOptions(const moe::Environment& params,
                               const std::vector<std::string>& args) {
     Status ret = Status::OK();
     if (params.count("quiet")) {
-        mongo::serverGlobalParams.quiet = true;
+        mongo::serverGlobalParams.quiet.store(true);
     }
 #ifdef MONGO_CONFIG_SSL
     ret = storeSSLClientOptions(params);
@@ -265,6 +288,7 @@ Status storeMongoShellOptions(const moe::Environment& params,
 #endif
     if (params.count("ipv6")) {
         mongo::enableIPv6();
+        shellGlobalParams.enableIPv6 = true;
     }
     if (params.count("verbose")) {
         logger::globalLogDomain()->setMinimumLoggedSeverity(logger::LogSeverity::Debug(1));
@@ -297,7 +321,6 @@ Status storeMongoShellOptions(const moe::Environment& params,
     }
 
     if (params.count("password")) {
-        shellGlobalParams.usingPassword = true;
         shellGlobalParams.password = params["password"].as<string>();
     }
 
@@ -317,6 +340,13 @@ Status storeMongoShellOptions(const moe::Environment& params,
         shellGlobalParams.gssapiHostName = params["gssapiHostName"].as<string>();
     }
 
+    if (params.count("net.compression.compressors")) {
+        auto compressors = params["net.compression.compressors"].as<string>();
+        if (compressors != "disabled") {
+            shellGlobalParams.networkMessageCompressors = std::move(compressors);
+        }
+    }
+
     if (params.count("shell")) {
         shellGlobalParams.runShell = true;
     }
@@ -331,6 +361,9 @@ Status storeMongoShellOptions(const moe::Environment& params,
     }
     if (params.count("disableJavaScriptJIT")) {
         shellGlobalParams.nojit = true;
+    }
+    if (params.count("enableJavaScriptJIT")) {
+        shellGlobalParams.nojit = false;
     }
     if (params.count("files")) {
         shellGlobalParams.files = params["files"].as<vector<string>>();
@@ -347,31 +380,35 @@ Status storeMongoShellOptions(const moe::Environment& params,
     if (params.count("writeMode")) {
         std::string mode = params["writeMode"].as<string>();
         if (mode != "commands" && mode != "legacy" && mode != "compatibility") {
-            throw MsgAssertionException(
-                17396, mongoutils::str::stream() << "Unknown writeMode option: " << mode);
+            uasserted(17396, mongoutils::str::stream() << "Unknown writeMode option: " << mode);
         }
         shellGlobalParams.writeMode = mode;
     }
     if (params.count("readMode")) {
         std::string mode = params["readMode"].as<string>();
         if (mode != "commands" && mode != "compatibility" && mode != "legacy") {
-            throw MsgAssertionException(
-                17397,
-                mongoutils::str::stream()
-                    << "Unknown readMode option: '"
-                    << mode
-                    << "'. Valid modes are: {commands, compatibility, legacy}");
+            uasserted(17397,
+                      mongoutils::str::stream()
+                          << "Unknown readMode option: '"
+                          << mode
+                          << "'. Valid modes are: {commands, compatibility, legacy}");
         }
         shellGlobalParams.readMode = mode;
+    }
+    if (params.count("retryWrites")) {
+        shellGlobalParams.shouldRetryWrites = true;
+    }
+    if (params.count("disableImplicitSessions")) {
+        shellGlobalParams.shouldUseImplicitSessions = false;
     }
     if (params.count("rpcProtocols")) {
         std::string protos = params["rpcProtocols"].as<string>();
         auto parsedRPCProtos = rpc::parseProtocolSet(protos);
         if (!parsedRPCProtos.isOK()) {
-            throw MsgAssertionException(28653,
-                                        str::stream() << "Unknown RPC Protocols: '" << protos
-                                                      << "'. Valid values are {none, opQueryOnly, "
-                                                      << "opCommandOnly, all}");
+            uasserted(28653,
+                      str::stream() << "Unknown RPC Protocols: '" << protos
+                                    << "'. Valid values are {none, opQueryOnly, "
+                                    << "opCommandOnly, all}");
         }
         shellGlobalParams.rpcProtocols = parsedRPCProtos.getValue();
     }
@@ -417,40 +454,115 @@ Status storeMongoShellOptions(const moe::Environment& params,
         return Status(ErrorCodes::BadValue, sb.str());
     }
 
-    if (shellGlobalParams.url.find("mongodb://") == 0) {
+    if ((shellGlobalParams.url.find("mongodb://") == 0) ||
+        (shellGlobalParams.url.find("mongodb+srv://") == 0)) {
         auto cs_status = MongoURI::parse(shellGlobalParams.url);
         if (!cs_status.isOK()) {
             return cs_status.getStatus();
         }
 
         auto cs = cs_status.getValue();
-        StringBuilder sb;
-        sb << "ERROR: Cannot specify ";
         auto uriOptions = cs.getOptions();
-        if (!shellGlobalParams.username.empty() && !cs.getUser().empty()) {
-            sb << "username";
-        } else if (!shellGlobalParams.password.empty() && !cs.getPassword().empty()) {
-            sb << "password";
-        } else if (!shellGlobalParams.authenticationMechanism.empty() &&
-                   uriOptions.count("authMechanism")) {
-            sb << "the authentication mechanism";
-        } else if (!shellGlobalParams.authenticationDatabase.empty() &&
-                   uriOptions.count("authSource")) {
-            sb << "the authentication database";
-        } else if (shellGlobalParams.gssapiServiceName != saslDefaultServiceName &&
-                   uriOptions.count("gssapiServiceName")) {
-            sb << "the GSSAPI service name";
-        } else {
-            return Status::OK();
-        }
-        sb << " in connection URI and as a command-line option";
-        return Status(ErrorCodes::InvalidOptions, sb.str());
+
+        auto handleURIOptions = [&] {
+            StringBuilder sb;
+            sb << "ERROR: Cannot specify ";
+
+            if (!shellGlobalParams.username.empty() && !cs.getUser().empty() &&
+                shellGlobalParams.username != cs.getUser()) {
+                sb << "different usernames";
+            } else if (!shellGlobalParams.password.empty() && !cs.getPassword().empty() &&
+                       shellGlobalParams.password != cs.getPassword()) {
+                sb << "different passwords";
+            } else if (!shellGlobalParams.authenticationMechanism.empty() &&
+                       uriOptions.count("authMechanism") &&
+                       uriOptions["authMechanism"] != shellGlobalParams.authenticationMechanism) {
+                sb << "different authentication mechanisms";
+            } else if (!shellGlobalParams.authenticationDatabase.empty() &&
+                       uriOptions.count("authSource") &&
+                       uriOptions["authSource"] != shellGlobalParams.authenticationDatabase) {
+                sb << "different authentication databases";
+            } else if (shellGlobalParams.gssapiServiceName != saslDefaultServiceName &&
+                       uriOptions.count("gssapiServiceName")) {
+                sb << "the GSSAPI service name";
+            } else if (!shellGlobalParams.networkMessageCompressors.empty() &&
+                       uriOptions.count("compressors") &&
+                       uriOptions["compressors"] != shellGlobalParams.networkMessageCompressors) {
+                sb << "different network message compressors";
+            } else {
+                return Status::OK();
+            }
+
+            sb << " in connection URI and as a command-line option";
+            return Status(ErrorCodes::InvalidOptions, sb.str());
+        };
+
+        auto uriStatus = handleURIOptions();
+        if (!uriStatus.isOK())
+            return uriStatus;
+
+        if (uriOptions.count("compressors"))
+            shellGlobalParams.networkMessageCompressors = uriOptions["compressors"];
     }
 
-    ret = storeMessageCompressionOptions(params);
-    if (!ret.isOK())
-        return ret;
+    if (!shellGlobalParams.networkMessageCompressors.empty()) {
+        const auto ret =
+            storeMessageCompressionOptions(shellGlobalParams.networkMessageCompressors);
+        if (!ret.isOK()) {
+            return ret;
+        }
+    }
 
     return Status::OK();
 }
+
+void redactPasswordOptions(int argc, char** argv) {
+    constexpr auto kLongPasswordOption = "--password"_sd;
+    constexpr auto kShortPasswordOption = "-p"_sd;
+    for (int i = 0; i < argc; ++i) {
+        StringData arg(argv[i]);
+        if (arg.startsWith(kShortPasswordOption)) {
+            char* toRedact = nullptr;
+            // Handle -p password
+            if ((arg == kShortPasswordOption) && (i + 1 < argc)) {
+                toRedact = argv[++i];
+                // Handle -ppassword
+            } else {
+                toRedact = argv[i] + kShortPasswordOption.size();
+            }
+
+            invariant(toRedact);
+            // The arg should be null-terminated, replace everything up to \0 to 'x'
+            while (*toRedact) {
+                *toRedact++ = 'x';
+            }
+        }
+        if (arg.startsWith(kLongPasswordOption)) {
+            char* toRedact = nullptr;
+            // Handle --password password
+            if ((arg == kLongPasswordOption) && (i + 1 < argc)) {
+                toRedact = argv[++i];
+                // Handle --password=password
+            } else if (arg.size() != kLongPasswordOption.size()) {
+                toRedact = argv[i] + kLongPasswordOption.size();
+                // It's not valid to do --passwordpassword, make sure there's an = separator
+                invariant(*(toRedact++) == '=');
+            }
+
+            // If there's nothing to redact, just exit
+            if (!toRedact) {
+                continue;
+            }
+
+            // The arg should be null-terminated, replace everything up to \0 to 'x'
+            while (*toRedact) {
+                *toRedact++ = 'x';
+            }
+        } else if (MongoURI::isMongoURI(arg)) {
+            auto reformedURI = MongoURI::redact(arg);
+            auto length = arg.size();
+            ::strncpy(argv[i], reformedURI.data(), length);
+        }
+    }
 }
+}  // namespace mongo

@@ -27,6 +27,11 @@ load("jstests/libs/write_concern_util.js");
 (function() {
     "use strict";
 
+    // Skip db hash check and shard replication since this test leaves a replica set shard
+    // partitioned.
+    TestData.skipCheckDBHashes = true;
+    TestData.skipAwaitingReplicationOnShardsBeforeCheckingUUIDs = true;
+
     var testName = "linearizable_read_concern";
 
     var st = new ShardingTest({
@@ -45,6 +50,7 @@ load("jstests/libs/write_concern_util.js");
     var collName = "test";
     var collNamespace = dbName + "." + collName;
     var shard0ReplTest = st.rs0;
+    var shard1ReplTest = st.rs1;
     var testDB = st.s.getDB(dbName);
 
     // Set high election timeout so that primary doesn't step down during linearizable read test.
@@ -55,6 +61,11 @@ load("jstests/libs/write_concern_util.js");
     // Set up sharded collection. Put 5 documents on each shard, with keys {x: 0...9}.
     var numDocs = 10;
     shardCollectionWithChunks(st, testDB[collName], numDocs);
+
+    // Make sure the 'shardIdentity' document on each shard is replicated to all secondary nodes
+    // before issuing reads against them.
+    shard0ReplTest.awaitReplication();
+    shard1ReplTest.awaitReplication();
 
     // Print current sharding stats for debugging.
     st.printShardingStatus(5);
@@ -111,7 +122,7 @@ load("jstests/libs/write_concern_util.js");
         readConcern: {level: "linearizable"},
         maxTimeMS: 3000
     });
-    assert.commandFailedWithCode(result, ErrorCodes.ExceededTimeLimit);
+    assert.commandFailedWithCode(result, ErrorCodes.MaxTimeMSExpired);
 
     st.stop();
 })();

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -16,19 +16,21 @@ int
 __wt_evict_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 {
 	WT_BTREE *btree;
+	WT_DATA_HANDLE *dhandle;
 	WT_DECL_RET;
 	WT_PAGE *page;
 	WT_REF *next_ref, *ref;
+	uint32_t walk_flags;
 
-	btree = S2BT(session);
+	dhandle = session->dhandle;
+	btree = dhandle->handle;
 
 	/*
 	 * We need exclusive access to the file, we're about to discard the root
 	 * page. Assert eviction has been locked out.
 	 */
 	WT_ASSERT(session,
-	    btree->evict_disabled > 0 ||
-	    !F_ISSET(session->dhandle, WT_DHANDLE_OPEN));
+	    btree->evict_disabled > 0 || !F_ISSET(dhandle, WT_DHANDLE_OPEN));
 
 	/*
 	 * We do discard objects without pages in memory. If that's the case,
@@ -42,9 +44,11 @@ __wt_evict_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 	    session, WT_TXN_OLDEST_STRICT | WT_TXN_OLDEST_WAIT));
 
 	/* Walk the tree, discarding pages. */
+	walk_flags =
+	    WT_READ_CACHE | WT_READ_NO_EVICT |
+	    (syncop == WT_SYNC_CLOSE ? WT_READ_LOOKASIDE : 0);
 	next_ref = NULL;
-	WT_ERR(__wt_tree_walk(
-	    session, &next_ref, WT_READ_CACHE | WT_READ_NO_EVICT));
+	WT_ERR(__wt_tree_walk(session, &next_ref, walk_flags));
 	while ((ref = next_ref) != NULL) {
 		page = ref->page;
 
@@ -69,8 +73,8 @@ __wt_evict_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 		 * error, retrying later.
 		 */
 		if (syncop == WT_SYNC_CLOSE && __wt_page_is_modified(page))
-			WT_ERR(__wt_reconcile(
-			    session, ref, NULL, WT_EVICTING, NULL));
+			WT_ERR(__wt_reconcile(session, ref, NULL,
+			    WT_REC_EVICT | WT_REC_VISIBLE_ALL, NULL));
 
 		/*
 		 * We can't evict the page just returned to us (it marks our
@@ -81,28 +85,32 @@ __wt_evict_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 		 * the reconciliation, the next walk call could miss a page in
 		 * the tree.
 		 */
-		WT_ERR(__wt_tree_walk(session,
-		    &next_ref, WT_READ_CACHE | WT_READ_NO_EVICT));
+		WT_ERR(__wt_tree_walk(session, &next_ref, walk_flags));
 
 		switch (syncop) {
 		case WT_SYNC_CLOSE:
 			/*
 			 * Evict the page.
+			 *
+			 * Ensure the ref state is restored to the previous
+			 * value if eviction fails.
 			 */
-			WT_ERR(__wt_evict(session, ref, true));
+			WT_ERR(__wt_evict(session, ref, ref->state,
+			    WT_EVICT_CALL_CLOSING));
 			break;
 		case WT_SYNC_DISCARD:
 			/*
 			 * Discard the page regardless of whether it is dirty.
 			 */
 			WT_ASSERT(session,
-			    F_ISSET(session->dhandle, WT_DHANDLE_DEAD) ||
+			    F_ISSET(dhandle, WT_DHANDLE_DEAD) ||
+			    F_ISSET(S2C(session), WT_CONN_CLOSING) ||
 			    __wt_page_can_evict(session, ref, NULL));
 			__wt_ref_out(session, ref);
 			break;
 		case WT_SYNC_CHECKPOINT:
 		case WT_SYNC_WRITE_LEAVES:
-			WT_ERR(__wt_illegal_value(session, NULL));
+			WT_ERR(__wt_illegal_value(session, syncop));
 			break;
 		}
 	}
@@ -111,7 +119,7 @@ __wt_evict_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
 err:		/* On error, clear any left-over tree walk. */
 		if (next_ref != NULL)
 			WT_TRET(__wt_page_release(
-			    session, next_ref, WT_READ_NO_EVICT));
+			    session, next_ref, walk_flags));
 	}
 
 	return (ret);

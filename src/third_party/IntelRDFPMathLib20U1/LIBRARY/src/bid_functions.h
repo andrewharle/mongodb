@@ -41,9 +41,13 @@
 #endif
 #include <ctype.h>
 
+#if 0 // MongoDB Modification -- just `#include <stddef.h>`
 // Fix system header issue on Sun solaris and define required type by ourselves
 #if !defined(_WCHAR_T) && !defined(_WCHAR_T_DEFINED) && !defined(__QNX__)
 typedef int   wchar_t;
+#endif
+#else
+#include <stddef.h>
 #endif
 
 
@@ -112,7 +116,7 @@ typedef BID_UINT128 _Quad;
   #define SQRT80 sqrtl
 #else
   #define BINARY80 __float80
-  //#define BINARY128 __float128 
+  //#define BINARY128 __float128
   #define BINARY128 BID_UINT128
   #define SQRT80 sqrtw
 #endif
@@ -150,6 +154,7 @@ typedef BID_UINT128 _Quad;
 ///////////////////////////////////////////////////////
 //  This section may move to fenv_support.h
 
+#if 0 // MongoDB Modification -- just `#include <fenv.h>`
 #if !defined(__FENV_H_INCLUDED) && !defined (_FENV_H) && !defined(_FENV_INCLUDED)          /* Otherwise we already defined fexcept_t type */
 #if defined(__ECL) || defined(__ECC)            /* Intel(R) Itanium(R) architecture */
 /* Default 64-bit Floating Point Status Register   */
@@ -159,12 +164,15 @@ typedef unsigned    long fexcept_t;
 typedef unsigned bid__int64 fexcept_t;
 #endif
 #else
-#ifdef __QNX__
+#if defined(__QNX__) || defined(__OpenBSD__)
 #include <fenv.h>
 #else
 typedef unsigned short int fexcept_t;
 #endif
 #endif
+#endif
+#else
+#include <fenv.h>
 #endif
 
 #define DEC_FE_INVALID      0x01

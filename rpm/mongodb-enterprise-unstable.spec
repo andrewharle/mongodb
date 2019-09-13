@@ -13,6 +13,12 @@ Requires: mongodb-enterprise-unstable-server = %{version}, mongodb-enterprise-un
 Source0: %{name}-%{version}.tar.gz
 BuildRoot: %{_tmppath}/%{name}-%{version}-%{release}-root
 
+%if 0%{?suse_version}
+%define timezone_pkg timezone
+%else
+%define timezone_pkg tzdata
+%endif
+
 %description
 MongoDB is built for scalability, performance and high availability, scaling from single server deployments to large, complex multi-site architectures. By leveraging in-memory computing, MongoDB provides high performance for both reads and writes. MongoDB’s native replication and automated failover enable enterprise-grade reliability and operational flexibility.
 
@@ -34,7 +40,7 @@ This metapackage will install the mongo shell, import/export tools, other client
 %package server
 Summary: MongoDB database server (enterprise)
 Group: Applications/Databases
-Requires: openssl, net-snmp, cyrus-sasl, cyrus-sasl-plain, cyrus-sasl-gssapi
+Requires: openssl, net-snmp, cyrus-sasl, cyrus-sasl-plain, cyrus-sasl-gssapi, %{timezone_pkg}
 Conflicts: mongo-10gen, mongo-10gen-enterprise, mongo-10gen-enterprise-server, mongo-10gen-server, mongo-10gen-unstable, mongo-10gen-unstable-enterprise, mongo-10gen-unstable-enterprise-mongos, mongo-10gen-unstable-enterprise-server, mongo-10gen-unstable-enterprise-shell, mongo-10gen-unstable-enterprise-tools, mongo-10gen-unstable-mongos, mongo-10gen-unstable-server, mongo-10gen-unstable-shell, mongo-10gen-unstable-tools, mongo18-10gen, mongo18-10gen-server, mongo20-10gen, mongo20-10gen-server, mongodb, mongodb-server, mongodb-dev, mongodb-clients, mongodb-10gen, mongodb-10gen-enterprise, mongodb-10gen-unstable, mongodb-10gen-unstable-enterprise, mongodb-10gen-unstable-enterprise-mongos, mongodb-10gen-unstable-enterprise-server, mongodb-10gen-unstable-enterprise-shell, mongodb-10gen-unstable-enterprise-tools, mongodb-10gen-unstable-mongos, mongodb-10gen-unstable-server, mongodb-10gen-unstable-shell, mongodb-10gen-unstable-tools, mongodb-enterprise, mongodb-enterprise-mongos, mongodb-enterprise-server, mongodb-enterprise-shell, mongodb-enterprise-tools, mongodb-nightly, mongodb-org, mongodb-org-mongos, mongodb-org-server, mongodb-org-shell, mongodb-org-tools, mongodb-stable, mongodb18-10gen, mongodb20-10gen, mongodb-org-unstable, mongodb-org-unstable-mongos, mongodb-org-unstable-server, mongodb-org-unstable-shell, mongodb-org-unstable-tools
 BuildRequires: systemd
 
@@ -83,6 +89,7 @@ This package contains the mongo shell.
 %package mongos
 Summary: MongoDB sharded cluster query router (enterprise)
 Group: Applications/Databases
+Requires: %{timezone_pkg}
 Conflicts: mongo-10gen, mongo-10gen-enterprise, mongo-10gen-enterprise-server, mongo-10gen-server, mongo-10gen-unstable, mongo-10gen-unstable-enterprise, mongo-10gen-unstable-enterprise-mongos, mongo-10gen-unstable-enterprise-server, mongo-10gen-unstable-enterprise-shell, mongo-10gen-unstable-enterprise-tools, mongo-10gen-unstable-mongos, mongo-10gen-unstable-server, mongo-10gen-unstable-shell, mongo-10gen-unstable-tools, mongo18-10gen, mongo18-10gen-server, mongo20-10gen, mongo20-10gen-server, mongodb, mongodb-server, mongodb-dev, mongodb-clients, mongodb-10gen, mongodb-10gen-enterprise, mongodb-10gen-unstable, mongodb-10gen-unstable-enterprise, mongodb-10gen-unstable-enterprise-mongos, mongodb-10gen-unstable-enterprise-server, mongodb-10gen-unstable-enterprise-shell, mongodb-10gen-unstable-enterprise-tools, mongodb-10gen-unstable-mongos, mongodb-10gen-unstable-server, mongodb-10gen-unstable-shell, mongodb-10gen-unstable-tools, mongodb-enterprise, mongodb-enterprise-mongos, mongodb-enterprise-server, mongodb-enterprise-shell, mongodb-enterprise-tools, mongodb-nightly, mongodb-org, mongodb-org-mongos, mongodb-org-server, mongodb-org-shell, mongodb-org-tools, mongodb-stable, mongodb18-10gen, mongodb20-10gen, mongodb-org-unstable, mongodb-org-unstable-mongos, mongodb-org-unstable-server, mongodb-org-unstable-shell, mongodb-org-unstable-tools
 
 %description mongos
@@ -160,8 +167,6 @@ mkdir -p $RPM_BUILD_ROOT/usr
 cp -rv bin $RPM_BUILD_ROOT/usr
 mkdir -p $RPM_BUILD_ROOT/usr/share/man/man1
 cp debian/*.1 $RPM_BUILD_ROOT/usr/share/man/man1/
-# FIXME: remove this rm when mongosniff is back in the package
-rm -v $RPM_BUILD_ROOT/usr/share/man/man1/mongosniff.1*
 mkdir -p $RPM_BUILD_ROOT/etc
 cp -v rpm/mongod.conf $RPM_BUILD_ROOT/etc/mongod.conf
 mkdir -p $RPM_BUILD_ROOT/lib/systemd/system
@@ -189,6 +194,11 @@ if test $1 = 1
 then
   /usr/bin/systemctl enable mongod
 fi
+if test $1 = 2
+then
+  /usr/bin/systemctl daemon-reload
+fi
+
 
 %preun server
 if test $1 = 0
@@ -219,7 +229,7 @@ fi
 %doc snmp/mongod.conf.master
 %doc snmp/mongod.conf.subagent
 %doc snmp/README-snmp.txt
-%doc LICENSE.txt
+%doc LICENSE-Enterprise.txt
 %doc README
 %doc THIRD-PARTY-NOTICES
 %doc MPL-2
@@ -236,17 +246,17 @@ fi
 
 %files tools
 %defattr(-,root,root,-)
-#%doc README GNU-AGPL-3.0.txt
+#%doc README
+%doc THIRD-PARTY-NOTICES.gotools
 
 %{_bindir}/bsondump
+%{_bindir}/install_compass
 %{_bindir}/mongodecrypt
 %{_bindir}/mongoldap
 %{_bindir}/mongodump
 %{_bindir}/mongoexport
 %{_bindir}/mongofiles
 %{_bindir}/mongoimport
-%{_bindir}/mongooplog
-%{_bindir}/mongoperf
 %{_bindir}/mongorestore
 %{_bindir}/mongotop
 %{_bindir}/mongostat
@@ -256,8 +266,6 @@ fi
 %{_mandir}/man1/mongoexport.1*
 %{_mandir}/man1/mongofiles.1*
 %{_mandir}/man1/mongoimport.1*
-%{_mandir}/man1/mongooplog.1*
-%{_mandir}/man1/mongoperf.1*
 %{_mandir}/man1/mongorestore.1*
 %{_mandir}/man1/mongotop.1*
 %{_mandir}/man1/mongostat.1*

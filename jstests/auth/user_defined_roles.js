@@ -1,13 +1,14 @@
 /**
  * This tests that user defined roles actually grant users the ability to perform the actions they
  * should, and that changing the privileges assigned to roles changes the access granted to the user
+ * @tags: [requires_sharding]
  */
 
 function runTest(conn) {
     var authzErrorCode = 13;
     var hasAuthzError = function(result) {
-        assert(result.hasWriteError());
-        assert.eq(authzErrorCode, result.getWriteError().code);
+        assert(result instanceof WriteCommandError);
+        assert.eq(authzErrorCode, result.code);
     };
 
     conn.getDB('admin').createUser({user: 'admin', pwd: 'pwd', roles: ['root']});
@@ -142,9 +143,11 @@ function runTest(conn) {
 jsTest.log('Test standalone');
 var conn = MongoRunner.runMongod({auth: ''});
 runTest(conn);
-MongoRunner.stopMongod(conn.port);
+MongoRunner.stopMongod(conn);
 
 jsTest.log('Test sharding');
-var st = new ShardingTest({shards: 2, config: 3, keyFile: 'jstests/libs/key1'});
+// TODO: Remove 'shardAsReplicaSet: false' when SERVER-32672 is fixed.
+var st = new ShardingTest(
+    {shards: 2, config: 3, keyFile: 'jstests/libs/key1', other: {shardAsReplicaSet: false}});
 runTest(st.s);
 st.stop();

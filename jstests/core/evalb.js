@@ -1,7 +1,14 @@
 // Check the return value of a db.eval function running a database query, and ensure the function's
 // contents are logged in the profile log.
 //
-// @tags: [requires_eval_command]
+// @tags: [
+//   assumes_read_preference_unchanged,
+//   creates_and_authenticates_user,
+//   does_not_support_stepdowns,
+//   requires_eval_command,
+//   requires_non_retryable_commands,
+//   requires_profiling
+// ]
 
 // Use a reserved database name to avoid a conflict in the parallel test suite.
 var stddb = db;

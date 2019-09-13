@@ -1,3 +1,12 @@
+// @tags: [
+//      # Cannot implicitly shard accessed collections because of following errmsg: A single
+//      # update/delete on a sharded collection must contain an exact match on _id or contain
+//      # the shard key.
+//      assumes_unsharded_collection,
+//      # The {$set: {"a.1500000": 1}} update takes multiple seconds to execute.
+//      operations_longer_than_stepdown_interval,
+// ]
+
 // test $set with array indicies
 
 t = db.jstests_set7;
@@ -45,6 +54,12 @@ t.drop();
 t.save({a: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10]});
 t.update({}, {$set: {"a.11": 11, "a.2": -2}});
 assert.eq([0, 1, -2, 3, 4, 5, 6, 7, 8, 9, 10, 11], t.findOne().a);
+
+// Test multiple updates to a non-existent array element.
+t.drop();
+assert.writeOK(t.insert({a: []}));
+assert.writeOK(t.update({}, {$set: {"a.2.b": 1, "a.2.c": 1}}));
+assert.docEq({a: [null, null, {b: 1, c: 1}]}, t.findOne({}, {_id: 0}));
 
 // Test upsert case
 t.drop();

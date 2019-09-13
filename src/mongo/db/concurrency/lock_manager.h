@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -39,9 +41,9 @@
 #include "mongo/db/concurrency/lock_request_list.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/platform/compiler.h"
-#include "mongo/platform/unordered_map.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/stdx/unordered_map.h"
 #include "mongo/util/concurrency/mutex.h"
 
 namespace mongo {
@@ -77,7 +79,7 @@ public:
       *                 lock becomes granted, the notification will not be invoked.
       *
       *                 If the return value is LOCK_WAITING, the notification object *must*
-      *                 live at least until the notfy method has been invoked or unlock has
+      *                 live at least until the notify method has been invoked or unlock has
       *                 been called for the resource it was assigned to. Failure to do so will
       *                 cause the lock manager to call into an invalid memory location.
       * @param mode Mode in which the resource should be locked. Lock upgrades are allowed.
@@ -142,7 +144,7 @@ private:
 
     struct LockBucket {
         SimpleMutex mutex;
-        typedef unordered_map<ResourceId, LockHead*> Map;
+        typedef stdx::unordered_map<ResourceId, LockHead*> Map;
         Map data;
         LockHead* findOrInsert(ResourceId resId);
     };
@@ -153,7 +155,7 @@ private:
     struct Partition {
         PartitionedLockHead* find(ResourceId resId);
         PartitionedLockHead* findOrInsert(ResourceId resId);
-        typedef unordered_map<ResourceId, PartitionedLockHead*> Map;
+        typedef stdx::unordered_map<ResourceId, PartitionedLockHead*> Map;
         SimpleMutex mutex;
         Map data;
     };

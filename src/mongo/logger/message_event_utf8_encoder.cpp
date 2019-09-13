@@ -1,28 +1,31 @@
-/*    Copyright 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -31,21 +34,45 @@
 
 #include <iostream>
 
-#include "mongo/logger/max_log_size.h"
 #include "mongo/util/time_support.h"
 
 namespace mongo {
 
 namespace logger {
 
-static MessageEventDetailsEncoder::DateFormatter _dateFormatter = outputDateAsISOStringLocal;
+const int LogContext::kDefaultMaxLogSizeKB;
 
-void MessageEventDetailsEncoder::setDateFormatter(DateFormatter dateFormatter) {
-    _dateFormatter = dateFormatter;
+LogContext::LogContext()
+    : _dateFormatter{outputDateAsISOStringLocal}, _maxLogSizeSource{nullptr} {};
+
+LogContext& MessageEventDetailsEncoder::getGlobalLogContext() {
+    static LogContext context;
+    return context;
 }
 
-MessageEventDetailsEncoder::DateFormatter MessageEventDetailsEncoder::getDateFormatter() {
-    return _dateFormatter;
+void MessageEventDetailsEncoder::setMaxLogSizeKBSource(const AtomicWord<int>& source) {
+    invariant(getGlobalLogContext()._maxLogSizeSource == nullptr);
+    getGlobalLogContext()._maxLogSizeSource = &source;
+}
+
+int MessageEventDetailsEncoder::getMaxLogSizeKB() {
+    auto* source = getGlobalLogContext()._maxLogSizeSource;
+
+    // If not initialized, use the default
+    if (source == nullptr)
+        return LogContext::kDefaultMaxLogSizeKB;
+
+    // If initialized, use the reference
+    // TODO: This seems like a CST seq'd load we don't need. `loadRelaxed()`?
+    return source->load();
+}
+
+void MessageEventDetailsEncoder::setDateFormatter(DateFormatter dateFormatter) {
+    getGlobalLogContext()._dateFormatter = dateFormatter;
+}
+
+DateFormatter MessageEventDetailsEncoder::getDateFormatter() {
+    return getGlobalLogContext()._dateFormatter;
 }
 
 namespace {
@@ -59,9 +86,11 @@ constexpr auto kEOL = "\n"_sd;
 MessageEventDetailsEncoder::~MessageEventDetailsEncoder() {}
 std::ostream& MessageEventDetailsEncoder::encode(const MessageEventEphemeral& event,
                                                  std::ostream& os) {
-    const size_t maxLogSize = MaxLogSizeKB::get() * 1024;
+    const auto maxLogSizeKB = getMaxLogSizeKB();
 
-    _dateFormatter(os, event.getDate());
+    const size_t maxLogSize = maxLogSizeKB * 1024;
+
+    getDateFormatter()(os, event.getDate());
     os << ' ';
 
     os << event.getSeverity().toChar();
@@ -99,7 +128,7 @@ std::ostream& MessageEventDetailsEncoder::encode(const MessageEventEphemeral& ev
 
     if (event.isTruncatable() && msg.size() > maxLogSize) {
         os << "warning: log line attempted (" << msg.size() / 1024 << "kB) over max size ("
-           << MaxLogSizeKB::get() << "kB), printing beginning and end ... ";
+           << maxLogSizeKB << "kB), printing beginning and end ... ";
         os << msg.substr(0, maxLogSize / 3);
         os << " .......... ";
         os << msg.substr(msg.size() - (maxLogSize / 3));

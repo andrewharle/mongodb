@@ -23,11 +23,7 @@ var DiscoverTopology = (function() {
         // The "passives" field contains the list of unelectable (priority=0) secondaries
         // and is omitted from the server's response when there are none.
         res.passives = res.passives || [];
-        return {
-            type: Topology.kReplicaSet,
-            primary: res.primary,
-            nodes: [...res.hosts, ...res.passives]
-        };
+        return {type: Topology.kReplicaSet, nodes: [...res.hosts, ...res.passives]};
     }
 
     function findConnectedNodesViaMongos(conn, options) {
@@ -64,8 +60,7 @@ var DiscoverTopology = (function() {
         }
 
         // Discover mongos URIs from the connection string. If a mongos is not passed in explicitly,
-        // it will not be discovered. Prior to the changes from SERVER-28560 and SERVER-31061, only
-        // one mongos URI could be present in the connection string.
+        // it will not be discovered.
         const mongosUris = new MongoURI("mongodb://" + conn.host);
 
         const mongos = {
@@ -92,11 +87,7 @@ var DiscoverTopology = (function() {
          * is returned.
          *
          * For a replica set, an object of the form
-         *   {
-         *     type: Topology.kReplicaSet,
-         *     primary: <primary-conn-string>,
-         *     nodes: [<conn-string1>, <conn-string2>, ...],
-         *   }
+         *   {type: Topology.kReplicaSet, nodes: [<conn-string1>, <conn-string2>, ...]}
          * is returned.
          *
          * For a sharded cluster, an object of the form
@@ -105,10 +96,12 @@ var DiscoverTopology = (function() {
          *     configsvr: {nodes: [...]},
          *     shards: {
          *       <shard-name1>: {type: Topology.kStandalone, mongod: ...},
-         *       <shard-name2>: {type: Topology.kReplicaSet,
-         *                       primary: <primary-conn-string>,
-         *                       nodes: [...]},
+         *       <shard-name2>: {type: Topology.kReplicaSet, nodes: [...]},
          *       ...
+         *     },
+         *     mongos: {
+         *       type: Topology.kRouter,
+         *       nodes: [...],
          *     }
          *   }
          * is returned, where the description for each shard depends on whether it is a stand-alone

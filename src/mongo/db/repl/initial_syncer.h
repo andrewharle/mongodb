@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -50,57 +52,45 @@
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/stdx/mutex.h"
+#include "mongo/util/concurrency/thread_pool.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/net/hostandport.h"
 
 namespace mongo {
 namespace repl {
 
-namespace {
-
-using CallbackArgs = executor::TaskExecutor::CallbackArgs;
-using Event = executor::TaskExecutor::EventHandle;
-using Handle = executor::TaskExecutor::CallbackHandle;
-using Operations = MultiApplier::Operations;
-using QueryResponseStatus = StatusWith<Fetcher::QueryResponse>;
-using UniqueLock = stdx::unique_lock<stdx::mutex>;
-
-}  // namespace
-
 // TODO: Remove forward declares once we remove rs_initialsync.cpp and other dependents.
 // Failpoint which fails initial sync and leaves an oplog entry in the buffer.
-MONGO_FP_FORWARD_DECLARE(failInitSyncWithBufferedEntriesLeft);
+MONGO_FAIL_POINT_DECLARE(failInitSyncWithBufferedEntriesLeft);
 
 // Failpoint which causes the initial sync function to hang before copying databases.
-MONGO_FP_FORWARD_DECLARE(initialSyncHangBeforeCopyingDatabases);
+MONGO_FAIL_POINT_DECLARE(initialSyncHangBeforeCopyingDatabases);
 
 // Failpoint which causes the initial sync function to hang before calling shouldRetry on a failed
 // operation.
-MONGO_FP_FORWARD_DECLARE(initialSyncHangBeforeGettingMissingDocument);
+MONGO_FAIL_POINT_DECLARE(initialSyncHangBeforeGettingMissingDocument);
 
 // Failpoint which stops the applier.
-MONGO_FP_FORWARD_DECLARE(rsSyncApplyStop);
+MONGO_FAIL_POINT_DECLARE(rsSyncApplyStop);
 
 struct InitialSyncState;
 struct MemberState;
+class ReplicationProcess;
 class StorageInterface;
-
 
 struct InitialSyncerOptions {
     /** Function to return optime of last operation applied on this node */
     using GetMyLastOptimeFn = stdx::function<OpTime()>;
 
     /** Function to update optime of last operation applied on this node */
-    using SetMyLastOptimeFn = stdx::function<void(const OpTime&)>;
+    using SetMyLastOptimeFn =
+        stdx::function<void(const OpTime&, ReplicationCoordinator::DataConsistency consistency)>;
 
     /** Function to reset all optimes on this node (e.g. applied & durable). */
     using ResetOptimesFn = stdx::function<void()>;
 
     /** Function to sets this node into a specific follower mode. */
     using SetFollowerModeFn = stdx::function<bool(const MemberState&)>;
-
-    /** Function to get this node's slaveDelay. */
-    using GetSlaveDelayFn = stdx::function<Seconds()>;
 
     // Error and retry values
     Milliseconds syncSourceRetryWait{1000};
@@ -114,10 +104,6 @@ struct InitialSyncerOptions {
     // SyncTail::tryPopAndWaitForMore().
     Milliseconds getApplierBatchCallbackRetryWait{1000};
 
-    // Batching settings.
-    std::uint32_t replBatchLimitBytes = 512 * 1024 * 1024;
-    std::uint32_t replBatchLimitOperations = 5000;
-
     // Replication settings
     NamespaceString localOplogNS = NamespaceString("local.oplog.rs");
     NamespaceString remoteOplogNS = NamespaceString("local.oplog.rs");
@@ -125,7 +111,6 @@ struct InitialSyncerOptions {
     GetMyLastOptimeFn getMyLastOptime;
     SetMyLastOptimeFn setMyLastOptime;
     ResetOptimesFn resetOptimes;
-    GetSlaveDelayFn getSlaveDelay;
 
     SyncSourceSelector* syncSourceSelector = nullptr;
 
@@ -189,7 +174,9 @@ public:
 
     InitialSyncer(InitialSyncerOptions opts,
                   std::unique_ptr<DataReplicatorExternalState> dataReplicatorExternalState,
+                  ThreadPool* writerPool,
                   StorageInterface* storage,
+                  ReplicationProcess* replicationProcess,
                   const OnCompletionFn& onCompletion);
 
     virtual ~InitialSyncer();
@@ -202,7 +189,7 @@ public:
     /**
      * Starts initial sync process, with the provided number of attempts
      */
-    Status startup(OperationContext* txn, std::uint32_t maxAttempts) noexcept;
+    Status startup(OperationContext* opCtx, std::uint32_t maxAttempts) noexcept;
 
     /**
      * Shuts down replication if "start" has been called, and blocks until shutdown has completed.
@@ -289,7 +276,7 @@ private:
      *         |
      *         |
      *         V
-     *    _recreateOplogAndDropReplicatedDatabases()
+     *    _truncateOplogAndDropReplicatedDatabases()
      *         |
      *         |
      *         V
@@ -298,6 +285,10 @@ private:
      *         |
      *         V
      *    _lastOplogEntryFetcherCallbackForBeginTimestamp()
+     *         |
+     *         |
+     *         V
+     *    _fcvFetcherCallback()
      *         |
      *         |
      *         +------------------------------+
@@ -352,12 +343,12 @@ private:
     /**
      * Sets up internal state to begin initial sync.
      */
-    void _setUp_inlock(OperationContext* txn, std::uint32_t initialSyncMaxAttempts);
+    void _setUp_inlock(OperationContext* opCtx, std::uint32_t initialSyncMaxAttempts);
 
     /**
      * Tears down internal state before reporting final status to caller.
      */
-    void _tearDown_inlock(OperationContext* txn, const StatusWith<OpTimeWithHash>& lastApplied);
+    void _tearDown_inlock(OperationContext* opCtx, const StatusWith<OpTimeWithHash>& lastApplied);
 
     /**
      * Callback to start a single initial sync attempt.
@@ -379,11 +370,10 @@ private:
 
     /**
      * This function does the following:
-     *      1.) Drop oplog.
+     *      1.) Truncate oplog.
      *      2.) Drop user databases (replicated dbs).
-     *      3.) Create oplog.
      */
-    Status _recreateOplogAndDropReplicatedDatabases();
+    Status _truncateOplogAndDropReplicatedDatabases();
 
     /**
      * Callback for rollback checker's first replSetGetRBID command before starting data cloning.
@@ -401,11 +391,19 @@ private:
         const StatusWith<Fetcher::QueryResponse>& result,
         std::shared_ptr<OnCompletionGuard> onCompletionGuard);
 
+
+    /**
+     * Callback for the '_fCVFetcher'. A successful response lets us check if the remote node
+     * is in a currently acceptable fCV and if it has a 'targetVersion' set.
+     */
+    void _fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>& result,
+                             std::shared_ptr<OnCompletionGuard> onCompletionGuard,
+                             const OpTimeWithHash& lastOpTimeWithHash);
+
     /**
      * Callback for oplog fetcher.
      */
     void _oplogFetcherCallback(const Status& status,
-                               const OpTimeWithHash& lastFetched,
                                std::shared_ptr<OnCompletionGuard> onCompletionGuard);
 
     /**
@@ -484,7 +482,7 @@ private:
     void _appendInitialSyncProgressMinimal_inlock(BSONObjBuilder* bob) const;
     BSONObj _getInitialSyncProgress_inlock() const;
 
-    StatusWith<Operations> _getNextApplierBatch_inlock();
+    StatusWith<MultiApplier::Operations> _getNextApplierBatch_inlock();
 
     /**
      * Schedules a fetcher to get the last oplog entry from the sync source.
@@ -575,7 +573,9 @@ private:
     const InitialSyncerOptions _opts;                                           // (R)
     std::unique_ptr<DataReplicatorExternalState> _dataReplicatorExternalState;  // (R)
     executor::TaskExecutor* _exec;                                              // (R)
+    ThreadPool* _writerPool;                                                    // (R)
     StorageInterface* _storage;                                                 // (R)
+    ReplicationProcess* _replicationProcess;                                    // (S)
 
     // This is invoked with the final status of the initial sync. If startup() fails, this callback
     // is never invoked. The caller gets the last applied optime with hash when the initial sync
@@ -605,6 +605,7 @@ private:
     std::unique_ptr<InitialSyncState> _initialSyncState;  // (M)
     std::unique_ptr<OplogFetcher> _oplogFetcher;          // (S)
     std::unique_ptr<Fetcher> _lastOplogEntryFetcher;      // (S)
+    std::unique_ptr<Fetcher> _fCVFetcher;                 // (S)
     std::unique_ptr<MultiApplier> _applier;               // (M)
     HostAndPort _syncSource;                              // (M)
     OpTimeWithHash _lastFetched;                          // (MX)

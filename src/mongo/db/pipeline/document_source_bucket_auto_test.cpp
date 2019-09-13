@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -87,9 +89,9 @@ public:
         auto bucketAutoStage = createBucketAuto(bucketAutoSpec);
         assertBucketAutoType(bucketAutoStage);
 
-        const bool explain = true;
         vector<Value> explainedStages;
-        bucketAutoStage->serializeToArray(explainedStages, explain);
+        bucketAutoStage->serializeToArray(explainedStages,
+                                          ExplainOptions::Verbosity::kQueryPlanner);
         ASSERT_EQUALS(explainedStages.size(), 1UL);
 
         Value expectedExplain = Value(expectedObj);
@@ -122,9 +124,11 @@ TEST_F(BucketAutoTests, Returns1Of1RequestedBucketWhenAllUniqueValues) {
     ASSERT_DOCUMENT_EQ(results[0], Document(fromjson("{_id : {min : 1, max : 4}, count : 4}")));
 
     // Values are 'a', 'b', 'c', 'd'
-    results = getResults(
-        bucketAutoSpec,
-        {Document{{"x", "d"}}, Document{{"x", "b"}}, Document{{"x", "a"}}, Document{{"x", "c"}}});
+    results = getResults(bucketAutoSpec,
+                         {Document{{"x", "d"_sd}},
+                          Document{{"x", "b"_sd}},
+                          Document{{"x", "a"_sd}},
+                          Document{{"x", "c"_sd}}});
     ASSERT_EQUALS(results.size(), 1UL);
     ASSERT_DOCUMENT_EQ(results[0], Document(fromjson("{_id : {min : 'a', max : 'd'}, count : 4}")));
 }
@@ -149,7 +153,7 @@ TEST_F(BucketAutoTests, Returns1Of1RequestedBucketWhen1ValueInSource) {
     ASSERT_EQUALS(results.size(), 1UL);
     ASSERT_DOCUMENT_EQ(results[0], Document(fromjson("{_id : {min : 1, max : 1}, count : 1}")));
 
-    results = getResults(bucketAutoSpec, {Document{{"x", "a"}}});
+    results = getResults(bucketAutoSpec, {Document{{"x", "a"_sd}}});
     ASSERT_EQUALS(results.size(), 1UL);
     ASSERT_DOCUMENT_EQ(results[0], Document(fromjson("{_id : {min : 'a', max : 'a'}, count : 1}")));
 }
@@ -300,9 +304,9 @@ TEST_F(BucketAutoTests, EvaluatesNonFieldPathExpressionInGroupByField) {
 TEST_F(BucketAutoTests, RespectsCanonicalTypeOrderingOfValues) {
     auto bucketAutoSpec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 2}}");
     auto results = getResults(bucketAutoSpec,
-                              {Document{{"x", "a"}},
+                              {Document{{"x", "a"_sd}},
                                Document{{"x", 1}},
-                               Document{{"x", "b"}},
+                               Document{{"x", "b"_sd}},
                                Document{{"x", 2}},
                                Document{{"x", 0.0}}});
 
@@ -348,21 +352,15 @@ TEST_F(BucketAutoTests, ShouldBeAbleToCorrectlySpillToDisk) {
     auto expCtx = getExpCtx();
     unittest::TempDir tempDir("DocumentSourceBucketAutoTest");
     expCtx->tempDir = tempDir.path();
-    expCtx->extSortAllowed = true;
+    expCtx->allowDiskUse = true;
     const size_t maxMemoryUsageBytes = 1000;
 
-    VariablesIdGenerator idGen;
-    VariablesParseState vps(&idGen);
+    VariablesParseState vps = expCtx->variablesParseState;
     auto groupByExpression = ExpressionFieldPath::parse(expCtx, "$a", vps);
 
     const int numBuckets = 2;
-    auto bucketAutoStage = DocumentSourceBucketAuto::create(expCtx,
-                                                            groupByExpression,
-                                                            idGen.getIdCount(),
-                                                            numBuckets,
-                                                            {},
-                                                            nullptr,
-                                                            maxMemoryUsageBytes);
+    auto bucketAutoStage = DocumentSourceBucketAuto::create(
+        expCtx, groupByExpression, numBuckets, {}, nullptr, maxMemoryUsageBytes);
 
     string largeStr(maxMemoryUsageBytes, 'x');
     auto mock = DocumentSourceMock::create({Document{{"a", 0}, {"largeStr", largeStr}},
@@ -390,21 +388,15 @@ TEST_F(BucketAutoTests, ShouldBeAbleToPauseLoadingWhileSpilled) {
     // Allow the $sort stage to spill to disk.
     unittest::TempDir tempDir("DocumentSourceBucketAutoTest");
     expCtx->tempDir = tempDir.path();
-    expCtx->extSortAllowed = true;
+    expCtx->allowDiskUse = true;
     const size_t maxMemoryUsageBytes = 1000;
 
-    VariablesIdGenerator idGen;
-    VariablesParseState vps(&idGen);
+    VariablesParseState vps = expCtx->variablesParseState;
     auto groupByExpression = ExpressionFieldPath::parse(expCtx, "$a", vps);
 
     const int numBuckets = 2;
-    auto bucketAutoStage = DocumentSourceBucketAuto::create(expCtx,
-                                                            groupByExpression,
-                                                            idGen.getIdCount(),
-                                                            numBuckets,
-                                                            {},
-                                                            nullptr,
-                                                            maxMemoryUsageBytes);
+    auto bucketAutoStage = DocumentSourceBucketAuto::create(
+        expCtx, groupByExpression, numBuckets, {}, nullptr, maxMemoryUsageBytes);
     auto sort = DocumentSourceSort::create(expCtx, BSON("_id" << -1), -1, maxMemoryUsageBytes);
 
     string largeStr(maxMemoryUsageBytes, 'x');
@@ -537,162 +529,150 @@ TEST_F(BucketAutoTests, ShouldBeAbleToReParseSerializedStage) {
 
 TEST_F(BucketAutoTests, FailsWithInvalidNumberOfBuckets) {
     auto spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 'test'}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40241);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40241);
 
     spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 2147483648}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40242);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40242);
 
     spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 1.5}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40242);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40242);
 
     spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 0}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40243);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40243);
 
     spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : -1}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40243);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40243);
 
     // Use the create() helper.
     const int numBuckets = 0;
     ASSERT_THROWS_CODE(
         DocumentSourceBucketAuto::create(
-            getExpCtx(), ExpressionConstant::create(getExpCtx(), Value(0)), 0, numBuckets),
-        UserException,
+            getExpCtx(), ExpressionConstant::create(getExpCtx(), Value(0)), numBuckets),
+        AssertionException,
         40243);
 }
 
 TEST_F(BucketAutoTests, FailsWithNonExpressionGroupBy) {
     auto spec = fromjson("{$bucketAuto : {groupBy : 'test', buckets : 1}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40239);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
 
     spec = fromjson("{$bucketAuto : {groupBy : {test : 'test'}, buckets : 1}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40239);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40239);
 }
 
 TEST_F(BucketAutoTests, FailsWithNonObjectArgument) {
     auto spec = fromjson("{$bucketAuto : 'test'}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40240);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40240);
 
     spec = fromjson("{$bucketAuto : [1, 2, 3]}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40240);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40240);
 }
 
 TEST_F(BucketAutoTests, FailsWithNonObjectOutput) {
     auto spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 1, output : 'test'}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40244);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40244);
 
     spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 1, output : [1, 2, 3]}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40244);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40244);
 
     spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 1, output : 1}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40244);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40244);
 }
 
 TEST_F(BucketAutoTests, FailsWhenGroupByMissing) {
     auto spec = fromjson("{$bucketAuto : {buckets : 1}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40246);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40246);
 }
 
 TEST_F(BucketAutoTests, FailsWhenBucketsMissing) {
     auto spec = fromjson("{$bucketAuto : {groupBy : '$x'}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40246);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40246);
 }
 
 TEST_F(BucketAutoTests, FailsWithUnknownField) {
     auto spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 1, field : 'test'}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40245);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40245);
 }
 
 TEST_F(BucketAutoTests, FailsWithInvalidExpressionToAccumulator) {
     auto spec = fromjson(
         "{$bucketAuto : {groupBy : '$x', buckets : 1, output : {avg : {$avg : ['$x', 1]}}}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40237);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40237);
 
     spec = fromjson(
         "{$bucketAuto : {groupBy : '$x', buckets : 1, output : {test : {$avg : '$x', $sum : "
         "'$x'}}}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40238);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40238);
 }
 
 TEST_F(BucketAutoTests, FailsWithNonAccumulatorObjectOutputField) {
     auto spec =
         fromjson("{$bucketAuto : {groupBy : '$x', buckets : 1, output : {field : 'test'}}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40234);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40234);
 
     spec = fromjson("{$bucketAuto : {groupBy : '$x', buckets : 1, output : {field : 1}}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40234);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40234);
 
     spec = fromjson(
         "{$bucketAuto : {groupBy : '$x', buckets : 1, output : {test : {field : 'test'}}}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40234);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40234);
 }
 
 TEST_F(BucketAutoTests, FailsWithInvalidOutputFieldName) {
     auto spec = fromjson(
         "{$bucketAuto : {groupBy : '$x', buckets : 1, output : {'field.test' : {$avg : '$x'}}}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40235);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40235);
 
     spec = fromjson(
         "{$bucketAuto : {groupBy : '$x', buckets : 1, output : {'$field' : {$avg : '$x'}}}}");
-    ASSERT_THROWS_CODE(createBucketAuto(spec), UserException, 40236);
+    ASSERT_THROWS_CODE(createBucketAuto(spec), AssertionException, 40236);
 }
 
 void assertCannotSpillToDisk(const boost::intrusive_ptr<ExpressionContext>& expCtx) {
     const size_t maxMemoryUsageBytes = 1000;
 
-    VariablesIdGenerator idGen;
-    VariablesParseState vps(&idGen);
+    VariablesParseState vps = expCtx->variablesParseState;
     auto groupByExpression = ExpressionFieldPath::parse(expCtx, "$a", vps);
 
     const int numBuckets = 2;
-    auto bucketAutoStage = DocumentSourceBucketAuto::create(expCtx,
-                                                            groupByExpression,
-                                                            idGen.getIdCount(),
-                                                            numBuckets,
-                                                            {},
-                                                            nullptr,
-                                                            maxMemoryUsageBytes);
+    auto bucketAutoStage = DocumentSourceBucketAuto::create(
+        expCtx, groupByExpression, numBuckets, {}, nullptr, maxMemoryUsageBytes);
 
     string largeStr(maxMemoryUsageBytes, 'x');
     auto mock = DocumentSourceMock::create(
         {Document{{"a", 0}, {"largeStr", largeStr}}, Document{{"a", 1}, {"largeStr", largeStr}}});
     bucketAutoStage->setSource(mock.get());
 
-    ASSERT_THROWS_CODE(bucketAutoStage->getNext(), UserException, 16819);
+    ASSERT_THROWS_CODE(bucketAutoStage->getNext(), AssertionException, 16819);
 }
 
 TEST_F(BucketAutoTests, ShouldFailIfBufferingTooManyDocuments) {
     auto expCtx = getExpCtx();
 
-    expCtx->extSortAllowed = false;
-    expCtx->inRouter = false;
+    expCtx->allowDiskUse = false;
+    expCtx->inMongos = false;
     assertCannotSpillToDisk(expCtx);
 
-    expCtx->extSortAllowed = true;
-    expCtx->inRouter = true;
+    expCtx->allowDiskUse = true;
+    expCtx->inMongos = true;
     assertCannotSpillToDisk(expCtx);
 
-    expCtx->extSortAllowed = false;
-    expCtx->inRouter = true;
+    expCtx->allowDiskUse = false;
+    expCtx->inMongos = true;
     assertCannotSpillToDisk(expCtx);
 }
 
 TEST_F(BucketAutoTests, ShouldCorrectlyTrackMemoryUsageBetweenPauses) {
     auto expCtx = getExpCtx();
-    expCtx->extSortAllowed = false;
+    expCtx->allowDiskUse = false;
     const size_t maxMemoryUsageBytes = 1000;
 
-    VariablesIdGenerator idGen;
-    VariablesParseState vps(&idGen);
+    VariablesParseState vps = expCtx->variablesParseState;
     auto groupByExpression = ExpressionFieldPath::parse(expCtx, "$a", vps);
 
     const int numBuckets = 2;
-    auto bucketAutoStage = DocumentSourceBucketAuto::create(expCtx,
-                                                            groupByExpression,
-                                                            idGen.getIdCount(),
-                                                            numBuckets,
-                                                            {},
-                                                            nullptr,
-                                                            maxMemoryUsageBytes);
+    auto bucketAutoStage = DocumentSourceBucketAuto::create(
+        expCtx, groupByExpression, numBuckets, {}, nullptr, maxMemoryUsageBytes);
 
     string largeStr(maxMemoryUsageBytes / 2, 'x');
     auto mock = DocumentSourceMock::create({Document{{"a", 0}, {"largeStr", largeStr}},
@@ -705,7 +685,7 @@ TEST_F(BucketAutoTests, ShouldCorrectlyTrackMemoryUsageBetweenPauses) {
     ASSERT_TRUE(bucketAutoStage->getNext().isPaused());
 
     // The next should realize it's used too much memory.
-    ASSERT_THROWS_CODE(bucketAutoStage->getNext(), UserException, 16819);
+    ASSERT_THROWS_CODE(bucketAutoStage->getNext(), AssertionException, 16819);
 }
 
 TEST_F(BucketAutoTests, ShouldRoundUpMaximumBoundariesWithGranularitySpecified) {
@@ -796,7 +776,7 @@ TEST_F(BucketAutoTests, ShouldFailOnNaNWhenGranularitySpecified) {
                                    Document{{"x", std::nan("NaN")}},
                                    Document{{"x", 1}},
                                    Document{{"x", 1}}}),
-                       UserException,
+                       AssertionException,
                        40259);
 }
 
@@ -804,12 +784,13 @@ TEST_F(BucketAutoTests, ShouldFailOnNonNumericValuesWhenGranularitySpecified) {
     auto bucketAutoSpec =
         fromjson("{$bucketAuto : {groupBy : '$x', buckets : 2, granularity : 'R5'}}");
 
-    ASSERT_THROWS_CODE(
-        getResults(
-            bucketAutoSpec,
-            {Document{{"x", 0}}, Document{{"x", "test"}}, Document{{"x", 1}}, Document{{"x", 1}}}),
-        UserException,
-        40258);
+    ASSERT_THROWS_CODE(getResults(bucketAutoSpec,
+                                  {Document{{"x", 0}},
+                                   Document{{"x", "test"_sd}},
+                                   Document{{"x", 1}},
+                                   Document{{"x", 1}}}),
+                       AssertionException,
+                       40258);
 }
 
 TEST_F(BucketAutoTests, ShouldFailOnNegativeNumbersWhenGranularitySpecified) {
@@ -820,7 +801,7 @@ TEST_F(BucketAutoTests, ShouldFailOnNegativeNumbersWhenGranularitySpecified) {
         getResults(
             bucketAutoSpec,
             {Document{{"x", 0}}, Document{{"x", -1}}, Document{{"x", 1}}, Document{{"x", 2}}}),
-        UserException,
+        AssertionException,
         40260);
 }
 }  // namespace

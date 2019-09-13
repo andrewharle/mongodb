@@ -1,6 +1,10 @@
 // Confirms that profiled insert execution contains all expected metrics with proper values.
 //
-// @tags: [assumes_write_concern_unchanged]
+// @tags: [
+//   assumes_write_concern_unchanged,
+//   does_not_support_stepdowns,
+//   requires_profiling,
+// ]
 
 (function() {
     "use strict";
@@ -31,9 +35,7 @@
     assert.eq(profileObj.ninserted, 1, tojson(profileObj));
     assert.eq(profileObj.keysInserted, 1, tojson(profileObj));
     if (isWriteCommand) {
-        assert.eq(profileObj.query.documents.length, 1, tojson(profileObj));
-        assert.eq(profileObj.query.documents[0], doc, tojson(profileObj));
-        assert.eq(profileObj.query.ordered, true, tojson(profileObj));
+        assert.eq(profileObj.command.ordered, true, tojson(profileObj));
         assert.eq(profileObj.protocol,
                   getProfilerProtocolStringForCommand(testDB.getMongo()),
                   tojson(profileObj));
@@ -66,7 +68,6 @@
     if (isWriteCommand) {
         assert.eq(profileObj.ninserted, 2, tojson(profileObj));
         assert.eq(profileObj.keysInserted, 2, tojson(profileObj));
-        assert.eq(profileObj.query.documents, docArray, tojson(profileObj));
         assert.eq(profileObj.appName, "MongoDB Shell", tojson(profileObj));
     } else {
         // Documents were inserted one at a time.
@@ -86,9 +87,9 @@
     profileObj = getLatestProfilerEntry(testDB);
 
     if (isWriteCommand) {
-        assert.eq(profileObj.query.ordered, false, tojson(profileObj));
-        assert.eq(profileObj.query.writeConcern.w, 1, tojson(profileObj));
-        assert.eq(profileObj.query.writeConcern.wtimeout, wtimeout, tojson(profileObj));
+        assert.eq(profileObj.command.ordered, false, tojson(profileObj));
+        assert.eq(profileObj.command.writeConcern.w, 1, tojson(profileObj));
+        assert.eq(profileObj.command.writeConcern.wtimeout, wtimeout, tojson(profileObj));
         assert.eq(profileObj.appName, "MongoDB Shell", tojson(profileObj));
     }
 })();

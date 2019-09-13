@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -43,7 +45,7 @@ struct Extent;
  */
 class CappedRecordStoreV1Iterator final : public SeekableRecordCursor {
 public:
-    CappedRecordStoreV1Iterator(OperationContext* txn,
+    CappedRecordStoreV1Iterator(OperationContext* opCtx,
                                 const CappedRecordStoreV1* collection,
                                 bool forward);
 
@@ -52,12 +54,12 @@ public:
     void save() final;
     bool restore() final;
     void detachFromOperationContext() final {
-        _txn = nullptr;
+        _opCtx = nullptr;
     }
-    void reattachToOperationContext(OperationContext* txn) final {
-        _txn = txn;
+    void reattachToOperationContext(OperationContext* opCtx) final {
+        _opCtx = opCtx;
     }
-    void invalidate(OperationContext* txn, const RecordId& dl) final;
+    void invalidate(OperationContext* opCtx, const RecordId& dl) final;
     std::unique_ptr<RecordFetcher> fetcherForNext() const final;
     std::unique_ptr<RecordFetcher> fetcherForId(const RecordId& id) const final;
 
@@ -80,7 +82,7 @@ private:
     DiskLoc _getPrevRecord(const DiskLoc& loc);
 
     // transactional context for read locks. Not owned by us
-    OperationContext* _txn;
+    OperationContext* _opCtx;
 
     // The collection we're iterating over.
     const CappedRecordStoreV1* const _recordStore;

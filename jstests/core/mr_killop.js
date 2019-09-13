@@ -1,3 +1,12 @@
+// Cannot implicitly shard accessed collections because the "command" field in the currentOp()
+// output is reported as {"mapreduce.shardedfinish": { mapreduce: "jstests_mr_killop", ... }, ... }
+// when the "finalize" option to the "mapReduce" command is used on a sharded collection.
+// @tags: [
+//   assumes_unsharded_collection,
+//   does_not_support_stepdowns,
+//   uses_multiple_connections,
+// ]
+
 // Test killop applied to m/r operations and child ops of m/r operations.
 
 t = db.jstests_mr_killop;
@@ -13,18 +22,34 @@ function debug(x) {
 function op(childLoop) {
     p = db.currentOp().inprog;
     debug(p);
+
+    let isMapReduce = function(op) {
+        if (!op.command) {
+            return false;
+        }
+
+        let cmdBody = op.command;
+        if (cmdBody.$truncated) {
+            let stringifiedCmd = cmdBody.$truncated;
+            print('str: ' + tojson(stringifiedCmd));
+            return stringifiedCmd.search('mapreduce') >= 0 &&
+                stringifiedCmd.search('jstests_mr_killop') >= 0;
+        }
+
+        return cmdBody.mapreduce && cmdBody.mapreduce == "jstests_mr_killop";
+    };
+
     for (var i in p) {
         var o = p[i];
         // Identify a map/reduce or where distinct operation by its collection, whether or not
         // it is currently active.
         if (childLoop) {
-            if ((o.active || o.waitingForLock) && o.query && o.query.query &&
-                o.query.query.$where && o.query.distinct == "jstests_mr_killop") {
+            if ((o.active || o.waitingForLock) && o.command && o.command.query &&
+                o.command.query.$where && o.command.distinct == "jstests_mr_killop") {
                 return o.opid;
             }
         } else {
-            if ((o.active || o.waitingForLock) && o.query && o.query.mapreduce &&
-                o.query.mapreduce == "jstests_mr_killop") {
+            if ((o.active || o.waitingForLock) && isMapReduce(o)) {
                 return o.opid;
             }
         }

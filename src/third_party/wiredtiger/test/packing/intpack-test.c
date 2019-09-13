@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -31,14 +31,22 @@
 int
 main(void)
 {
-	const uint8_t *cp;
-	uint8_t buf[10], *p;
 	uint64_t ncalls, r, r2, s;
+	uint8_t *p;
+	uint8_t buf[WT_INTPACK64_MAXSIZE + 8];	/* -Werror=array-bounds */
+	const uint8_t *cp;
+	size_t used_len;
 	int i;
 
-	ncalls = 0;
+	memset(buf, 0xff, sizeof(buf));	/* -Werror=maybe-uninitialized */
 
-	for (i = 0; i < 10000000; i++) {
+	/*
+	 * Required on some systems to pull in parts of the library
+	 * for which we have data references.
+	 */
+	testutil_check(__wt_library_init());
+
+	for (ncalls = 0, i = 0; i < 10000000; i++) {
 		for (s = 0; s < 50; s += 5) {
 			++ncalls;
 			r = 1ULL << s;
@@ -46,6 +54,8 @@ main(void)
 #if 1
 			p = buf;
 			testutil_check(__wt_vpack_uint(&p, sizeof(buf), r));
+			used_len = (size_t)(p - buf);
+			testutil_assert(used_len <= WT_INTPACK64_MAXSIZE);
 			cp = buf;
 			testutil_check(
 			    __wt_vunpack_uint(&cp, sizeof(buf), &r2));
@@ -60,14 +70,11 @@ main(void)
 			cp = buf;
 			memmove(&r2, cp, sizeof(r2));
 #endif
-			if (r != r2) {
-				fprintf(stderr, "mismatch!\n");
-				break;
-			}
+			testutil_assert(r == r2);
 		}
 	}
 
-	printf("Number of calls: %llu\n", (unsigned long long)ncalls);
+	printf("Number of calls: %" PRIu64 "\n", ncalls);
 
 	return (0);
 }

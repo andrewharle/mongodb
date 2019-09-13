@@ -1,30 +1,33 @@
 // @file background.cpp
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kCommand
@@ -96,12 +99,10 @@ private:
     std::vector<PeriodicTask*> _tasks;
 };
 
-// We rely here on zero-initialization of 'runnerMutex' to distinguish whether we are
-// running before or after static initialization for this translation unit has
-// completed. In the former case, we assume no threads are present, so we do not need
-// to use the mutex. When present, the mutex protects 'runner' and 'runnerDestroyed'
-// below.
-SimpleMutex* const runnerMutex = new SimpleMutex;
+SimpleMutex* runnerMutex() {
+    static SimpleMutex mutex;
+    return &mutex;
+}
 
 // A scoped lock like object that only locks/unlocks the mutex if it exists.
 class ConditionalScopedLock {
@@ -120,10 +121,10 @@ private:
 };
 
 // The unique PeriodicTaskRunner, also zero-initialized.
-PeriodicTaskRunner* runner;
+PeriodicTaskRunner* runner = nullptr;
 
 // The runner is never re-created once it has been destroyed.
-bool runnerDestroyed;
+bool runnerDestroyed = false;
 
 }  // namespace
 
@@ -179,8 +180,7 @@ void BackgroundJob::go() {
     // If the job is already 'done', for instance because it was cancelled or already
     // finished, ignore additional requests to run the job.
     if (_status->state == NotStarted) {
-        stdx::thread t(stdx::bind(&BackgroundJob::jobBody, this));
-        t.detach();
+        stdx::thread{[this] { jobBody(); }}.detach();
         _status->state = Running;
     }
 }
@@ -228,7 +228,7 @@ bool BackgroundJob::running() const {
 // -------------------------
 
 PeriodicTask::PeriodicTask() {
-    ConditionalScopedLock lock(runnerMutex);
+    ConditionalScopedLock lock(runnerMutex());
     if (runnerDestroyed)
         return;
 
@@ -239,7 +239,7 @@ PeriodicTask::PeriodicTask() {
 }
 
 PeriodicTask::~PeriodicTask() {
-    ConditionalScopedLock lock(runnerMutex);
+    ConditionalScopedLock lock(runnerMutex());
     if (runnerDestroyed || !runner)
         return;
 
@@ -247,7 +247,7 @@ PeriodicTask::~PeriodicTask() {
 }
 
 void PeriodicTask::startRunningPeriodicTasks() {
-    ConditionalScopedLock lock(runnerMutex);
+    ConditionalScopedLock lock(runnerMutex());
     if (runnerDestroyed)
         return;
 
@@ -258,13 +258,13 @@ void PeriodicTask::startRunningPeriodicTasks() {
 }
 
 Status PeriodicTask::stopRunningPeriodicTasks(int gracePeriodMillis) {
-    ConditionalScopedLock lock(runnerMutex);
+    ConditionalScopedLock lock(runnerMutex());
 
     Status status = Status::OK();
     if (runnerDestroyed || !runner)
         return status;
 
-    runner->cancel();
+    runner->cancel().transitional_ignore();
     status = runner->stop(gracePeriodMillis);
 
     if (status.isOK()) {

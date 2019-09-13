@@ -2,16 +2,17 @@
 (function() {
     "use strict";
 
+    load("jstests/libs/fixture_helpers.js");      // For FixtureHelpers.
     load("jstests/aggregation/extras/utils.js");  // For resultsEq.
 
     const coll = db.jstests_minmax;
     coll.drop();
 
     function addData() {
-        assert.writeOK(coll.save({a: 1, b: 1}));
-        assert.writeOK(coll.save({a: 1, b: 2}));
-        assert.writeOK(coll.save({a: 2, b: 1}));
-        assert.writeOK(coll.save({a: 2, b: 2}));
+        assert.commandWorked(coll.save({a: 1, b: 1}));
+        assert.commandWorked(coll.save({a: 1, b: 2}));
+        assert.commandWorked(coll.save({a: 2, b: 1}));
+        assert.commandWorked(coll.save({a: 2, b: 2}));
     }
 
     assert.commandWorked(coll.ensureIndex({a: 1, b: 1}));
@@ -59,7 +60,7 @@
     coll.drop();
     assert.commandWorked(coll.ensureIndex({a: 1}));
     for (let i = 0; i < 10; ++i) {
-        assert.writeOK(coll.save({_id: i, a: i}));
+        assert.commandWorked(coll.save({_id: i, a: i}));
     }
 
     // Reverse direction scan of the a:1 index between a:6 (inclusive) and a:3 (exclusive) is
@@ -112,14 +113,19 @@
     // Test ascending index.
     coll.drop();
     assert.commandWorked(coll.ensureIndex({a: 1}));
-    assert.writeOK(coll.insert({a: 3}));
-    assert.writeOK(coll.insert({a: 4}));
-    assert.writeOK(coll.insert({a: 5}));
+    assert.commandWorked(coll.insert({a: 3}));
+    assert.commandWorked(coll.insert({a: 4}));
+    assert.commandWorked(coll.insert({a: 5}));
 
     let cursor = coll.find().min({a: 4});
-    assert.eq(4, cursor.next().a);
-    assert.eq(5, cursor.next().a);
-
+    if (FixtureHelpers.numberOfShardsForCollection(coll) === 1) {
+        assert.eq(4, cursor.next().a);
+        assert.eq(5, cursor.next().a);
+    } else {
+        // With more than one shard, we cannot assume the results will come back in order, since we
+        // did not request a sort.
+        assert(resultsEq([cursor.next().a, cursor.next().a], [4, 5]));
+    }
     assert(!cursor.hasNext());
 
     cursor = coll.find().max({a: 4});
@@ -131,9 +137,14 @@
     assert.commandWorked(coll.ensureIndex({a: -1}));
 
     cursor = coll.find().min({a: 4});
-    assert.eq(4, cursor.next().a);
-    assert.eq(3, cursor.next().a);
-
+    if (FixtureHelpers.numberOfShardsForCollection(coll) === 1) {
+        assert.eq(4, cursor.next().a);
+        assert.eq(3, cursor.next().a);
+    } else {
+        // With more than one shard, we cannot assume the results will come back in order, since we
+        // did not request a sort.
+        assert(resultsEq([cursor.next().a, cursor.next().a], [4, 3]));
+    }
     assert(!cursor.hasNext());
 
     cursor = coll.find().max({a: 4});

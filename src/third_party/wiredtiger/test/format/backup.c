@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -36,6 +36,7 @@ static void
 check_copy(void)
 {
 	WT_CONNECTION *conn;
+	WT_DECL_RET;
 	WT_SESSION *session;
 
 	wts_open(g.home_backup, false, &conn);
@@ -44,9 +45,14 @@ check_copy(void)
 	    conn->open_session(conn, NULL, NULL, &session),
 	    "%s", g.home_backup);
 
-	testutil_checkfmt(
-	    session->verify(session, g.uri, NULL),
-	    "%s: %s", g.home_backup, g.uri);
+	/*
+	 * Verify can return EBUSY if the handle isn't available. Don't yield
+	 * and retry, in the case of LSM, the handle may not be available for
+	 * a long time.
+	 */
+	ret = session->verify(session, g.uri, NULL);
+	testutil_assertfmt(ret == 0 || ret == EBUSY,
+	    "WT_SESSION.verify: %s: %s", g.home_backup, g.uri);
 
 	testutil_checkfmt(conn->close(conn, NULL), "%s", g.home_backup);
 }
@@ -83,7 +89,7 @@ copy_file(WT_SESSION *session, const char *name)
  * backup --
  *	Periodically do a backup and verify it.
  */
-void *
+WT_THREAD_RET
 backup(void *arg)
 {
 	WT_CONNECTION *conn;
@@ -91,8 +97,8 @@ backup(void *arg)
 	WT_DECL_RET;
 	WT_SESSION *session;
 	u_int incremental, period;
-	bool full;
 	const char *config, *key;
+	bool full;
 
 	(void)(arg);
 
@@ -100,7 +106,7 @@ backup(void *arg)
 
 	/* Backups aren't supported for non-standard data sources. */
 	if (DATASOURCE("helium") || DATASOURCE("kvsbdb"))
-		return (NULL);
+		return (WT_THREAD_RET_VALUE);
 
 	/* Open a session. */
 	testutil_check(conn->open_session(conn, NULL, NULL, &session));
@@ -115,7 +121,7 @@ backup(void *arg)
 		/* Sleep for short periods so we don't make the run wait. */
 		while (period > 0 && !g.workers_finished) {
 			--period;
-			sleep(1);
+			__wt_sleep(1, 0);
 		}
 
 		/*
@@ -188,5 +194,5 @@ backup(void *arg)
 
 	testutil_check(session->close(session, NULL));
 
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
 }

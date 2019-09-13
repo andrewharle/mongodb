@@ -1,28 +1,31 @@
-/*    Copyright 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -36,14 +39,19 @@
 #include <limits>
 #include <string>
 
+#include "mongo/base/status_with.h"
+#include "mongo/platform/decimal128.h"
+#include "mongo/platform/overflow_arithmetic.h"
+
 namespace mongo {
+namespace {
 
 /**
  * Returns the value of the digit "c", with the same conversion behavior as strtol.
  *
  * Assumes "c" is an ASCII character or UTF-8 octet.
  */
-static uint8_t _digitValue(char c) {
+uint8_t _digitValue(char c) {
     if (c >= '0' && c <= '9')
         return uint8_t(c - '0');
     if (c >= 'a' && c <= 'z')
@@ -58,7 +66,7 @@ static uint8_t _digitValue(char c) {
  * substring with any sign characters stripped away.  "*isNegative" is set to true if the
  * number is negative, and false otherwise.
  */
-static inline StringData _extractSign(StringData stringValue, bool* isNegative) {
+inline StringData _extractSign(StringData stringValue, bool* isNegative) {
     if (stringValue.empty()) {
         *isNegative = false;
         return stringValue;
@@ -94,7 +102,7 @@ static inline StringData _extractSign(StringData stringValue, bool* isNegative) 
  * Returns stringValue, unless it sets *outputBase to 16, in which case it will strip off the
  * "0x" or "0X" prefix, if present.
  */
-static inline StringData _extractBase(StringData stringValue, int inputBase, int* outputBase) {
+inline StringData _extractBase(StringData stringValue, int inputBase, int* outputBase) {
     const auto hexPrefixLower = "0x"_sd;
     const auto hexPrefixUpper = "0X"_sd;
     if (inputBase == 0) {
@@ -119,65 +127,62 @@ static inline StringData _extractBase(StringData stringValue, int inputBase, int
     }
 }
 
+inline StatusWith<uint64_t> parseMagnitudeFromStringWithBase(uint64_t base,
+                                                             StringData wholeString,
+                                                             StringData magnitudeStr) {
+    uint64_t n = 0;
+    for (char digitChar : magnitudeStr) {
+        const uint64_t digitValue = _digitValue(digitChar);
+        if (digitValue >= base) {
+            return Status(ErrorCodes::FailedToParse,
+                          std::string("Bad digit \"") + digitChar + "\" while parsing " +
+                              wholeString);
+        }
+
+        // This block is (n = (n * base) + digitValue) with overflow checking at each step.
+        uint64_t multiplied;
+        if (mongoUnsignedMultiplyOverflow64(n, base, &multiplied))
+            return Status(ErrorCodes::FailedToParse, "Overflow");
+        if (mongoUnsignedAddOverflow64(multiplied, digitValue, &n))
+            return Status(ErrorCodes::FailedToParse, "Overflow");
+    }
+    return n;
+}
+
+}  // namespace
+
 template <typename NumberType>
-Status parseNumberFromStringWithBase(StringData stringValue, int base, NumberType* result) {
+Status parseNumberFromStringWithBase(StringData wholeString, int base, NumberType* result) {
+    MONGO_STATIC_ASSERT(sizeof(NumberType) <= sizeof(uint64_t));
     typedef ::std::numeric_limits<NumberType> limits;
 
     if (base == 1 || base < 0 || base > 36)
-        return Status(ErrorCodes::BadValue, "Invalid base", 0);
+        return Status(ErrorCodes::BadValue, "Invalid base");
 
+    // Separate the magnitude from modifiers such as sign and base prefixes such as "0x"
     bool isNegative = false;
-    StringData str = _extractBase(_extractSign(stringValue, &isNegative), base, &base);
-
-    if (str.empty())
+    StringData magnitudeStr = _extractBase(_extractSign(wholeString, &isNegative), base, &base);
+    if (isNegative && !limits::is_signed)
+        return Status(ErrorCodes::FailedToParse, "Negative value");
+    if (magnitudeStr.empty())
         return Status(ErrorCodes::FailedToParse, "No digits");
 
-    NumberType n(0);
-    if (isNegative) {
-        if (limits::is_signed) {
-            for (size_t i = 0; i < str.size(); ++i) {
-                NumberType digitValue = NumberType(_digitValue(str[i]));
-                if (int(digitValue) >= base) {
-                    return Status(ErrorCodes::FailedToParse,
-                                  "Bad digit \"" + str.substr(i, 1).toString() +
-                                      "\" while parsing " + stringValue.toString());
-                }
+    auto status = parseMagnitudeFromStringWithBase(base, wholeString, magnitudeStr);
+    if (!status.isOK())
+        return status.getStatus();
+    uint64_t magnitude = status.getValue();
 
-// MSVC: warning C4146: unary minus operator applied to unsigned type, result still unsigned
-// This code is statically known to be dead when NumberType is unsigned, so the warning is not real
+    // The range of 2's complement integers is from -(max + 1) to +max.
+    const uint64_t maxMagnitude = uint64_t(limits::max()) + (isNegative ? 1u : 0u);
+    if (magnitude > maxMagnitude)
+        return Status(ErrorCodes::FailedToParse, "Overflow");
+
 #pragma warning(push)
+// C4146: unary minus operator applied to unsigned type, result still unsigned
 #pragma warning(disable : 4146)
-                if ((NumberType(limits::min() / base) > n) ||
-                    ((limits::min() - NumberType(n * base)) > -digitValue)) {
+    *result = NumberType(isNegative ? -magnitude : magnitude);
 #pragma warning(pop)
 
-                    return Status(ErrorCodes::FailedToParse, "Underflow");
-                }
-
-                n *= NumberType(base);
-                n -= NumberType(digitValue);
-            }
-        } else {
-            return Status(ErrorCodes::FailedToParse, "Negative value");
-        }
-    } else {
-        for (size_t i = 0; i < str.size(); ++i) {
-            NumberType digitValue = NumberType(_digitValue(str[i]));
-            if (int(digitValue) >= base) {
-                return Status(ErrorCodes::FailedToParse,
-                              "Bad digit \"" + str.substr(i, 1).toString() + "\" while parsing " +
-                                  stringValue.toString());
-            }
-            if ((NumberType(limits::max() / base) < n) ||
-                (NumberType(limits::max() - n * base) < digitValue)) {
-                return Status(ErrorCodes::FailedToParse, "Overflow");
-            }
-
-            n *= NumberType(base);
-            n += NumberType(digitValue);
-        }
-    }
-    *result = n;
     return Status::OK();
 }
 
@@ -259,4 +264,35 @@ Status parseNumberFromStringWithBase<double>(StringData stringValue, int base, d
     return Status::OK();
 }
 
+template <>
+Status parseNumberFromStringWithBase<Decimal128>(StringData stringValue,
+                                                 int base,
+                                                 Decimal128* result) {
+    if (base != 0) {
+        return Status(ErrorCodes::BadValue,
+                      "Must pass 0 as base to parseNumberFromStringWithBase<Decimal128>.");
+    }
+
+    if (stringValue.empty()) {
+        return Status(ErrorCodes::FailedToParse, "Empty string");
+    }
+
+    std::uint32_t signalingFlags = 0;
+    auto parsedDecimal = Decimal128(
+        stringValue.toString(), &signalingFlags, Decimal128::RoundingMode::kRoundTowardZero);
+
+    if (Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kOverflow)) {
+        return Status(ErrorCodes::FailedToParse,
+                      "Conversion from string to decimal would overflow");
+    } else if (Decimal128::hasFlag(signalingFlags, Decimal128::SignalingFlag::kUnderflow)) {
+        return Status(ErrorCodes::FailedToParse,
+                      "Conversion from string to decimal would underflow");
+    } else if (signalingFlags != Decimal128::SignalingFlag::kNoFlag &&
+               signalingFlags != Decimal128::SignalingFlag::kInexact) {  // Ignore precision loss.
+        return Status(ErrorCodes::FailedToParse, "Failed to parse string to decimal");
+    }
+
+    *result = parsedDecimal;
+    return Status::OK();
+}
 }  // namespace mongo

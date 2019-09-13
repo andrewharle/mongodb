@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
@@ -41,7 +43,7 @@ const char kToShard[] = "toShard";
 const char kMigratedChunk[] = "migratedChunk";
 const char kControlChunk[] = "controlChunk";
 const char kFromShardCollectionVersion[] = "fromShardCollectionVersion";
-const char kShardHasDistributedLock[] = "shardHasDistributedLock";
+const char kValidAfter[] = "validAfter";
 
 /**
  * Attempts to parse a (range-only!) ChunkType from "field" in "source".
@@ -125,7 +127,7 @@ StatusWith<CommitChunkMigrationRequest> CommitChunkMigrationRequest::createFromC
 
     {
         auto statusWithChunkVersion =
-            ChunkVersion::parseFromBSONWithFieldForCommands(obj, kFromShardCollectionVersion);
+            ChunkVersion::parseWithField(obj, kFromShardCollectionVersion);
         if (!statusWithChunkVersion.isOK()) {
             return statusWithChunkVersion.getStatus();
         }
@@ -134,10 +136,16 @@ StatusWith<CommitChunkMigrationRequest> CommitChunkMigrationRequest::createFromC
     }
 
     {
-        Status shardHasDistLockStatus = bsonExtractBooleanField(
-            obj, kShardHasDistributedLock, &request._shardHasDistributedLock);
-        if (!shardHasDistLockStatus.isOK()) {
-            return shardHasDistLockStatus;
+        Timestamp validAfter;
+        auto status = bsonExtractTimestampField(obj, kValidAfter, &validAfter);
+        if (!status.isOK() && status != ErrorCodes::NoSuchKey) {
+            return status;
+        }
+
+        if (status.isOK()) {
+            request._validAfter = validAfter;
+        } else {
+            request._validAfter = boost::none;
         }
     }
 
@@ -151,20 +159,20 @@ void CommitChunkMigrationRequest::appendAsCommand(BSONObjBuilder* builder,
                                                   const ChunkType& migratedChunk,
                                                   const boost::optional<ChunkType>& controlChunk,
                                                   const ChunkVersion& fromShardCollectionVersion,
-                                                  const bool& shardHasDistributedLock) {
+                                                  const Timestamp& validAfter) {
     invariant(builder->asTempObj().isEmpty());
     invariant(nss.isValid());
 
     builder->append(kConfigSvrCommitChunkMigration, nss.ns());
     builder->append(kFromShard, fromShard.toString());
     builder->append(kToShard, toShard.toString());
-    builder->append(kMigratedChunk, migratedChunk.toBSON());
-    fromShardCollectionVersion.appendWithFieldForCommands(builder, kFromShardCollectionVersion);
-    builder->append(kShardHasDistributedLock, shardHasDistributedLock);
+    builder->append(kMigratedChunk, migratedChunk.toConfigBSON());
+    fromShardCollectionVersion.appendWithField(builder, kFromShardCollectionVersion);
 
     if (controlChunk) {
-        builder->append(kControlChunk, controlChunk->toBSON());
+        builder->append(kControlChunk, controlChunk->toConfigBSON());
     }
+    builder->append(kValidAfter, validAfter);
 }
 
 }  // namespace mongo

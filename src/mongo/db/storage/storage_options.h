@@ -1,23 +1,25 @@
-/*
- *    Copyright (C) 2013 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,6 +34,7 @@
 #include <string>
 
 #include "mongo/platform/atomic_proxy.h"
+#include "mongo/platform/atomic_word.h"
 
 /*
  * This file defines the storage for options that come from the command line related to data file
@@ -43,6 +46,9 @@
 namespace mongo {
 
 struct StorageGlobalParams {
+    StorageGlobalParams();
+    void reset();
+
     // Default data directory for mongod when running in non-config server mode.
     static const char* kDefaultDbPath;
 
@@ -52,23 +58,23 @@ struct StorageGlobalParams {
 
     // --storageEngine
     // storage engine for this instance of mongod.
-    std::string engine = "wiredTiger";
+    std::string engine;
 
     // True if --storageEngine was passed on the command line, and false otherwise.
-    bool engineSetByUser = false;
+    bool engineSetByUser;
 
     // The directory where the mongod instance stores its data.
-    std::string dbpath = kDefaultDbPath;
+    std::string dbpath;
 
     // --upgrade
     // Upgrades the on-disk data format of the files specified by the --dbpath to the
     // latest version, if needed.
-    bool upgrade = false;
+    bool upgrade;
 
     // --repair
     // Runs a repair routine on all databases. This is equivalent to shutting down and
     // running the repairDatabase database command on all databases.
-    bool repair = false;
+    bool repair;
 
     // --repairpath
     // Specifies the root directory containing MongoDB data files to use for the --repair
@@ -76,31 +82,41 @@ struct StorageGlobalParams {
     // Default: A _tmp directory within the path specified by the dbPath option.
     std::string repairpath;
 
-    // The intention here is to enable the journal by default if we are running on a 64 bit system.
-    bool dur = (sizeof(void*) == 8);  // --dur durability (now --journal)
+    bool dur;  // --dur durability (now --journal)
 
     // --journalCommitInterval
     static const int kMaxJournalCommitIntervalMs;
-    std::atomic<int> journalCommitIntervalMs;  // NOLINT
+    AtomicInt32 journalCommitIntervalMs;
 
     // --notablescan
     // no table scans allowed
-    std::atomic<bool> noTableScan{false};  // NOLINT
+    AtomicBool noTableScan;
 
     // --directoryperdb
     // Stores each database’s files in its own folder in the data directory.
     // When applied to an existing system, the directoryPerDB option alters
     // the storage pattern of the data directory.
-    bool directoryperdb = false;
+    bool directoryperdb;
 
     // --syncdelay
     // Controls how much time can pass before MongoDB flushes data to the data files
     // via an fsync operation.
     // Do not set this value on production systems.
     // In almost every situation, you should use the default setting.
-    AtomicDouble syncdelay{60.0};  // seconds between fsyncs
+    static const double kMaxSyncdelaySecs;
+    AtomicDouble syncdelay;  // seconds between fsyncs
 
-    bool readOnly = false;
+    // --queryableBackupMode
+    // Puts MongoD into "read-only" mode. MongoD will not write any data to the underlying
+    // filesystem. Note that read operations may require writes. For example, a sort on a large
+    // dataset may fail if it requires spilling to disk.
+    bool readOnly;
+
+    // --groupCollections
+    // Dictate to the storage engine that it should attempt to create new MongoDB collections from
+    // an existing underlying MongoDB database level resource if possible. This can improve
+    // workloads that rely heavily on creating many collections within a database.
+    bool groupCollections;
 };
 
 extern StorageGlobalParams storageGlobalParams;

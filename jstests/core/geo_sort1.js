@@ -1,4 +1,3 @@
-
 t = db.geo_sort1;
 t.drop();
 

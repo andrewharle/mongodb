@@ -1,25 +1,27 @@
 // expression_geo.cpp
 
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -31,8 +33,10 @@
 #define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kDefault
 
 #include "mongo/db/matcher/expression_geo.h"
+
 #include "mongo/bson/simple_bsonobj_comparator.h"
 #include "mongo/db/geo/geoparser.h"
+#include "mongo/db/matcher/expression_parser.h"
 #include "mongo/platform/basic.h"
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
@@ -59,10 +63,10 @@ Status GeoExpression::parseQuery(const BSONObj& obj) {
                       str::stream() << "can't parse extra field: " << outerIt.next());
     }
 
-    BSONObj::MatchType matchType = static_cast<BSONObj::MatchType>(queryElt.getGtLtOp());
-    if (BSONObj::opGEO_INTERSECTS == matchType) {
+    auto keyword = MatchExpressionParser::parsePathAcceptingKeyword(queryElt);
+    if (PathAcceptingKeyword::GEO_INTERSECTS == keyword) {
         predicate = GeoExpression::INTERSECT;
-    } else if (BSONObj::opWITHIN == matchType) {
+    } else if (PathAcceptingKeyword::WITHIN == keyword) {
         predicate = GeoExpression::WITHIN;
     } else {
         // eoo() or unknown query predicate.
@@ -230,8 +234,8 @@ Status GeoNearExpression::parseNewQuery(const BSONObj& obj) {
     if (!e.isABSONObj()) {
         return Status(ErrorCodes::BadValue, "geo near query argument is not an object");
     }
-    BSONObj::MatchType matchType = static_cast<BSONObj::MatchType>(e.getGtLtOp());
-    if (BSONObj::opNEAR != matchType) {
+
+    if (PathAcceptingKeyword::GEO_NEAR != MatchExpressionParser::parsePathAcceptingKeyword(e)) {
         return Status(ErrorCodes::BadValue,
                       mongoutils::str::stream() << "invalid geo near query operator: "
                                                 << e.fieldName());
@@ -327,15 +331,23 @@ Status GeoNearExpression::parseFrom(const BSONObj& obj) {
 // Geo queries we don't need an index to answer: geoWithin and geoIntersects
 //
 
-Status GeoMatchExpression::init(StringData path,
-                                const GeoExpression* query,
-                                const BSONObj& rawObj) {
-    _query.reset(query);
-    _rawObj = rawObj;
-    return setPath(path);
-}
+/**
+* Takes ownership of the passed-in GeoExpression.
+*/
+GeoMatchExpression::GeoMatchExpression(StringData path,
+                                       const GeoExpression* query,
+                                       const BSONObj& rawObj)
+    : LeafMatchExpression(GEO, path), _rawObj(rawObj), _query(query), _canSkipValidation(false) {}
 
-bool GeoMatchExpression::matchesSingleElement(const BSONElement& e) const {
+/**
+* Takes shared ownership of the passed-in GeoExpression.
+*/
+GeoMatchExpression::GeoMatchExpression(StringData path,
+                                       std::shared_ptr<const GeoExpression> query,
+                                       const BSONObj& rawObj)
+    : LeafMatchExpression(GEO, path), _rawObj(rawObj), _query(query), _canSkipValidation(false) {}
+
+bool GeoMatchExpression::matchesSingleElement(const BSONElement& e, MatchDetails* details) const {
     if (!e.isABSONObj())
         return false;
 
@@ -377,10 +389,10 @@ void GeoMatchExpression::debugString(StringBuilder& debug, int level) const {
     debug << "\n";
 }
 
-void GeoMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder subobj(out->subobjStart(path()));
+BSONObj GeoMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder subobj;
     subobj.appendElements(_rawObj);
-    subobj.doneFast();
+    return subobj.obj();
 }
 
 bool GeoMatchExpression::equivalent(const MatchExpression* other) const {
@@ -396,9 +408,8 @@ bool GeoMatchExpression::equivalent(const MatchExpression* other) const {
 }
 
 std::unique_ptr<MatchExpression> GeoMatchExpression::shallowClone() const {
-    std::unique_ptr<GeoMatchExpression> next = stdx::make_unique<GeoMatchExpression>();
-    next->init(path(), NULL, _rawObj);
-    next->_query = _query;
+    std::unique_ptr<GeoMatchExpression> next =
+        stdx::make_unique<GeoMatchExpression>(path(), _query, _rawObj);
     next->_canSkipValidation = _canSkipValidation;
     if (getTag()) {
         next->setTag(getTag()->clone());
@@ -410,18 +421,18 @@ std::unique_ptr<MatchExpression> GeoMatchExpression::shallowClone() const {
 // Parse-only geo expressions: geoNear (formerly known as near).
 //
 
-Status GeoNearMatchExpression::init(StringData path,
-                                    const GeoNearExpression* query,
-                                    const BSONObj& rawObj) {
-    _query.reset(query);
-    _rawObj = rawObj;
-    return setPath(path);
-}
+GeoNearMatchExpression::GeoNearMatchExpression(StringData path,
+                                               const GeoNearExpression* query,
+                                               const BSONObj& rawObj)
+    : LeafMatchExpression(GEO_NEAR, path), _rawObj(rawObj), _query(query) {}
 
-bool GeoNearMatchExpression::matchesSingleElement(const BSONElement& e) const {
-    // See ops/update.cpp.
-    // This node is removed by the query planner.  It's only ever called if we're getting an
-    // elemMatchKey.
+GeoNearMatchExpression::GeoNearMatchExpression(StringData path,
+                                               std::shared_ptr<const GeoNearExpression> query,
+                                               const BSONObj& rawObj)
+    : LeafMatchExpression(GEO_NEAR, path), _rawObj(rawObj), _query(query) {}
+
+bool GeoNearMatchExpression::matchesSingleElement(const BSONElement& e,
+                                                  MatchDetails* details) const {
     return true;
 }
 
@@ -436,10 +447,10 @@ void GeoNearMatchExpression::debugString(StringBuilder& debug, int level) const 
     debug << "\n";
 }
 
-void GeoNearMatchExpression::serialize(BSONObjBuilder* out) const {
-    BSONObjBuilder subobj(out->subobjStart(path()));
-    subobj.appendElements(_rawObj);
-    subobj.doneFast();
+BSONObj GeoNearMatchExpression::getSerializedRightHandSide() const {
+    BSONObjBuilder objBuilder;
+    objBuilder.appendElements(_rawObj);
+    return objBuilder.obj();
 }
 
 bool GeoNearMatchExpression::equivalent(const MatchExpression* other) const {
@@ -455,9 +466,8 @@ bool GeoNearMatchExpression::equivalent(const MatchExpression* other) const {
 }
 
 std::unique_ptr<MatchExpression> GeoNearMatchExpression::shallowClone() const {
-    std::unique_ptr<GeoNearMatchExpression> next = stdx::make_unique<GeoNearMatchExpression>();
-    next->init(path(), NULL, _rawObj);
-    next->_query = _query;
+    std::unique_ptr<GeoNearMatchExpression> next =
+        stdx::make_unique<GeoNearMatchExpression>(path(), _query, _rawObj);
     if (getTag()) {
         next->setTag(getTag()->clone());
     }

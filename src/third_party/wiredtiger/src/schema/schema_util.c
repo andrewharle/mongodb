@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -39,7 +39,7 @@ __wt_schema_backup_check(WT_SESSION_IMPL *session, const char *name)
 	}
 	for (i = 0; backup_list[i] != NULL; ++i) {
 		if (strcmp(backup_list[i], name) == 0) {
-			ret = EBUSY;
+			ret = __wt_set_return(session, EBUSY);
 			break;
 		}
 	}
@@ -63,14 +63,56 @@ __wt_schema_get_source(WT_SESSION_IMPL *session, const char *name)
 }
 
 /*
+ * __wt_schema_internal_session --
+ *	Create and return an internal schema session if necessary.
+ */
+int
+__wt_schema_internal_session(
+    WT_SESSION_IMPL *session, WT_SESSION_IMPL **int_sessionp)
+{
+	/*
+	 * Open an internal session if a transaction is running so that the
+	 * schema operations are not logged and buffered with any log records
+	 * in the transaction.  The new session inherits its flags from the
+	 * original.
+	 */
+	*int_sessionp = session;
+	if (F_ISSET(&session->txn, WT_TXN_RUNNING)) {
+		/* We should not have a schema txn running now. */
+		WT_ASSERT(session, !F_ISSET(session, WT_SESSION_SCHEMA_TXN));
+		WT_RET(__wt_open_internal_session(S2C(session), "schema",
+		    true, session->flags, int_sessionp));
+	}
+	return (0);
+}
+
+/*
+ * __wt_schema_session_release --
+ *	Release an internal schema session if needed.
+ */
+int
+__wt_schema_session_release(
+    WT_SESSION_IMPL *session, WT_SESSION_IMPL *int_session)
+{
+	WT_SESSION *wt_session;
+
+	if (session != int_session) {
+		wt_session = &int_session->iface;
+		WT_RET(wt_session->close(wt_session, NULL));
+	}
+
+	return (0);
+}
+
+/*
  * __wt_str_name_check --
  *	Disallow any use of the WiredTiger name space.
  */
 int
 __wt_str_name_check(WT_SESSION_IMPL *session, const char *str)
 {
-	const char *name, *sep;
 	int skipped;
+	const char *name, *sep;
 
 	/*
 	 * Check if name is somewhere in the WiredTiger name space: it would be
@@ -110,8 +152,8 @@ __wt_str_name_check(WT_SESSION_IMPL *session, const char *str)
 int
 __wt_name_check(WT_SESSION_IMPL *session, const char *str, size_t len)
 {
-	WT_DECL_RET;
 	WT_DECL_ITEM(tmp);
+	WT_DECL_RET;
 
 	WT_RET(__wt_scr_alloc(session, len, &tmp));
 

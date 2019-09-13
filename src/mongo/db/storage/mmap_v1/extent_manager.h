@@ -1,32 +1,34 @@
 // extent_manager.h
 
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -77,16 +79,18 @@ public:
 
     virtual ~ExtentManager() {}
 
+    virtual void close(OperationContext* opCtx) = 0;
+
     /**
      * opens all current files
      */
-    virtual Status init(OperationContext* txn) = 0;
+    virtual Status init(OperationContext* opCtx) = 0;
 
     virtual int numFiles() const = 0;
     virtual long long fileSize() const = 0;
 
     // must call Extent::reuse on the returned extent
-    virtual DiskLoc allocateExtent(OperationContext* txn,
+    virtual DiskLoc allocateExtent(OperationContext* opCtx,
                                    bool capped,
                                    int size,
                                    bool enforceQuota) = 0;
@@ -94,13 +98,13 @@ public:
     /**
      * firstExt has to be == lastExt or a chain
      */
-    virtual void freeExtents(OperationContext* txn, DiskLoc firstExt, DiskLoc lastExt) = 0;
+    virtual void freeExtents(OperationContext* opCtx, DiskLoc firstExt, DiskLoc lastExt) = 0;
 
     /**
      * frees a single extent
      * ignores all fields in the Extent except: magic, myLoc, length
      */
-    virtual void freeExtent(OperationContext* txn, DiskLoc extent) = 0;
+    virtual void freeExtent(OperationContext* opCtx, DiskLoc extent) = 0;
 
     /**
      * Retrieve statistics on the the free list managed by this ExtentManger.
@@ -108,7 +112,7 @@ public:
      * @param totalFreeSizeBytes - non-null pointer to an int64_t receiving the total free
      *                             space in the free list.
      */
-    virtual void freeListStats(OperationContext* txn,
+    virtual void freeListStats(OperationContext* opCtx,
                                int* numExtents,
                                int64_t* totalFreeSizeBytes) const = 0;
 
@@ -186,8 +190,8 @@ public:
      */
     virtual CacheHint* cacheHint(const DiskLoc& extentLoc, const HintType& hint) = 0;
 
-    virtual DataFileVersion getFileFormat(OperationContext* txn) const = 0;
-    virtual void setFileFormat(OperationContext* txn, DataFileVersion newVersion) = 0;
+    virtual DataFileVersion getFileFormat(OperationContext* opCtx) const = 0;
+    virtual void setFileFormat(OperationContext* opCtx, DataFileVersion newVersion) = 0;
 
     virtual const DataFile* getOpenFile(int n) const = 0;
 };

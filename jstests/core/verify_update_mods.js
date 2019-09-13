@@ -1,3 +1,8 @@
+// Cannot implicitly shard accessed collections because of following errmsg: A single
+// update/delete on a sharded collection must contain an exact match on _id or contain the shard
+// key.
+// @tags: [assumes_unsharded_collection, requires_non_retryable_writes]
+
 // Verify update mods exist
 var res;
 t = db.update_mods;
@@ -28,12 +33,6 @@ res = t.update({}, {$push: {a: 1}});
 assert.writeOK(res);
 t.remove({});
 
-t.save({_id: 1});
-res = t.update({}, {$pushAll: {a: [1]}});
-assert.writeOK(res);
-t.remove({});
-
-t.save({_id: 1});
 res = t.update({}, {$addToSet: {a: 1}});
 assert.writeOK(res);
 t.remove({});
@@ -45,7 +44,7 @@ t.remove({});
 
 t.save({_id: 1});
 res = t.update({}, {$pop: {a: true}});
-assert.writeOK(res);
+assert.writeError(res);
 t.remove({});
 
 t.save({_id: 1});

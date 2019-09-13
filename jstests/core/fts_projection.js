@@ -1,9 +1,9 @@
 // Test $text with $textScore projection.
 
+load("jstests/libs/analyze_plan.js");
+
 var t = db.getSiblingDB("test").getCollection("fts_projection");
 t.drop();
-
-db.adminCommand({setParameter: 1, newQueryFrameworkEnabled: true});
 
 t.insert({_id: 0, a: "textual content"});
 t.insert({_id: 1, a: "additional content", b: -1});
@@ -107,6 +107,17 @@ assert.neq(-1,
 assert.neq(-1,
            errorMessage.message.indexOf('OR'),
            'message from failed text planning does not mention OR: ' + errorMessage);
+
+// SERVER-26833
+// We should use the blocking "TEXT_OR" stage only if the projection calls for the "textScore"
+// value.
+let explainOutput = t.find({$text: {$search: "textual content -irrelevant"}}, {
+                         score: {$meta: "textScore"}
+                     }).explain();
+assert(planHasStage(db, explainOutput.queryPlanner.winningPlan, "TEXT_OR"));
+
+explainOutput = t.find({$text: {$search: "textual content -irrelevant"}}).explain();
+assert(!planHasStage(db, explainOutput.queryPlanner.winningPlan, "TEXT_OR"));
 
 // Scores should exist.
 assert.eq(results.length, 2);

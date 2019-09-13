@@ -1,35 +1,35 @@
+
 /**
- * Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- * This program is free software: you can redistribute it and/or  modify
- * it under the terms of the GNU Affero General Public License, version 3,
- * as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
- * This program is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- * GNU Affero General Public License for more details.
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
  *
- * You should have received a copy of the GNU Affero General Public License
- * along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
- * As a special exception, the copyright holders give permission to link the
- * code of portions of this program with the OpenSSL library under certain
- * conditions as described in each individual source file and distribute
- * linked combinations including the program with the OpenSSL library. You
- * must comply with the GNU Affero General Public License in all respects
- * for all of the code used other than as permitted herein. If you modify
- * file(s) with this exception, you may extend this exception to your
- * version of the file(s), but you are not obligated to do so. If you do not
- * wish to do so, delete this exception statement from your version. If you
- * delete this exception statement from all source files in the program,
- * then also delete it in the license file.
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #include "mongo/platform/basic.h"
 
-#include <boost/optional.hpp>
-#include <cctype>
 #include <vector>
 
 #include "mongo/db/pipeline/document_path_support.h"
@@ -39,29 +39,12 @@
 #include "mongo/db/pipeline/document.h"
 #include "mongo/db/pipeline/field_path.h"
 #include "mongo/db/pipeline/value.h"
+#include "mongo/util/stringutils.h"
 
 namespace mongo {
 namespace document_path_support {
 
 namespace {
-
-/**
- * Returns the array index that should be used if 'fieldName' represents a positional path
- * specification (as '0' does in 'a.0'), or boost::none if 'fieldName' does not represent a
- * positional path specification.
- */
-boost::optional<size_t> getPositionalPathSpecification(StringData fieldName) {
-    // Do not accept positions like '-4' or '+4'
-    if (!std::isdigit(fieldName[0])) {
-        return boost::none;
-    }
-    unsigned int index;
-    auto status = parseNumberFromStringWithBase<unsigned int>(fieldName, 10, &index);
-    if (status.isOK()) {
-        return static_cast<size_t>(index);
-    }
-    return boost::none;
-}
 
 /**
  * If 'value' is an array, invokes 'callback' once on each element of 'value'. Otherwise, if 'value'
@@ -99,7 +82,7 @@ void visitAllValuesAtPathHelper(Document doc,
     // positional specifications, if applicable. For example, it will consume "0" and "1" from the
     // path "a.0.1.b" if the value at "a" is an array with arrays inside it.
     while (fieldPathIndex < path.getPathLength() && nextValue.isArray()) {
-        if (auto index = getPositionalPathSpecification(path.getFieldName(fieldPathIndex))) {
+        if (auto index = parseUnsignedBase10Integer(path.getFieldName(fieldPathIndex))) {
             nextValue = nextValue[*index];
             ++fieldPathIndex;
         } else {
@@ -132,10 +115,50 @@ void visitAllValuesAtPathHelper(Document doc,
 
 }  // namespace
 
-void visitAllValuesAtPath(Document doc,
+void visitAllValuesAtPath(const Document& doc,
                           const FieldPath& path,
                           stdx::function<void(const Value&)> callback) {
-    visitAllValuesAtPathHelper(std::move(doc), path, 0, callback);
+    visitAllValuesAtPathHelper(doc, path, 0, callback);
+}
+
+StatusWith<Value> extractElementAlongNonArrayPath(const Document& doc, const FieldPath& path) {
+    invariant(path.getPathLength() > 0);
+    Value curValue = doc.getField(path.getFieldName(0));
+    if (curValue.getType() == BSONType::Array) {
+        return {ErrorCodes::InternalError, "array along path"};
+    }
+
+    for (size_t i = 1; i < path.getPathLength(); i++) {
+        curValue = curValue[path.getFieldName(i)];
+        if (curValue.getType() == BSONType::Array) {
+            return {ErrorCodes::InternalError, "array along path"};
+        }
+    }
+
+    return curValue;
+}
+
+BSONObj documentToBsonWithPaths(const Document& input, const std::set<std::string>& paths) {
+    BSONObjBuilder outputBuilder;
+    for (auto&& path : paths) {
+        // getNestedField does not handle dotted paths correctly, so instead of retrieving the
+        // entire path, we just extract the first element of the path.
+        const auto prefix = FieldPath::extractFirstFieldFromDottedPath(path);
+        if (!outputBuilder.hasField(prefix)) {
+            // Avoid adding the same prefix twice.
+            input.getField(prefix).addToBsonObj(&outputBuilder, prefix);
+        }
+    }
+
+    return outputBuilder.obj();
+}
+
+Document extractDocumentKeyFromDoc(const Document& doc, const std::vector<FieldPath>& paths) {
+    MutableDocument result;
+    for (auto& field : paths) {
+        result.addField(field.fullPath(), doc.getNestedField(field));
+    }
+    return result.freeze();
 }
 
 }  // namespace document_path_support

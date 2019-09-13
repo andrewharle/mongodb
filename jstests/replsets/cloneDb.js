@@ -23,7 +23,7 @@
         replTest.startSet();
         replTest.initiate();
         var master = replTest.getPrimary();
-        var secondary = replTest.liveNodes.slaves[0];
+        var secondary = replTest._slaves[0];
         var masterDB = master.getDB(replsetDBName);
         masterDB.dropDatabase();
 
@@ -42,6 +42,9 @@
 
         jsTest.log("Create view on replica set");
         assert.commandWorked(masterDB.runCommand({create: testViewName, viewOn: testColName}));
+
+        // Make sure all writes have replicated to secondary.
+        replTest.awaitReplication();
 
         jsTest.log("Clone db from replica set to standalone server");
         standaloneDB.cloneDatabase(replTest.getURL());
@@ -117,7 +120,7 @@
             'cloneDatabase from standalone to SECONDARY succeeded and should not accept writes');
 
         jsTest.log("Shut down replica set and standalone server");
-        MongoRunner.stopMongod(standalone.port);
+        MongoRunner.stopMongod(standalone);
 
         replTest.stopSet();
     }

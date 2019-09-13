@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,6 +36,7 @@
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/db/matcher/expression.h"
 #include "mongo/db/matcher/expression_algo.h"
+#include "mongo/db/matcher/expression_internal_expr_eq.h"
 #include "mongo/db/matcher/expression_leaf.h"
 #include "mongo/db/query/collation/collation_index_key.h"
 #include "mongo/db/query/collation/collator_interface.h"
@@ -68,7 +71,7 @@ void PlanCacheIndexabilityState::processPartialIndex(const std::string& indexNam
     for (size_t i = 0; i < filterExpr->numChildren(); ++i) {
         processPartialIndex(indexName, filterExpr->getChild(i));
     }
-    if (!filterExpr->isLogical()) {
+    if (filterExpr->getCategory() != MatchExpression::MatchCategory::kLogical) {
         _pathDiscriminatorsMap[filterExpr->path()][indexName].addDiscriminator(
             [filterExpr](const MatchExpression* queryExpr) {
                 return expression::isSubsetOf(queryExpr, filterExpr);
@@ -82,9 +85,8 @@ void PlanCacheIndexabilityState::processIndexCollation(const std::string& indexN
     for (BSONElement elem : keyPattern) {
         _pathDiscriminatorsMap[elem.fieldNameStringData()][indexName].addDiscriminator([collator](
             const MatchExpression* queryExpr) {
-            if (ComparisonMatchExpression::isComparisonMatchExpression(queryExpr)) {
-                const auto* queryExprComparison =
-                    static_cast<const ComparisonMatchExpression*>(queryExpr);
+            if (const auto* queryExprComparison =
+                    dynamic_cast<const ComparisonMatchExpressionBase*>(queryExpr)) {
                 const bool collatorsMatch =
                     CollatorInterface::collatorsMatch(queryExprComparison->getCollator(), collator);
                 const bool isCollatableType =

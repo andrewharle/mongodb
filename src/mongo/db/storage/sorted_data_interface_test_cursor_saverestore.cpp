@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,12 +38,13 @@
 #include "mongo/unittest/unittest.h"
 
 namespace mongo {
+namespace {
 
 // Insert multiple keys and try to iterate through all of them
 // using a forward cursor while calling savePosition() and
 // restorePosition() in succession.
 TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursor) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -86,7 +89,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursor) {
 // using a reverse cursor while calling savePosition() and
 // restorePosition() in succession.
 TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursorReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -133,7 +136,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursorReversed) {
 // restorePosition() in succession. Verify that the RecordId is saved
 // as part of the current position of the cursor.
 TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursorWithDupKeys) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -178,7 +181,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursorWithDupKeys) {
 // restorePosition() in succession. Verify that the RecordId is saved
 // as part of the current position of the cursor.
 TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursorWithDupKeysReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -222,7 +225,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionWhileIterateCursorWithDupKeysRev
 // Call savePosition() on a forward cursor without ever calling restorePosition().
 // May be useful to run this test under valgrind to verify there are no leaks.
 TEST(SortedDataInterface, SavePositionWithoutRestore) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(true));
 
     {
@@ -254,7 +257,7 @@ TEST(SortedDataInterface, SavePositionWithoutRestore) {
 // Call savePosition() on a reverse cursor without ever calling restorePosition().
 // May be useful to run this test under valgrind to verify there are no leaks.
 TEST(SortedDataInterface, SavePositionWithoutRestoreReversed) {
-    const std::unique_ptr<HarnessHelper> harnessHelper(newHarnessHelper());
+    const auto harnessHelper(newSortedDataInterfaceHarnessHelper());
     const std::unique_ptr<SortedDataInterface> sorted(harnessHelper->newSortedDataInterface(false));
 
     {
@@ -287,7 +290,7 @@ TEST(SortedDataInterface, SavePositionWithoutRestoreReversed) {
 // Ensure that restore lands as close as possible to original position, even if data inserted
 // while saved.
 void testSaveAndRestorePositionSeesNewInserts(bool forward, bool unique) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(unique,
                                                         {
@@ -321,7 +324,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionSeesNewInserts_Reverse_Standard)
 // Ensure that repeated restores lands as close as possible to original position, even if data
 // inserted while saved and the current position removed.
 void testSaveAndRestorePositionSeesNewInsertsAfterRemove(bool forward, bool unique) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(unique,
                                                         {
@@ -361,7 +364,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionSeesNewInsertsAfterRemove_Revers
 // inserted while saved and the current position removed in a way that temporarily makes the
 // cursor EOF.
 void testSaveAndRestorePositionSeesNewInsertsAfterEOF(bool forward, bool unique) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(false,
                                                         {
@@ -401,7 +404,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionSeesNewInsertsAfterEOF_Reverse_S
 
 // Make sure we restore to a RecordId at or ahead of save point if same key.
 TEST(SortedDataInterface, SaveAndRestorePositionStandardIndexConsidersRecordId_Forward) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted =
         harnessHelper->newSortedDataInterface(/*isUnique*/ false,
@@ -441,7 +444,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionStandardIndexConsidersRecordId_F
 
 // Test that cursors over unique indices will never return the same key twice.
 TEST(SortedDataInterface, SaveAndRestorePositionUniqueIndexWontReturnDupKeys_Forward) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         /*isUnique*/ true, {{key1, loc1}, {key2, loc2}, {key3, loc2}, {key4, loc2}});
@@ -481,7 +484,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionUniqueIndexWontReturnDupKeys_For
 
 // Make sure we restore to a RecordId at or ahead of save point if same key on reverse cursor.
 TEST(SortedDataInterface, SaveAndRestorePositionStandardIndexConsidersRecordId_Reverse) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted =
         harnessHelper->newSortedDataInterface(/*isUnique*/ false,
@@ -521,7 +524,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionStandardIndexConsidersRecordId_R
 
 // Test that reverse cursors over unique indices will never return the same key twice.
 TEST(SortedDataInterface, SaveAndRestorePositionUniqueIndexWontReturnDupKeys_Reverse) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted = harnessHelper->newSortedDataInterface(
         /*isUnique*/ true, {{key1, loc1}, {key2, loc1}, {key3, loc1}, {key4, loc2}});
@@ -561,7 +564,7 @@ TEST(SortedDataInterface, SaveAndRestorePositionUniqueIndexWontReturnDupKeys_Rev
 
 // Ensure that SaveUnpositioned allows later use of the cursor.
 TEST(SortedDataInterface, SaveUnpositionedAndRestore) {
-    auto harnessHelper = newHarnessHelper();
+    const auto harnessHelper = newSortedDataInterfaceHarnessHelper();
     auto opCtx = harnessHelper->newOperationContext();
     auto sorted =
         harnessHelper->newSortedDataInterface(false,
@@ -585,4 +588,5 @@ TEST(SortedDataInterface, SaveUnpositionedAndRestore) {
     ASSERT_EQ(cursor->seek(key3, true), IndexKeyEntry(key3, loc1));
 }
 
+}  // namespace
 }  // namespace mongo

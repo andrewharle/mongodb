@@ -5,6 +5,8 @@
  *
  * Exercises the concurrent moveChunk operations, but each thread operates on its own set of
  * chunks.
+ *
+ * @tags: [requires_sharding, assumes_balancer_off, assumes_autosplit_off]
  */
 
 load('jstests/concurrency/fsm_libs/extend_workload.js');                // for extendWorkload
@@ -57,8 +59,8 @@ var $config = extendWorkload($config, function($config, $super) {
 
         // Save the number of chunks before the moveChunk operation. This will be used
         // to verify that the number of chunks after the moveChunk operation remains the same.
-        var numChunksBefore =
-            ChunkHelper.getNumChunks(config, this.partition.chunkLower, this.partition.chunkUpper);
+        var numChunksBefore = ChunkHelper.getNumChunks(
+            config, ns, this.partition.chunkLower, this.partition.chunkUpper);
 
         // Randomly choose whether to wait for all documents on the fromShard
         // to be deleted before the moveChunk operation returns.
@@ -126,7 +128,7 @@ var $config = extendWorkload($config, function($config, $super) {
                 // Regardless of whether the operation succeeded or failed,
                 // verify that the number of chunks in our partition stayed the same.
                 var numChunksAfter = ChunkHelper.getNumChunks(
-                    conn, this.partition.chunkLower, this.partition.chunkUpper);
+                    conn, ns, this.partition.chunkLower, this.partition.chunkUpper);
                 msg = 'Number of chunks in partition seen by config changed with moveChunk.\n' +
                     msgBase;
                 assertWhenOwnColl.eq(numChunksBefore, numChunksAfter, msg);
@@ -140,8 +142,8 @@ var $config = extendWorkload($config, function($config, $super) {
             // verify that each mongos sees as many documents in the chunk's
             // range after the move as there were before.
             var numDocsAfter = ChunkHelper.getNumDocs(mongos, ns, chunk.min._id, chunk.max._id);
-            msg =
-                'Number of chunks in partition seen by mongos changed with moveChunk.\n' + msgBase;
+            msg = 'Number of documents in range seen by mongos changed with moveChunk, range: ' +
+                tojson(bounds) + '.\n' + msgBase;
             assertWhenOwnColl.eq(numDocsAfter, numDocsBefore, msg);
 
             // If the moveChunk operation succeeded, verify that each mongos sees all data in the

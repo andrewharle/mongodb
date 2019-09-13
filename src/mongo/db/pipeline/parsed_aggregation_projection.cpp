@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -46,17 +48,25 @@
 namespace mongo {
 namespace parsed_aggregation_projection {
 
+using TransformerType =
+    DocumentSourceSingleDocumentTransformation::TransformerInterface::TransformerType;
+
 using expression::isPathPrefixOf;
 
 //
 // ProjectionSpecValidator
 //
 
-Status ProjectionSpecValidator::validate(const BSONObj& spec) {
-    return ProjectionSpecValidator(spec).validate();
+void ProjectionSpecValidator::uassertValid(const BSONObj& spec, StringData stageName) {
+    try {
+        ProjectionSpecValidator(spec).validate();
+    } catch (DBException& ex) {
+        ex.addContext("Invalid " + stageName.toString());
+        throw;
+    }
 }
 
-Status ProjectionSpecValidator::ensurePathDoesNotConflictOrThrow(const std::string& path) {
+void ProjectionSpecValidator::ensurePathDoesNotConflictOrThrow(const std::string& path) {
     auto result = _seenPaths.emplace(path);
     auto pos = result.first;
 
@@ -75,48 +85,41 @@ Status ProjectionSpecValidator::ensurePathDoesNotConflictOrThrow(const std::stri
             boost::make_optional(isPathPrefixOf(path, *std::next(pos)), *std::next(pos));
     }
 
-    if (conflictingPath) {
-        return Status(ErrorCodes::FailedToParse,
-                      str::stream() << "specification contains two conflicting paths. "
-                                       "Cannot specify both '"
-                                    << path
-                                    << "' and '"
-                                    << *conflictingPath
-                                    << "': "
-                                    << _rawObj.toString(),
-                      40176);
-    }
-    return Status::OK();
+    uassert(40176,
+            str::stream() << "specification contains two conflicting paths. "
+                             "Cannot specify both '"
+                          << path
+                          << "' and '"
+                          << *conflictingPath
+                          << "': "
+                          << _rawObj.toString(),
+            !conflictingPath);
 }
 
-Status ProjectionSpecValidator::validate() {
+void ProjectionSpecValidator::validate() {
     if (_rawObj.isEmpty()) {
-        return Status(
-            ErrorCodes::FailedToParse, "specification must have at least one field", 40177);
+        uasserted(40177, "specification must have at least one field");
     }
     for (auto&& elem : _rawObj) {
-        Status status = parseElement(elem, FieldPath(elem.fieldName()));
-        if (!status.isOK())
-            return status;
+        parseElement(elem, FieldPath(elem.fieldName()));
     }
-    return Status::OK();
 }
 
-Status ProjectionSpecValidator::parseElement(const BSONElement& elem, const FieldPath& pathToElem) {
+void ProjectionSpecValidator::parseElement(const BSONElement& elem, const FieldPath& pathToElem) {
     if (elem.type() == BSONType::Object) {
-        return parseNestedObject(elem.Obj(), pathToElem);
+        parseNestedObject(elem.Obj(), pathToElem);
+    } else {
+        ensurePathDoesNotConflictOrThrow(pathToElem.fullPath());
     }
-    return ensurePathDoesNotConflictOrThrow(pathToElem.fullPath());
 }
 
-Status ProjectionSpecValidator::parseNestedObject(const BSONObj& thisLevelSpec,
-                                                  const FieldPath& prefix) {
+void ProjectionSpecValidator::parseNestedObject(const BSONObj& thisLevelSpec,
+                                                const FieldPath& prefix) {
     if (thisLevelSpec.isEmpty()) {
-        return Status(ErrorCodes::FailedToParse,
-                      str::stream()
-                          << "an empty object is not a valid value. Found empty object at path "
-                          << prefix.fullPath(),
-                      40180);
+        uasserted(
+            40180,
+            str::stream() << "an empty object is not a valid value. Found empty object at path "
+                          << prefix.fullPath());
     }
     for (auto&& elem : thisLevelSpec) {
         auto fieldName = elem.fieldNameStringData();
@@ -125,34 +128,26 @@ Status ProjectionSpecValidator::parseNestedObject(const BSONObj& thisLevelSpec,
             // into an Expression later, but for now, just track that the prefix has been
             // specified and skip it.
             if (thisLevelSpec.nFields() != 1) {
-                return Status(ErrorCodes::FailedToParse,
-                              str::stream() << "an expression specification must contain exactly "
-                                               "one field, the name of the expression. Found "
-                                            << thisLevelSpec.nFields()
-                                            << " fields in "
-                                            << thisLevelSpec.toString()
-                                            << ", while parsing object "
-                                            << _rawObj.toString(),
-                              40181);
+                uasserted(40181,
+                          str::stream() << "an expression specification must contain exactly "
+                                           "one field, the name of the expression. Found "
+                                        << thisLevelSpec.nFields()
+                                        << " fields in "
+                                        << thisLevelSpec.toString()
+                                        << ", while parsing object "
+                                        << _rawObj.toString());
             }
-            Status status = ensurePathDoesNotConflictOrThrow(prefix.fullPath());
-            if (!status.isOK())
-                return status;
+            ensurePathDoesNotConflictOrThrow(prefix.fullPath());
             continue;
         }
         if (fieldName.find('.') != std::string::npos) {
-            return Status(ErrorCodes::FailedToParse,
-                          str::stream() << "cannot use dotted field name '" << fieldName
-                                        << "' in a sub object: "
-                                        << _rawObj.toString(),
-                          40183);
+            uasserted(40183,
+                      str::stream() << "cannot use dotted field name '" << fieldName
+                                    << "' in a sub object: "
+                                    << _rawObj.toString());
         }
-        Status status =
-            parseElement(elem, FieldPath::getFullyQualifiedPath(prefix.fullPath(), fieldName));
-        if (!status.isOK())
-            return status;
+        parseElement(elem, FieldPath::getFullyQualifiedPath(prefix.fullPath(), fieldName));
     }
-    return Status::OK();
 }
 
 namespace {
@@ -167,7 +162,7 @@ public:
      * fields (ones which are defined by an expression or a literal) are treated as inclusion
      * projections for in this context of the$project stage.
      */
-    static ProjectionType parse(const BSONObj& spec) {
+    static TransformerType parse(const BSONObj& spec) {
         ProjectTypeParser parser(spec);
         parser.parse();
         invariant(parser._parsedType);
@@ -178,13 +173,23 @@ private:
     ProjectTypeParser(const BSONObj& spec) : _rawObj(spec) {}
 
     /**
+     * Parses a single BSONElement, with 'fieldName' representing the path used for projection
+     * inclusion or exclusion. This code was broken out into a separate function as a workaround for
+     * SERVER-33125.
+     */
+    void parseElementWithFieldName(BSONElement elem, StringData fieldName) {
+        FieldPath elemPath(fieldName);
+        parseElement(elem, elemPath);
+    }
+
+    /**
      * Traverses '_rawObj' to determine the type of projection, populating '_parsedType' in the
      * process.
      */
     void parse() {
         size_t nFields = 0;
         for (auto&& elem : _rawObj) {
-            parseElement(elem, FieldPath(elem.fieldName()));
+            parseElementWithFieldName(elem, elem.fieldName());
             nFields++;
         }
 
@@ -193,13 +198,14 @@ private:
             BSONElement elem = _rawObj.firstElement();
             if (elem.fieldNameStringData() == "_id" && (elem.isBoolean() || elem.isNumber()) &&
                 !elem.trueValue()) {
-                _parsedType = ProjectionType::kExclusion;
+                _parsedType = TransformerType::kExclusionProjection;
             }
         }
 
         // Default to inclusion if nothing (except maybe '_id') is explicitly included or excluded.
         if (!_parsedType) {
-            _parsedType = ProjectionType::kInclusion;
+            _parsedType = DocumentSourceSingleDocumentTransformation::TransformerInterface::
+                TransformerType::kInclusionProjection;
         }
     }
 
@@ -209,7 +215,7 @@ private:
      * Delegates to parseSubObject() if 'elem' is an object. Otherwise updates '_parsedType' if
      * appropriate.
      *
-     * Throws a UserException if this element represents a mix of projection types.
+     * Throws a AssertionException if this element represents a mix of projection types.
      */
     void parseElement(const BSONElement& elem, const FieldPath& pathToElem) {
         if (elem.type() == BSONType::Object) {
@@ -224,8 +230,12 @@ private:
                         str::stream() << "Bad projection specification, cannot exclude fields "
                                          "other than '_id' in an inclusion projection: "
                                       << _rawObj.toString(),
-                        !_parsedType || (*_parsedType == ProjectionType::kExclusion));
-                _parsedType = ProjectionType::kExclusion;
+                        !_parsedType ||
+                            (*_parsedType ==
+                             DocumentSourceSingleDocumentTransformation::TransformerInterface::
+                                 TransformerType::kExclusionProjection));
+                _parsedType = DocumentSourceSingleDocumentTransformation::TransformerInterface::
+                    TransformerType::kExclusionProjection;
             }
         } else {
             // A boolean true, a truthy numeric value, or any expression can only be used with an
@@ -235,15 +245,19 @@ private:
                     str::stream() << "Bad projection specification, cannot include fields or "
                                      "add computed fields during an exclusion projection: "
                                   << _rawObj.toString(),
-                    !_parsedType || (*_parsedType == ProjectionType::kInclusion));
-            _parsedType = ProjectionType::kInclusion;
+                    !_parsedType ||
+                        (*_parsedType ==
+                         DocumentSourceSingleDocumentTransformation::TransformerInterface::
+                             TransformerType::kInclusionProjection));
+            _parsedType = DocumentSourceSingleDocumentTransformation::TransformerInterface::
+                TransformerType::kInclusionProjection;
         }
     }
 
     /**
      * Traverses 'thisLevelSpec', parsing each element in turn.
      *
-     * Throws a UserException if 'thisLevelSpec' represents an invalid mix of projections.
+     * Throws a AssertionException if 'thisLevelSpec' represents an invalid mix of projections.
      */
     void parseNestedObject(const BSONObj& thisLevelSpec, const FieldPath& prefix) {
 
@@ -257,8 +271,12 @@ private:
                         str::stream() << "Bad projection specification, cannot include fields or "
                                          "add computed fields during an exclusion projection: "
                                       << _rawObj.toString(),
-                        !_parsedType || _parsedType == ProjectionType::kInclusion);
-                _parsedType = ProjectionType::kInclusion;
+                        !_parsedType ||
+                            _parsedType ==
+                                DocumentSourceSingleDocumentTransformation::TransformerInterface::
+                                    TransformerType::kInclusionProjection);
+                _parsedType = DocumentSourceSingleDocumentTransformation::TransformerInterface::
+                    TransformerType::kInclusionProjection;
                 continue;
             }
             parseElement(elem, FieldPath::getFullyQualifiedPath(prefix.fullPath(), fieldName));
@@ -269,7 +287,7 @@ private:
     const BSONObj& _rawObj;
 
     // This will be populated during parse().
-    boost::optional<ProjectionType> _parsedType;
+    boost::optional<TransformerType> _parsedType;
 };
 
 }  // namespace
@@ -279,26 +297,22 @@ std::unique_ptr<ParsedAggregationProjection> ParsedAggregationProjection::create
     // Check that the specification was valid. Status returned is unspecific because validate()
     // is used by the $addFields stage as well as $project.
     // If there was an error, uassert with a $project-specific message.
-    Status status = ProjectionSpecValidator::validate(spec);
-    if (!status.isOK()) {
-        uasserted(status.location(),
-                  str::stream() << "Invalid $project specification: " << status.reason());
-    }
+    ProjectionSpecValidator::uassertValid(spec, "$project");
 
     // Check for any conflicting specifications, and determine the type of the projection.
     auto projectionType = ProjectTypeParser::parse(spec);
     // kComputed is a projection type reserved for $addFields, and should never be detected by the
     // ProjectTypeParser.
-    invariant(projectionType != ProjectionType::kComputed);
+    invariant(projectionType != TransformerType::kComputedProjection);
 
     // We can't use make_unique() here, since the branches have different types.
     std::unique_ptr<ParsedAggregationProjection> parsedProject(
-        projectionType == ProjectionType::kInclusion
-            ? static_cast<ParsedAggregationProjection*>(new ParsedInclusionProjection())
-            : static_cast<ParsedAggregationProjection*>(new ParsedExclusionProjection()));
+        projectionType == TransformerType::kInclusionProjection
+            ? static_cast<ParsedAggregationProjection*>(new ParsedInclusionProjection(expCtx))
+            : static_cast<ParsedAggregationProjection*>(new ParsedExclusionProjection(expCtx)));
 
     // Actually parse the specification.
-    parsedProject->parse(expCtx, spec);
+    parsedProject->parse(spec);
     return parsedProject;
 }
 

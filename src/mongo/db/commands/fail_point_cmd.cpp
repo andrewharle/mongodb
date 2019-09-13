@@ -1,23 +1,25 @@
-/*
- *    Copyright (C) 2012 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -35,13 +37,11 @@
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/test_commands_enabled.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
-
-using std::string;
-using std::stringstream;
 
 /**
  * Command for modifying installed fail points.
@@ -64,63 +64,44 @@ using std::stringstream;
  *    data: <Object> // optional arbitrary object to store.
  * }
  */
-class FaultInjectCmd : public Command {
+class FaultInjectCmd : public BasicCommand {
 public:
-    FaultInjectCmd() : Command("configureFailPoint") {}
+    FaultInjectCmd() : BasicCommand("configureFailPoint") {}
 
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
-
-    virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
+    bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    virtual bool adminOnly() const {
+    bool adminOnly() const override {
         return true;
     }
 
-    // No auth needed because it only works when enabled via command line.
-    virtual void addRequiredPrivileges(const std::string& dbname,
-                                       const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {}
-
-    virtual void help(stringstream& h) const {
-        h << "modifies the settings of a fail point";
+    bool requiresAuth() const override {
+        return false;
     }
 
-    bool run(OperationContext* txn,
-             const string& dbname,
-             BSONObj& cmdObj,
-             int,
-             string& errmsg,
-             BSONObjBuilder& result) {
-        const string failPointName(cmdObj.firstElement().str());
-        FailPointRegistry* registry = getGlobalFailPointRegistry();
-        FailPoint* failPoint = registry->getFailPoint(failPointName);
+    // No auth needed because it only works when enabled via command line.
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const override {}
 
-        if (failPoint == NULL) {
-            errmsg = failPointName + " not found";
-            return false;
-        }
+    std::string help() const override {
+        return "modifies the settings of a fail point";
+    }
 
-        FailPoint::Mode mode;
-        FailPoint::ValType val;
-        BSONObj data;
-        std::tie(mode, val, data) = uassertStatusOK(FailPoint::parseBSON(cmdObj));
-
-        failPoint->setMode(mode, val, data);
-        warning() << "failpoint: " << failPointName << " set to: " << failPoint->toBSON();
+    bool run(OperationContext* opCtx,
+             const std::string& dbname,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) override {
+        const std::string failPointName(cmdObj.firstElement().str());
+        setGlobalFailPoint(failPointName, cmdObj);
 
         return true;
     }
 };
-MONGO_INITIALIZER(RegisterFaultInjectCmd)(InitializerContext* context) {
-    if (Command::testCommandsEnabled) {
-        // Leaked intentionally: a Command registers itself when constructed.
-        new FaultInjectCmd();
-    }
-    return Status::OK();
-}
+MONGO_REGISTER_TEST_COMMAND(FaultInjectCmd);
 }

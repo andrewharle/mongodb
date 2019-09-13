@@ -5,7 +5,7 @@ function getIndexBuildOpId(db) {
     let indexBuildOpId = -1;
 
     result.inprog.forEach(function(op) {
-        if (op.op == 'command' && op.query != undefined && 'createIndexes' in op.query) {
+        if (op.op == 'command' && 'createIndexes' in op.command) {
             indexBuildOpId = op.opid;
         }
     });

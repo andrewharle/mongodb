@@ -5,6 +5,14 @@
 
     "use strict";
 
+    // Skip this test if running with --nojournal and WiredTiger.
+    if (jsTest.options().noJournal &&
+        (!jsTest.options().storageEngine || jsTest.options().storageEngine === "wiredTiger")) {
+        print("Skipping test because running WiredTiger without journaling isn't a valid" +
+              " replica set configuration");
+        return;
+    }
+
     load("jstests/replsets/rslib.js");
 
     var rs = new ReplSetTest({name: 'testSet', nodes: 3, nodeOptions: {verbose: 2}});
@@ -149,17 +157,17 @@
 
         assert.soon(function() {
             rs.getPrimary();
-            return rs.liveNodes.slaves.length == 2;
+            return rs._slaves.length == 2;
         }, "2 slaves");
 
         print("\nreplsets_priority1.js wait for new config version " + config.version);
 
         assert.soon(function() {
             var versions = [0, 0];
-            rs.liveNodes.slaves[0].setSlaveOk();
-            versions[0] = rs.liveNodes.slaves[0].getDB("local").system.replset.findOne().version;
-            rs.liveNodes.slaves[1].setSlaveOk();
-            versions[1] = rs.liveNodes.slaves[1].getDB("local").system.replset.findOne().version;
+            rs._slaves[0].setSlaveOk();
+            versions[0] = rs._slaves[0].getDB("local").system.replset.findOne().version;
+            rs._slaves[1].setSlaveOk();
+            versions[1] = rs._slaves[1].getDB("local").system.replset.findOne().version;
             return versions[0] == config.version && versions[1] == config.version;
         });
 
@@ -188,7 +196,10 @@
         checkPrimaryIs(second);
 
         // Wait for election oplog entry to be replicated, to avoid rollbacks later on.
-        rs.awaitReplication();
+        let liveSlaves = rs.nodes.filter(function(node) {
+            return node.host !== max.host && node.host !== second.host;
+        });
+        rs.awaitReplication(null, null, liveSlaves);
 
         print("restart max " + max._id);
 
@@ -202,4 +213,5 @@
         rs.awaitReplication();
     }
 
+    rs.stopSet();
 })();

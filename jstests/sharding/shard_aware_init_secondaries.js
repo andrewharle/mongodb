@@ -19,6 +19,7 @@
     });
 
     var priConn = replTest.getPrimary();
+
     var configConnStr = st.configRS.getURL();
 
     var shardIdentityDoc = {

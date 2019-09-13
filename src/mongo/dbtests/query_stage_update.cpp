@@ -1,29 +1,31 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 /**
@@ -45,12 +47,12 @@
 #include "mongo/db/exec/working_set.h"
 #include "mongo/db/jsobj.h"
 #include "mongo/db/json.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
-#include "mongo/db/ops/update_driver.h"
+#include "mongo/db/namespace_string.h"
 #include "mongo/db/ops/update_lifecycle_impl.h"
 #include "mongo/db/ops/update_request.h"
 #include "mongo/db/query/canonical_query.h"
 #include "mongo/db/service_context.h"
+#include "mongo/db/update/update_driver.h"
 #include "mongo/dbtests/dbtests.h"
 #include "mongo/stdx/memory.h"
 
@@ -64,14 +66,14 @@ static const NamespaceString nss("unittests.QueryStageUpdate");
 
 class QueryStageUpdateBase {
 public:
-    QueryStageUpdateBase() : _client(&_txn) {
-        OldClientWriteContext ctx(&_txn, nss.ns());
+    QueryStageUpdateBase() : _client(&_opCtx) {
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
         _client.dropCollection(nss.ns());
         _client.createCollection(nss.ns());
     }
 
     virtual ~QueryStageUpdateBase() {
-        OldClientWriteContext ctx(&_txn, nss.ns());
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
         _client.dropCollection(nss.ns());
     }
 
@@ -90,8 +92,7 @@ public:
     unique_ptr<CanonicalQuery> canonicalize(const BSONObj& query) {
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(query);
-        auto statusWithCQ = CanonicalQuery::canonicalize(
-            &_txn, std::move(qr), ExtensionsCallbackDisallowExtensions());
+        auto statusWithCQ = CanonicalQuery::canonicalize(&_opCtx, std::move(qr));
         ASSERT_OK(statusWithCQ.getStatus());
         return std::move(statusWithCQ.getValue());
     }
@@ -123,7 +124,7 @@ public:
         params.direction = CollectionScanParams::FORWARD;
         params.tailable = false;
 
-        unique_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
+        unique_ptr<CollectionScan> scan(new CollectionScan(&_opCtx, params, &ws, NULL));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -145,7 +146,7 @@ public:
         params.direction = direction;
         params.tailable = false;
 
-        unique_ptr<CollectionScan> scan(new CollectionScan(&_txn, params, &ws, NULL));
+        unique_ptr<CollectionScan> scan(new CollectionScan(&_opCtx, params, &ws, NULL));
         while (!scan->isEOF()) {
             WorkingSetID id = WorkingSet::INVALID_ID;
             PlanStage::StageState state = scan->work(&id);
@@ -173,7 +174,7 @@ public:
 
 protected:
     const ServiceContext::UniqueOperationContext _txnPtr = cc().makeOperationContext();
-    OperationContext& _txn = *_txnPtr;
+    OperationContext& _opCtx = *_txnPtr;
 
 private:
     DBDirectClient _client;
@@ -187,10 +188,11 @@ public:
     void run() {
         // Run the update.
         {
-            OldClientWriteContext ctx(&_txn, nss.ns());
-            CurOp& curOp = *CurOp::get(_txn);
+            OldClientWriteContext ctx(&_opCtx, nss.ns());
+            CurOp& curOp = *CurOp::get(_opCtx);
             OpDebug* opDebug = &curOp.debug();
-            UpdateDriver driver((UpdateDriver::Options()));
+            const CollatorInterface* collator = nullptr;
+            UpdateDriver driver(new ExpressionContext(&_opCtx, collator));
             Collection* collection = ctx.getCollection();
 
             // Collection should be empty.
@@ -208,7 +210,9 @@ public:
             request.setQuery(query);
             request.setUpdates(updates);
 
-            ASSERT_OK(driver.parse(request.getUpdates(), request.isMulti()));
+            const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+
+            ASSERT_OK(driver.parse(request.getUpdates(), arrayFilters, request.isMulti()));
 
             // Setup update params.
             UpdateStageParams params(&request, &driver, opDebug);
@@ -216,17 +220,17 @@ public:
             params.canonicalQuery = cq.get();
 
             auto ws = make_unique<WorkingSet>();
-            auto eofStage = make_unique<EOFStage>(&_txn);
+            auto eofStage = make_unique<EOFStage>(&_opCtx);
 
             auto updateStage =
-                make_unique<UpdateStage>(&_txn, params, ws.get(), collection, eofStage.release());
+                make_unique<UpdateStage>(&_opCtx, params, ws.get(), collection, eofStage.release());
 
             runUpdate(updateStage.get());
         }
 
         // Verify the contents of the resulting collection.
         {
-            AutoGetCollectionForRead ctx(&_txn, nss.ns());
+            AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
             Collection* collection = ctx.getCollection();
 
             vector<BSONObj> objs;
@@ -248,7 +252,7 @@ public:
     void run() {
         // Run the update.
         {
-            OldClientWriteContext ctx(&_txn, nss.ns());
+            OldClientWriteContext ctx(&_opCtx, nss.ns());
 
             // Populate the collection.
             for (int i = 0; i < 10; ++i) {
@@ -256,11 +260,12 @@ public:
             }
             ASSERT_EQUALS(10U, count(BSONObj()));
 
-            CurOp& curOp = *CurOp::get(_txn);
+            CurOp& curOp = *CurOp::get(_opCtx);
             OpDebug* opDebug = &curOp.debug();
-            UpdateDriver driver((UpdateDriver::Options()));
+            const CollatorInterface* collator = nullptr;
+            UpdateDriver driver(new ExpressionContext(&_opCtx, collator));
             Database* db = ctx.db();
-            Collection* coll = db->getCollection(nss.ns());
+            Collection* coll = db->getCollection(&_opCtx, nss);
 
             // Get the RecordIds that would be returned by an in-order scan.
             vector<RecordId> recordIds;
@@ -279,7 +284,9 @@ public:
             request.setQuery(query);
             request.setUpdates(updates);
 
-            ASSERT_OK(driver.parse(request.getUpdates(), request.isMulti()));
+            const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+
+            ASSERT_OK(driver.parse(request.getUpdates(), arrayFilters, request.isMulti()));
 
             // Configure the scan.
             CollectionScanParams collScanParams;
@@ -293,10 +300,10 @@ public:
             updateParams.canonicalQuery = cq.get();
 
             auto ws = make_unique<WorkingSet>();
-            auto cs = make_unique<CollectionScan>(&_txn, collScanParams, ws.get(), cq->root());
+            auto cs = make_unique<CollectionScan>(&_opCtx, collScanParams, ws.get(), cq->root());
 
             auto updateStage =
-                make_unique<UpdateStage>(&_txn, updateParams, ws.get(), coll, cs.release());
+                make_unique<UpdateStage>(&_opCtx, updateParams, ws.get(), coll, cs.release());
 
             const UpdateStats* stats =
                 static_cast<const UpdateStats*>(updateStage->getSpecificStats());
@@ -312,11 +319,11 @@ public:
             // Remove recordIds[targetDocIndex];
             updateStage->saveState();
             {
-                WriteUnitOfWork wunit(&_txn);
-                updateStage->invalidate(&_txn, recordIds[targetDocIndex], INVALIDATION_DELETION);
+                WriteUnitOfWork wunit(&_opCtx);
+                updateStage->invalidate(&_opCtx, recordIds[targetDocIndex], INVALIDATION_DELETION);
                 wunit.commit();
             }
-            BSONObj targetDoc = coll->docFor(&_txn, recordIds[targetDocIndex]).value();
+            BSONObj targetDoc = coll->docFor(&_opCtx, recordIds[targetDocIndex]).value();
             ASSERT(!targetDoc.isEmpty());
             remove(targetDoc);
             updateStage->restoreState();
@@ -335,7 +342,7 @@ public:
 
         // Check the contents of the collection.
         {
-            AutoGetCollectionForRead ctx(&_txn, nss.ns());
+            AutoGetCollectionForReadCommand ctx(&_opCtx, nss);
             Collection* collection = ctx.getCollection();
 
             vector<BSONObj> objs;
@@ -369,12 +376,13 @@ public:
         ASSERT_EQUALS(10U, count(BSONObj()));
 
         // Various variables we'll need.
-        OldClientWriteContext ctx(&_txn, nss.ns());
-        OpDebug* opDebug = &CurOp::get(_txn)->debug();
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
+        OpDebug* opDebug = &CurOp::get(_opCtx)->debug();
         Collection* coll = ctx.getCollection();
         UpdateLifecycleImpl updateLifecycle(nss);
         UpdateRequest request(nss);
-        UpdateDriver driver((UpdateDriver::Options()));
+        const CollatorInterface* collator = nullptr;
+        UpdateDriver driver(new ExpressionContext(&_opCtx, collator));
         const int targetDocIndex = 0;  // We'll be working with the first doc in the collection.
         const BSONObj query = BSON("foo" << BSON("$gte" << targetDocIndex));
         const auto ws = make_unique<WorkingSet>();
@@ -392,11 +400,13 @@ public:
         request.setReturnDocs(UpdateRequest::RETURN_OLD);
         request.setLifecycle(&updateLifecycle);
 
-        ASSERT_OK(driver.parse(request.getUpdates(), request.isMulti()));
+        const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+
+        ASSERT_OK(driver.parse(request.getUpdates(), arrayFilters, request.isMulti()));
 
         // Configure a QueuedDataStage to pass the first object in the collection back in a
         // RID_AND_OBJ state.
-        auto qds = make_unique<QueuedDataStage>(&_txn, ws.get());
+        auto qds = make_unique<QueuedDataStage>(&_opCtx, ws.get());
         WorkingSetID id = ws->allocate();
         WorkingSetMember* member = ws->get(id);
         member->recordId = recordIds[targetDocIndex];
@@ -410,7 +420,7 @@ public:
         updateParams.canonicalQuery = cq.get();
 
         const auto updateStage =
-            make_unique<UpdateStage>(&_txn, updateParams, ws.get(), coll, qds.release());
+            make_unique<UpdateStage>(&_opCtx, updateParams, ws.get(), coll, qds.release());
 
         // Should return advanced.
         id = WorkingSet::INVALID_ID;
@@ -457,12 +467,13 @@ public:
         ASSERT_EQUALS(50U, count(BSONObj()));
 
         // Various variables we'll need.
-        OldClientWriteContext ctx(&_txn, nss.ns());
-        OpDebug* opDebug = &CurOp::get(_txn)->debug();
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
+        OpDebug* opDebug = &CurOp::get(_opCtx)->debug();
         Collection* coll = ctx.getCollection();
         UpdateLifecycleImpl updateLifecycle(nss);
         UpdateRequest request(nss);
-        UpdateDriver driver((UpdateDriver::Options()));
+        const CollatorInterface* collator = nullptr;
+        UpdateDriver driver(new ExpressionContext(&_opCtx, collator));
         const int targetDocIndex = 10;
         const BSONObj query = BSON("foo" << BSON("$gte" << targetDocIndex));
         const auto ws = make_unique<WorkingSet>();
@@ -480,11 +491,13 @@ public:
         request.setReturnDocs(UpdateRequest::RETURN_NEW);
         request.setLifecycle(&updateLifecycle);
 
-        ASSERT_OK(driver.parse(request.getUpdates(), request.isMulti()));
+        const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+
+        ASSERT_OK(driver.parse(request.getUpdates(), arrayFilters, request.isMulti()));
 
         // Configure a QueuedDataStage to pass the first object in the collection back in a
         // RID_AND_OBJ state.
-        auto qds = make_unique<QueuedDataStage>(&_txn, ws.get());
+        auto qds = make_unique<QueuedDataStage>(&_opCtx, ws.get());
         WorkingSetID id = ws->allocate();
         WorkingSetMember* member = ws->get(id);
         member->recordId = recordIds[targetDocIndex];
@@ -498,7 +511,7 @@ public:
         updateParams.canonicalQuery = cq.get();
 
         auto updateStage =
-            make_unique<UpdateStage>(&_txn, updateParams, ws.get(), coll, qds.release());
+            make_unique<UpdateStage>(&_opCtx, updateParams, ws.get(), coll, qds.release());
 
         // Should return advanced.
         id = WorkingSet::INVALID_ID;
@@ -541,12 +554,13 @@ class QueryStageUpdateSkipOwnedObjects : public QueryStageUpdateBase {
 public:
     void run() {
         // Various variables we'll need.
-        OldClientWriteContext ctx(&_txn, nss.ns());
-        OpDebug* opDebug = &CurOp::get(_txn)->debug();
+        OldClientWriteContext ctx(&_opCtx, nss.ns());
+        OpDebug* opDebug = &CurOp::get(_opCtx)->debug();
         Collection* coll = ctx.getCollection();
         UpdateLifecycleImpl updateLifecycle(nss);
         UpdateRequest request(nss);
-        UpdateDriver driver((UpdateDriver::Options()));
+        const CollatorInterface* collator = nullptr;
+        UpdateDriver driver(new ExpressionContext(&_opCtx, collator));
         const BSONObj query = BSONObj();
         const auto ws = make_unique<WorkingSet>();
         const unique_ptr<CanonicalQuery> cq(canonicalize(query));
@@ -558,10 +572,12 @@ public:
         request.setMulti(false);
         request.setLifecycle(&updateLifecycle);
 
-        ASSERT_OK(driver.parse(request.getUpdates(), request.isMulti()));
+        const std::map<StringData, std::unique_ptr<ExpressionWithPlaceholder>> arrayFilters;
+
+        ASSERT_OK(driver.parse(request.getUpdates(), arrayFilters, request.isMulti()));
 
         // Configure a QueuedDataStage to pass an OWNED_OBJ to the update stage.
-        auto qds = make_unique<QueuedDataStage>(&_txn, ws.get());
+        auto qds = make_unique<QueuedDataStage>(&_opCtx, ws.get());
         {
             WorkingSetID id = ws->allocate();
             WorkingSetMember* member = ws->get(id);
@@ -575,7 +591,7 @@ public:
         updateParams.canonicalQuery = cq.get();
 
         const auto updateStage =
-            make_unique<UpdateStage>(&_txn, updateParams, ws.get(), coll, qds.release());
+            make_unique<UpdateStage>(&_opCtx, updateParams, ws.get(), coll, qds.release());
         const UpdateStats* stats = static_cast<const UpdateStats*>(updateStage->getSpecificStats());
 
         // Call work, passing the set up member to the update stage.

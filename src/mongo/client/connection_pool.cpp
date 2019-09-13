@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -53,7 +55,9 @@ const Minutes kMaxConnectionAge(30);
 
 ConnectionPool::ConnectionPool(int messagingPortTags,
                                std::unique_ptr<executor::NetworkConnectionHook> hook)
-    : _messagingPortTags(messagingPortTags), _hook(std::move(hook)) {}
+    : _messagingPortTags(messagingPortTags),
+      _lastCleanUpTime(Date_t::now()),
+      _hook(std::move(hook)) {}
 
 ConnectionPool::ConnectionPool(int messagingPortTags)
     : ConnectionPool(messagingPortTags, nullptr) {}
@@ -103,7 +107,7 @@ void ConnectionPool::closeAllInUseConnections() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     for (ConnectionList::iterator iter = _inUseConnections.begin(); iter != _inUseConnections.end();
          ++iter) {
-        iter->conn->port().shutdown();
+        iter->conn->shutdown();
     }
 }
 
@@ -175,7 +179,7 @@ ConnectionPool::ConnectionList::iterator ConnectionPool::acquireConnection(
             0,      // socket timeout
             {},     // MongoURI
             [this, target](const executor::RemoteCommandResponse& isMasterReply) {
-                return _hook->validateHost(target, isMasterReply);
+                return _hook->validateHost(target, BSONObj(), isMasterReply);
             }));
     } else {
         conn.reset(new DBClientConnection());
@@ -187,7 +191,7 @@ ConnectionPool::ConnectionList::iterator ConnectionPool::acquireConnection(
     conn->setSoTimeout(durationCount<Milliseconds>(timeout) / 1000.0);
 
     uassertStatusOK(conn->connect(target, StringData()));
-    conn->port().setTag(conn->port().getTag() | _messagingPortTags);
+    conn->setTags(_messagingPortTags);
 
     if (isInternalAuthSet()) {
         conn->auth(getInternalUserAuthParams());
@@ -200,10 +204,9 @@ ConnectionPool::ConnectionList::iterator ConnectionPool::acquireConnection(
         if (postConnectRequest != boost::none) {
             auto start = Date_t::now();
             auto reply =
-                conn->runCommandWithMetadata(postConnectRequest->dbname,
-                                             postConnectRequest->cmdObj.firstElementFieldName(),
-                                             postConnectRequest->metadata,
-                                             postConnectRequest->cmdObj);
+                conn->runCommand(OpMsgRequest::fromDBAndBody(postConnectRequest->dbname,
+                                                             postConnectRequest->cmdObj,
+                                                             postConnectRequest->metadata));
 
             auto rcr = executor::RemoteCommandResponse(reply->getCommandReply().getOwned(),
                                                        reply->getMetadata().getOwned(),

@@ -16,7 +16,20 @@ load('jstests/ssl/libs/ssl_helpers.js');
     ];
 
     function runTest(serverDisabledProtos, clientDisabledProtos) {
-        let expectedRegex = /tlsv1 alert protocol version/;
+        const implementation = determineSSLProvider();
+        let expectedRegex;
+        if (implementation === "openssl") {
+            expectedRegex =
+                /Error: couldn't connect to server .*:[0-9]*, connection attempt failed: SocketException: tlsv1 alert protocol version/;
+        } else if (implementation === "windows") {
+            expectedRegex =
+                /Error: couldn't connect to server .*:[0-9]*, connection attempt failed: SocketException: The function requested is not supported/;
+        } else if (implementation === "apple") {
+            expectedRegex =
+                /Error: couldn't connect to server .*:[0-9]*, connection attempt failed: SocketException: Secure.Transport: bad protocol version/;
+        } else {
+            throw Error("Unrecognized TLS implementation!");
+        }
 
         var md = MongoRunner.runMongod({
             nopreallocj: "",
@@ -24,20 +37,22 @@ load('jstests/ssl/libs/ssl_helpers.js');
             sslCAFile: "jstests/libs/ca.pem",
             sslPEMKeyFile: "jstests/libs/server.pem",
             sslDisabledProtocols: serverDisabledProtos,
-            waitForConnect: false,
         });
+
+        let shell;
+        let mongoOutput;
 
         assert.soon(function() {
             clearRawMongoProgramOutput();
-            let shell = runMongoProgram("mongo",
-                                        "--port",
-                                        md.port,
-                                        ...clientOptions,
-                                        "--sslDisabledProtocols",
-                                        clientDisabledProtos);
-            let mongoOutput = rawMongoProgramOutput();
+            shell = runMongoProgram("mongo",
+                                    "--port",
+                                    md.port,
+                                    ...clientOptions,
+                                    "--sslDisabledProtocols",
+                                    clientDisabledProtos);
+            mongoOutput = rawMongoProgramOutput();
             return mongoOutput.match(expectedRegex);
-        });
+        }, "Mongo shell output was as follows:\n" + mongoOutput + "\n************");
 
         MongoRunner.stopMongod(md);
     }

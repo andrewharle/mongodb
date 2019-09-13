@@ -3,6 +3,11 @@
 // NOTE: Basic write functionality is tested via the passthrough tests, this file should contain
 // *only* mongos-specific tests.
 //
+
+// Checking UUID consistency involves talking to the config server primary, but there is no config
+// server primary by the end of this test.
+TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
+
 (function() {
     "use strict";
 
@@ -26,7 +31,7 @@
 
     var coll = mongos.getCollection("foo.bar");
     assert.commandWorked(admin.runCommand({enableSharding: coll.getDB().toString()}));
-    st.ensurePrimaryShard(coll.getDB().getName(), 'shard0001');
+    st.ensurePrimaryShard(coll.getDB().getName(), st.shard1.shardName);
     assert.commandWorked(admin.runCommand({shardCollection: coll.toString(), key: {_id: 1}}));
 
     //

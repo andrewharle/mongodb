@@ -1,22 +1,25 @@
-/*    Copyright (C) 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -69,6 +72,11 @@ const BSONObj WriteConcernOptions::Default = BSONObj();
 const BSONObj WriteConcernOptions::Acknowledged(BSON("w" << W_NORMAL));
 const BSONObj WriteConcernOptions::Unacknowledged(BSON("w" << W_NONE));
 const BSONObj WriteConcernOptions::Majority(BSON("w" << WriteConcernOptions::kMajority));
+const Seconds WriteConcernOptions::kWriteConcernTimeoutSystem{15};
+const Seconds WriteConcernOptions::kWriteConcernTimeoutMigration{60};
+const Seconds WriteConcernOptions::kWriteConcernTimeoutSharding{60};
+const Seconds WriteConcernOptions::kWriteConcernTimeoutUserCommand{60};
+
 
 WriteConcernOptions::WriteConcernOptions(int numNodes, SyncMode sync, int timeout)
     : WriteConcernOptions(numNodes, sync, Milliseconds(timeout)) {}
@@ -93,7 +101,6 @@ Status WriteConcernOptions::parse(const BSONObj& obj) {
     BSONElement jEl;
     BSONElement fsyncEl;
     BSONElement wEl;
-
 
     for (auto e : obj) {
         const auto fieldName = e.fieldNameStringData();
@@ -140,8 +147,10 @@ Status WriteConcernOptions::parse(const BSONObj& obj) {
 
     if (wEl.isNumber()) {
         wNumNodes = wEl.numberInt();
+        usedDefaultW = false;
     } else if (wEl.type() == String) {
         wMode = wEl.valuestrsafe();
+        usedDefaultW = false;
     } else if (wEl.eoo() || wEl.type() == jstNULL || wEl.type() == Undefined) {
         wNumNodes = 1;
     } else {
@@ -152,9 +161,10 @@ Status WriteConcernOptions::parse(const BSONObj& obj) {
 }
 
 StatusWith<WriteConcernOptions> WriteConcernOptions::extractWCFromCommand(
-    const BSONObj& cmdObj, const std::string& dbName, const WriteConcernOptions& defaultWC) {
+    const BSONObj& cmdObj, const WriteConcernOptions& defaultWC) {
     WriteConcernOptions writeConcern = defaultWC;
     writeConcern.usedDefault = true;
+    writeConcern.usedDefaultW = true;
     if (writeConcern.wNumNodes == 0 && writeConcern.wMode.empty()) {
         writeConcern.wNumNodes = 1;
     }
@@ -212,10 +222,6 @@ BSONObj WriteConcernOptions::toBSON() const {
 
 bool WriteConcernOptions::shouldWaitForOtherNodes() const {
     return !wMode.empty() || wNumNodes > 1;
-}
-
-bool WriteConcernOptions::validForConfigServers() const {
-    return wMode == kMajority;
 }
 
 }  // namespace mongo

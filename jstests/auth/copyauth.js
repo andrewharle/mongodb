@@ -4,6 +4,11 @@
 TestData.authMechanism = "SCRAM-SHA-1";                        // SERVER-11428
 DB.prototype._defaultAuthenticationMechanism = "SCRAM-SHA-1";  // SERVER-11428
 
+// We turn off gossiping the mongo shell's clusterTime because this test connects to replica sets
+// and sharded clusters as a user other than __system. Attempting to advance the clusterTime while
+// it has been signed with a dummy key results in an authorization error.
+TestData.skipGossipingClusterTime = true;
+
 var baseName = "jstests_clone_copyauth";
 
 /*
@@ -27,6 +32,7 @@ var baseName = "jstests_clone_copyauth";
  * Member functions:
  *
  * stop() - stop and cleanup whatever nodes the helper spawned when it was created.
+ * @tags: [requires_replication, requires_sharding]
  */
 function ClusterSpawnHelper(clusterType, startWithAuth, startWithTransitionToAuth) {
     var singleNodeConfig = {};
@@ -78,7 +84,7 @@ function ClusterSpawnHelper(clusterType, startWithAuth, startWithTransitionToAut
         } else if (clusterType === "repl") {
             replSetTest.stopSet();
         } else {
-            MongoRunner.stopMongod(this.conn.port);
+            MongoRunner.stopMongod(this.conn);
         }
     };
 }
@@ -188,6 +194,10 @@ function copydbBetweenClustersTest(configObj) {
     }
     assert.eq(1, target.conn.getDB(baseName)[baseName].count());
     assert.eq(1, target.conn.getDB(baseName)[baseName].findOne().i);
+
+    if (configObj.isTargetUsingAuth) {
+        target.conn.getDB("admin").logout();
+    }
 
     // 4. Do any necessary cleanup
     source.stop();

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -247,6 +249,8 @@ QuerySolutionNode* CollectionScanNode::clone() const {
     copy->tailable = this->tailable;
     copy->direction = this->direction;
     copy->maxScan = this->maxScan;
+    copy->shouldTrackLatestOplogTimestamp = this->shouldTrackLatestOplogTimestamp;
+    copy->shouldWaitForOplogVisibility = this->shouldWaitForOplogVisibility;
 
     return copy;
 }
@@ -538,9 +542,9 @@ void IndexScanNode::appendToString(mongoutils::str::stream* ss, int indent) cons
 }
 
 bool IndexScanNode::hasField(const string& field) const {
-    // There is no covering in a multikey index because you don't know whether or not the field
-    // in the key was extracted from an array in the original document.
-    if (index.multikey) {
+    // The index is multikey but does not have any path-level multikeyness information. Such indexes
+    // can never provide covering.
+    if (index.multikey && index.multikeyPaths.empty()) {
         return false;
     }
 
@@ -559,11 +563,17 @@ bool IndexScanNode::hasField(const string& field) const {
         }
     }
 
-    BSONObjIterator it(index.keyPattern);
-    while (it.more()) {
-        if (field == it.next().fieldName()) {
+    size_t keyPatternFieldIndex = 0;
+    for (auto&& elt : index.keyPattern) {
+        // The index can provide this field if the requested path appears in the index key pattern,
+        // and that path has no multikey components. We can't cover a field that has multikey
+        // components because the index keys contain individual array elements, and we can't
+        // reconstitute the array from the index keys in the right order.
+        if (field == elt.fieldName() &&
+            (!index.multikey || index.multikeyPaths[keyPatternFieldIndex].empty())) {
             return true;
         }
+        ++keyPatternFieldIndex;
     }
     return false;
 }
@@ -605,8 +615,8 @@ std::set<StringData> IndexScanNode::getFieldsWithStringBounds(const IndexBounds&
     if (bounds.isSimpleRange) {
         // With a simple range, the only cases we can say for sure do not contain strings
         // are those with point bounds.
-        BSONObjIterator startKeyIterator = bounds.startKey.begin();
-        BSONObjIterator endKeyIterator = bounds.endKey.begin();
+        BSONObjIterator startKeyIterator(bounds.startKey);
+        BSONObjIterator endKeyIterator(bounds.endKey);
         while (keyPatternIterator.more() && startKeyIterator.more() && endKeyIterator.more()) {
             BSONElement startKey = startKeyIterator.next();
             BSONElement endKey = endKeyIterator.next();
@@ -651,8 +661,29 @@ std::set<StringData> IndexScanNode::getFieldsWithStringBounds(const IndexBounds&
     return ret;
 }
 
+namespace {
+std::set<StringData> getMultikeyFields(const BSONObj& keyPattern,
+                                       const MultikeyPaths& multikeyPaths) {
+    std::set<StringData> multikeyFields;
+    size_t i = 0;
+    for (auto&& elem : keyPattern) {
+        if (!multikeyPaths[i].empty()) {
+            multikeyFields.insert(elem.fieldNameStringData());
+        }
+        ++i;
+    }
+    return multikeyFields;
+}
+}  // namespace
+
 void IndexScanNode::computeProperties() {
     _sorts.clear();
+
+    // If the index is multikey but does not have path-level multikey metadata, then this index
+    // cannot provide any sorts.
+    if (index.multikey && index.multikeyPaths.empty()) {
+        return;
+    }
 
     BSONObj sortPattern = QueryPlannerAnalysis::getSortPattern(index.keyPattern);
     if (direction == -1) {
@@ -727,6 +758,27 @@ void IndexScanNode::computeProperties() {
 
             if (!matched) {
                 sortsIt++;
+            }
+        }
+    }
+
+    // We cannot provide a sort which involves a multikey field. Prune such sort orders, if the
+    // index is multikey.
+    if (index.multikey) {
+        multikeyFields = getMultikeyFields(index.keyPattern, index.multikeyPaths);
+        for (auto sortsIt = _sorts.begin(); sortsIt != _sorts.end();) {
+            bool foundMultikeyField = false;
+            for (auto&& elt : *sortsIt) {
+                if (multikeyFields.find(elt.fieldNameStringData()) != multikeyFields.end()) {
+                    foundMultikeyField = true;
+                    break;
+                }
+            }
+
+            if (foundMultikeyField) {
+                sortsIt = _sorts.erase(sortsIt);
+            } else {
+                ++sortsIt;
             }
         }
     }
@@ -838,8 +890,6 @@ void SortKeyGeneratorNode::appendToString(mongoutils::str::stream* ss, int inden
     *ss << "SORT_KEY_GENERATOR\n";
     addIndent(ss, indent + 1);
     *ss << "sortSpec = " << sortSpec.toString() << '\n';
-    addIndent(ss, indent + 1);
-    *ss << "queryObj = " << queryObj.toString() << '\n';
     addCommon(ss, indent);
     addIndent(ss, indent + 1);
     *ss << "Child:" << '\n';
@@ -849,7 +899,6 @@ void SortKeyGeneratorNode::appendToString(mongoutils::str::stream* ss, int inden
 QuerySolutionNode* SortKeyGeneratorNode::clone() const {
     SortKeyGeneratorNode* copy = new SortKeyGeneratorNode();
     cloneBaseData(copy);
-    copy->queryObj = this->queryObj;
     copy->sortSpec = this->sortSpec;
     return copy;
 }

@@ -1,26 +1,27 @@
 // heap_record_store_btree.cpp
 
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
- *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -42,7 +43,7 @@
 
 namespace mongo {
 
-RecordData HeapRecordStoreBtree::dataFor(OperationContext* txn, const RecordId& loc) const {
+RecordData HeapRecordStoreBtree::dataFor(OperationContext* opCtx, const RecordId& loc) const {
     Records::const_iterator it = _records.find(loc);
     invariant(it != _records.end());
     const MmapV1RecordHeader& rec = it->second;
@@ -50,7 +51,7 @@ RecordData HeapRecordStoreBtree::dataFor(OperationContext* txn, const RecordId& 
     return RecordData(rec.data.get(), rec.dataSize);
 }
 
-bool HeapRecordStoreBtree::findRecord(OperationContext* txn,
+bool HeapRecordStoreBtree::findRecord(OperationContext* opCtx,
                                       const RecordId& loc,
                                       RecordData* out) const {
     Records::const_iterator it = _records.find(loc);
@@ -61,27 +62,26 @@ bool HeapRecordStoreBtree::findRecord(OperationContext* txn,
     return true;
 }
 
-void HeapRecordStoreBtree::deleteRecord(OperationContext* txn, const RecordId& loc) {
+void HeapRecordStoreBtree::deleteRecord(OperationContext* opCtx, const RecordId& loc) {
     invariant(_records.erase(loc) == 1);
 }
 
-StatusWith<RecordId> HeapRecordStoreBtree::insertRecord(OperationContext* txn,
-                                                        const char* data,
-                                                        int len,
-                                                        bool enforceQuota) {
+StatusWith<RecordId> HeapRecordStoreBtree::insertRecord(
+    OperationContext* opCtx, const char* data, int len, Timestamp, bool enforceQuota) {
     MmapV1RecordHeader rec(len);
     memcpy(rec.data.get(), data, len);
 
     const RecordId loc = allocateLoc();
     _records[loc] = rec;
 
-    HeapRecordStoreBtreeRecoveryUnit::notifyInsert(txn, this, loc);
+    HeapRecordStoreBtreeRecoveryUnit::notifyInsert(opCtx, this, loc);
 
     return StatusWith<RecordId>(loc);
 }
 
-Status HeapRecordStoreBtree::insertRecordsWithDocWriter(OperationContext* txn,
+Status HeapRecordStoreBtree::insertRecordsWithDocWriter(OperationContext* opCtx,
                                                         const DocWriter* const* docs,
+                                                        const Timestamp*,
                                                         size_t nDocs,
                                                         RecordId* idsOut) {
     // This class is only for unit tests of the mmapv1 btree code and this is how it is called.
@@ -96,7 +96,7 @@ Status HeapRecordStoreBtree::insertRecordsWithDocWriter(OperationContext* txn,
     _records[loc] = rec;
     *idsOut = loc;
 
-    HeapRecordStoreBtreeRecoveryUnit::notifyInsert(txn, this, loc);
+    HeapRecordStoreBtreeRecoveryUnit::notifyInsert(opCtx, this, loc);
 
     return Status::OK();
 }
@@ -111,7 +111,7 @@ RecordId HeapRecordStoreBtree::allocateLoc() {
     return dl;
 }
 
-Status HeapRecordStoreBtree::touch(OperationContext* txn, BSONObjBuilder* output) const {
+Status HeapRecordStoreBtree::touch(OperationContext* opCtx, BSONObjBuilder* output) const {
     // not currently called from the tests, but called from btree_logic.h
     return Status::OK();
 }

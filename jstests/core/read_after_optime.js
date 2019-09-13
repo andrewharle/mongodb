@@ -10,5 +10,5 @@
     assert.commandFailedWithCode(
         db.runCommand(
             {find: 'user', filter: {x: 1}, readConcern: {afterOpTime: {ts: futureOpTime, t: 0}}}),
-        ErrorCodes.NotAReplicaSet);
+        [ErrorCodes.NotAReplicaSet, ErrorCodes.NotImplemented]);
 })();

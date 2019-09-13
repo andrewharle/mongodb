@@ -3,7 +3,7 @@
     var s = new ShardingTest({name: "features1", shards: 2, mongos: 1});
 
     s.adminCommand({enablesharding: "test"});
-    s.ensurePrimaryShard('test', 'shard0001');
+    s.ensurePrimaryShard('test', s.shard1.shardName);
 
     // ---- can't shard system namespaces ----
 
@@ -237,6 +237,12 @@
     r = db.getMongo().getDBs();
     assert.eq(3, r.databases.length, tojson(r));
     assert.eq("number", typeof(r.totalSize), "listDatabases 3 : " + tojson(r));
+
+    // --- flushRouterconfig ---
+    assert.commandWorked(s.s0.adminCommand({flushRouterConfig: 1}));
+    assert.commandWorked(s.s0.adminCommand({flushRouterConfig: true}));
+    assert.commandWorked(s.s0.adminCommand({flushRouterConfig: 'TestDB'}));
+    assert.commandWorked(s.s0.adminCommand({flushRouterConfig: 'TestDB.TestColl'}));
 
     s.stop();
 

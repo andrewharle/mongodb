@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -36,9 +38,10 @@
 #include "mongo/base/data_type_endian.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/bson/bsonobjbuilder.h"
+#include "mongo/rpc/message.h"
 #include "mongo/transport/message_compressor_registry.h"
+#include "mongo/transport/session.h"
 #include "mongo/util/log.h"
-#include "mongo/util/net/message.h"
 
 namespace mongo {
 namespace {
@@ -77,6 +80,9 @@ private:
         return sw.getValue();
     }
 };
+
+const transport::Session::Decoration<MessageCompressorManager> getForSession =
+    transport::Session::declareDecoration<MessageCompressorManager>();
 }  // namespace
 
 MessageCompressorManager::MessageCompressorManager()
@@ -85,11 +91,18 @@ MessageCompressorManager::MessageCompressorManager()
 MessageCompressorManager::MessageCompressorManager(MessageCompressorRegistry* factory)
     : _registry{factory} {}
 
-StatusWith<Message> MessageCompressorManager::compressMessage(const Message& msg) {
-    if (_negotiated.size() == 0) {
+StatusWith<Message> MessageCompressorManager::compressMessage(
+    const Message& msg, const MessageCompressorId* compressorId) {
+
+    MessageCompressorBase* compressor = nullptr;
+    if (compressorId) {
+        compressor = _registry->getCompressor(*compressorId);
+        invariant(compressor);
+    } else if (!_negotiated.empty()) {
+        compressor = _negotiated[0];
+    } else {
         return {msg};
     }
-    auto compressor = _negotiated[0];
 
     LOG(3) << "Compressing message with " << compressor->getName();
 
@@ -129,7 +142,8 @@ StatusWith<Message> MessageCompressorManager::compressMessage(const Message& msg
     return {Message(outputMessageBuffer)};
 }
 
-StatusWith<Message> MessageCompressorManager::decompressMessage(const Message& msg) {
+StatusWith<Message> MessageCompressorManager::decompressMessage(const Message& msg,
+                                                                MessageCompressorId* compressorId) {
     auto inputHeader = msg.header();
     ConstDataRangeCursor input(inputHeader.data(), inputHeader.data() + inputHeader.dataLen());
     if (input.length() < CompressionHeader::size()) {
@@ -142,6 +156,12 @@ StatusWith<Message> MessageCompressorManager::decompressMessage(const Message& m
         return {ErrorCodes::InternalError,
                 "Compression algorithm specified in message is not available"};
     }
+
+    if (compressorId) {
+        *compressorId = compressor->getId();
+    }
+
+    LOG(3) << "Decompressing message with " << compressor->getName();
 
     size_t bufferSize = compressionHeader.uncompressedSize + MsgData::MsgDataHeaderSize;
     if (bufferSize > MaxMessageSizeBytes) {
@@ -192,7 +212,7 @@ void MessageCompressorManager::clientBegin(BSONObjBuilder* output) {
 
 void MessageCompressorManager::clientFinish(const BSONObj& input) {
     auto elem = input.getField("compression");
-    LOG(3) << "Finishing client-side compreession negotiation";
+    LOG(3) << "Finishing client-side compression negotiation";
 
     // We've just called clientBegin, so the list of compressors should be empty.
     invariant(_negotiated.empty());
@@ -231,6 +251,8 @@ void MessageCompressorManager::serverNegotiate(const BSONObj& input, BSONObjBuil
                 sub.append(algo->getName());
             }
             sub.doneFast();
+        } else {
+            LOG(3) << "Compression negotiation not requested by client";
         }
         return;
     }
@@ -241,6 +263,12 @@ void MessageCompressorManager::serverNegotiate(const BSONObj& input, BSONObjBuil
 
     // First we go through all the compressor names that the client has requested support for
     BSONObj theirObj = elem.Obj();
+
+    if (!theirObj.nFields()) {
+        LOG(3) << "No compressors provided";
+        return;
+    }
+
     for (const auto& elem : theirObj) {
         MessageCompressorBase* cur;
         auto curName = elem.checkAndGetStringData();
@@ -262,7 +290,14 @@ void MessageCompressorManager::serverNegotiate(const BSONObj& input, BSONObjBuil
             sub.append(algo->getName());
         }
         sub.doneFast();
+    } else {
+        LOG(3) << "Could not agree on compressor to use";
     }
+}
+
+MessageCompressorManager& MessageCompressorManager::forSession(
+    const transport::SessionHandle& session) {
+    return getForSession(session.get());
 }
 
 }  // namespace mongo

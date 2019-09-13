@@ -23,10 +23,29 @@
             },
             getReadPrefMode: function() {
                 return "secondaryPreferred";
-            }
+            },
+            getMinWireVersion: function() {
+                return mongo.getMinWireVersion();
+            },
+            getMaxWireVersion: function() {
+                return mongo.getMaxWireVersion();
+            },
+            isReplicaSetMember: function() {
+                return mongo.isReplicaSetMember();
+            },
+            isMongos: function() {
+                return mongo.isMongos();
+            },
+            isCausalConsistency: function() {
+                return false;
+            },
+            getClusterTime: function() {
+                return mongo.getClusterTime();
+            },
         };
 
         db._mongo = mockMongo;
+        db._session = new _DummyDriverSession(mockMongo);
 
         // this query should not get a read pref
         t.aggregate([{$sort: {"x": 1}}, {$out: "foo"}]);
@@ -43,5 +62,6 @@
         assert(commandsRan[0].cmd.hasOwnProperty("$readPreference"));
     } finally {
         db._mongo = mongo;
+        db._session = new _DummyDriverSession(mongo);
     }
 })();

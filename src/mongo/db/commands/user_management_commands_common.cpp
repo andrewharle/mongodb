@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -57,7 +59,7 @@ void redactPasswordData(mutablebson::Element parent) {
     const auto pwdFieldName = "pwd"_sd;
     for (mmb::Element pwdElement = mmb::findFirstChildNamed(parent, pwdFieldName); pwdElement.ok();
          pwdElement = mmb::findElementNamed(pwdElement.rightSibling(), pwdFieldName)) {
-        pwdElement.setValueString("xxx");
+        pwdElement.setValueString("xxx").transitional_ignore();
     }
 }
 
@@ -110,6 +112,20 @@ Status checkAuthorizedToRevokePrivileges(AuthorizationSession* authzSession,
     return Status::OK();
 }
 
+Status checkAuthorizedToSetRestrictions(AuthorizationSession* authzSession,
+                                        bool hasAuthRestriction,
+                                        StringData dbname) {
+    if (hasAuthRestriction) {
+        if (!authzSession->isAuthorizedForActionsOnResource(
+                ResourcePattern::forDatabaseName(dbname),
+                ActionType::setAuthenticationRestriction)) {
+            return Status(ErrorCodes::Unauthorized, "Unauthorized");
+        }
+    }
+
+    return Status::OK();
+}
+
 Status checkAuthForCreateUserCommand(Client* client,
                                      const std::string& dbname,
                                      const BSONObj& cmdObj) {
@@ -127,7 +143,18 @@ Status checkAuthForCreateUserCommand(Client* client,
                                     << args.userName.getDB());
     }
 
-    return checkAuthorizedToGrantRoles(authzSession, args.roles);
+    status = checkAuthorizedToGrantRoles(authzSession, args.roles);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.userName.getDB());
+    if (!status.isOK()) {
+        return status;
+    }
+
+    return Status::OK();
 }
 
 Status checkAuthForUpdateUserCommand(Client* client,
@@ -140,7 +167,7 @@ Status checkAuthForUpdateUserCommand(Client* client,
         return status;
     }
 
-    if (args.hasHashedPassword) {
+    if (args.hasPassword) {
         if (!authzSession->isAuthorizedToChangeOwnPasswordAsUser(args.userName) &&
             !authzSession->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(args.userName.getDB()),
@@ -172,7 +199,16 @@ Status checkAuthForUpdateUserCommand(Client* client,
                           "authorized to revoke any role in the system");
         }
 
-        return checkAuthorizedToGrantRoles(authzSession, args.roles);
+        status = checkAuthorizedToGrantRoles(authzSession, args.roles);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.userName.getDB());
+    if (!status.isOK()) {
+        return status;
     }
 
     return Status::OK();
@@ -214,7 +250,18 @@ Status checkAuthForCreateRoleCommand(Client* client,
         return status;
     }
 
-    return checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    status = checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.roleName.getDB());
+    if (!status.isOK()) {
+        return status;
+    }
+
+    return Status::OK();
 }
 
 Status checkAuthForUpdateRoleCommand(Client* client,
@@ -241,7 +288,18 @@ Status checkAuthForUpdateRoleCommand(Client* client,
         return status;
     }
 
-    return checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    status = checkAuthorizedToGrantPrivileges(authzSession, args.privileges);
+    if (!status.isOK()) {
+        return status;
+    }
+
+    status = checkAuthorizedToSetRestrictions(
+        authzSession, static_cast<bool>(args.authenticationRestrictions), args.roleName.getDB());
+    if (!status.isOK()) {
+        return status;
+    }
+
+    return Status::OK();
 }
 
 Status checkAuthForGrantRolesToRoleCommand(Client* client,
@@ -363,12 +421,19 @@ Status checkAuthForUsersInfoCommand(Client* client,
         return status;
     }
 
-    if (args.allForDB) {
+    if (args.target == auth::UsersInfoArgs::Target::kDB) {
         if (!authzSession->isAuthorizedForActionsOnResource(
                 ResourcePattern::forDatabaseName(dbname), ActionType::viewUser)) {
             return Status(ErrorCodes::Unauthorized,
                           str::stream() << "Not authorized to view users from the " << dbname
                                         << " database");
+        }
+    } else if (args.target == auth::UsersInfoArgs::Target::kGlobal) {
+        if (!authzSession->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
+                                                            ActionType::viewUser)) {
+            return Status(ErrorCodes::Unauthorized,
+                          str::stream() << "Not authorized to view users from all"
+                                        << " databases");
         }
     } else {
         for (size_t i = 0; i < args.userNames.size(); ++i) {
@@ -504,15 +569,6 @@ Status checkAuthForMergeAuthzCollectionsCommand(Client* client, const BSONObj& c
             ActionType::find)) {
         return Status(ErrorCodes::Unauthorized,
                       str::stream() << "Not authorized to read " << args.rolesCollName);
-    }
-    return Status::OK();
-}
-
-Status checkAuthForAuthSchemaUpgradeCommand(Client* client) {
-    AuthorizationSession* authzSession = AuthorizationSession::get(client);
-    if (!authzSession->isAuthorizedForActionsOnResource(ResourcePattern::forClusterResource(),
-                                                        ActionType::authSchemaUpgrade)) {
-        return Status(ErrorCodes::Unauthorized, "Not authorized to run authSchemaUpgrade command.");
     }
     return Status::OK();
 }

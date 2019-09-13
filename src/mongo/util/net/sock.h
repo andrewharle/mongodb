@@ -1,30 +1,33 @@
 // @file sock.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -61,22 +64,12 @@ namespace mongo {
 
 #ifdef MONGO_CONFIG_SSL
 class SSLManagerInterface;
-class SSLConnection;
+class SSLConnectionInterface;
 #endif
 struct SSLPeerInfo;
 
 extern const int portSendFlags;
 extern const int portRecvFlags;
-
-const int SOCK_FAMILY_UNKNOWN_ERROR = 13078;
-
-void setSocketKeepAliveParams(int sock,
-                              unsigned int maxKeepIdleSecs = 300,
-                              unsigned int maxKeepIntvlSecs = 300);
-void disableNagle(int sock);
-
-// Generate a string representation for getaddrinfo return codes
-std::string getAddrInfoStrError(int code);
 
 #if !defined(_WIN32)
 
@@ -88,27 +81,8 @@ typedef int SOCKET;
 
 #endif  // _WIN32
 
-std::string makeUnixSockPath(int port);
-
-// If an ip address is passed in, just return that.  If a hostname is passed
-// in, look up its ip and return that.  Returns "" on failure.
-std::string hostbyname(const char* hostname);
-
-void enableIPv6(bool state = true);
-bool IPv6Enabled();
-void setSockTimeouts(int sock, double secs);
-
-/** this is not cache and does a syscall */
-std::string getHostName();
-
-/** this is cached, so if changes during the process lifetime
- * will be stale */
-std::string getHostNameCached();
-
-std::string prettyHostName();
-
 /**
- * thin wrapped around file descriptor and system calls
+ * thin wrapper around file descriptor and system calls
  * todo: ssl
  */
 class Socket {
@@ -251,7 +225,7 @@ private:
     /** raw recv, same semantics as ::recv */
     int _recv(char* buf, int max);
 
-    int _fd;
+    SOCKET _fd;
     uint64_t _fdCreationMicroSec;
     SockAddr _local;
     SockAddr _remote;
@@ -262,7 +236,7 @@ private:
     time_t _lastValidityCheckAtSecs;
 
 #ifdef MONGO_CONFIG_SSL
-    std::unique_ptr<SSLConnection> _sslConnection;
+    std::unique_ptr<SSLConnectionInterface> _sslConnection;
     SSLManagerInterface* _sslManager;
 #endif
     logger::LogSeverity _logLevel;  // passed to log() when logging errors
@@ -270,6 +244,5 @@ private:
     /** true until the first packet has been received or an outgoing connect has been made */
     bool _awaitingHandshake;
 };
-
 
 }  // namespace mongo

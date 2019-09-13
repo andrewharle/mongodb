@@ -1,4 +1,8 @@
+# -*- mode: python; -*-
+
 Import("env")
+
+env = env.Clone()
 
 env.Library(
     target='storage_devnull_core',
@@ -7,7 +11,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/db/storage/ephemeral_for_test/ephemeral_for_test_record_store',
-        '$BUILD_DIR/mongo/db/storage/kv/kv_storage_engine',
+        '$BUILD_DIR/mongo/db/storage/kv/kv_prefix',
     ],
 )
 
@@ -18,5 +22,9 @@ env.Library(
     ],
     LIBDEPS=[
         'storage_devnull_core',
+        '$BUILD_DIR/mongo/db/storage/kv/kv_engine',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/db/storage/storage_engine_common',
     ],
 )

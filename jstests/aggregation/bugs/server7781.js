@@ -1,4 +1,8 @@
 // SERVER-7781 $geoNear pipeline stage
+// @tags: [
+//   requires_sharding,
+//   requires_spawning_own_processes,
+// ]
 (function() {
     'use strict';
 
@@ -143,7 +147,7 @@
         delete aggCmd.$geoNear.num;
         var cmdRes = db[coll].runCommand("aggregate", {pipeline: [aggCmd], cursor: {batchSize: 0}});
         assert.commandWorked(cmdRes);
-        var cmdCursor = new DBCommandCursor(db[coll].getMongo(), cmdRes, 0);
+        var cmdCursor = new DBCommandCursor(db, cmdRes, 0);
         checkOutput(db.runCommand(geoCmd), cmdCursor, 70);
     }
 
@@ -152,7 +156,7 @@
 
     var sharded = new ShardingTest({shards: 3, mongos: 1});
     assert.commandWorked(sharded.s0.adminCommand({enablesharding: "test"}));
-    sharded.ensurePrimaryShard('test', 'shard0001');
+    sharded.ensurePrimaryShard('test', sharded.shard1.shardName);
 
     test(sharded.getDB('test'), true, '2d');
     test(sharded.getDB('test'), true, '2dsphere');

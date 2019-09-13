@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 10gen Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -30,11 +32,11 @@
 
 #include "mongo/bson/bsontypes.h"
 #include "mongo/bson/json.h"
-#include "mongo/db/matcher/extensions_callback_disallow_extensions.h"
 #include "mongo/db/query/collation/collator_interface_mock.h"
 #include "mongo/db/query/index_bounds_builder.h"
 #include "mongo/db/query/index_entry.h"
 #include "mongo/db/query/query_solution.h"
+#include "mongo/db/query/query_test_service_context.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/unittest/unittest.h"
 
@@ -686,13 +688,17 @@ TEST(QuerySolutionTest, IndexScanNodeHasFieldExcludesSimpleBoundsStringFieldWhen
 
 std::unique_ptr<ParsedProjection> createParsedProjection(const BSONObj& query,
                                                          const BSONObj& projObj) {
+    QueryTestServiceContext serviceCtx;
+    auto opCtx = serviceCtx.makeOperationContext();
     const CollatorInterface* collator = nullptr;
+    const boost::intrusive_ptr<ExpressionContext> expCtx(
+        new ExpressionContext(opCtx.get(), collator));
     StatusWithMatchExpression queryMatchExpr =
-        MatchExpressionParser::parse(query, ExtensionsCallbackDisallowExtensions(), collator);
+        MatchExpressionParser::parse(query, std::move(expCtx));
     ASSERT(queryMatchExpr.isOK());
     ParsedProjection* out = nullptr;
-    Status status = ParsedProjection::make(
-        projObj, queryMatchExpr.getValue().get(), &out, ExtensionsCallbackDisallowExtensions());
+    Status status =
+        ParsedProjection::make(opCtx.get(), projObj, queryMatchExpr.getValue().get(), &out);
     if (!status.isOK()) {
         FAIL(mongoutils::str::stream() << "failed to parse projection " << projObj << " (query: "
                                        << query
@@ -766,6 +772,160 @@ TEST(QuerySolutionTest, ExclusionProjectionTruncatesSort) {
 
     ASSERT_EQ(proj.getSort().size(), 1U);
     ASSERT(proj.getSort().count(BSON("a" << 1)));
+}
+
+TEST(QuerySolutionTest, NonMultikeyIndexWithoutPathLevelInfoCanCoverItsFields) {
+    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
+    node->index.multikey = false;
+    node->index.multikeyPaths = MultikeyPaths{};
+    ASSERT_TRUE(node->hasField("a"));
+    ASSERT_TRUE(node->hasField("b.c.d"));
+    ASSERT_FALSE(node->hasField("b.c"));
+    ASSERT_FALSE(node->hasField("b"));
+    ASSERT_FALSE(node->hasField("e"));
+}
+
+TEST(QuerySolutionTest, NonMultikeyIndexWithPathLevelInfoCanCoverItsFields) {
+    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
+    node->index.multikey = false;
+    node->index.multikeyPaths = MultikeyPaths{{}, {}};
+    ASSERT_TRUE(node->hasField("a"));
+    ASSERT_TRUE(node->hasField("b.c.d"));
+    ASSERT_FALSE(node->hasField("b.c"));
+    ASSERT_FALSE(node->hasField("b"));
+    ASSERT_FALSE(node->hasField("e"));
+}
+
+TEST(QuerySolutionTest, MultikeyIndexWithoutPathLevelInfoCannotCoverAnyFields) {
+    auto node = stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1)));
+    node->index.multikey = true;
+    node->index.multikeyPaths = MultikeyPaths{};
+    ASSERT_FALSE(node->hasField("a"));
+    ASSERT_FALSE(node->hasField("b.c.d"));
+    ASSERT_FALSE(node->hasField("b.c"));
+    ASSERT_FALSE(node->hasField("b"));
+    ASSERT_FALSE(node->hasField("e"));
+}
+
+TEST(QuerySolutionTest, MultikeyIndexWithPathLevelInfoCanCoverNonMultikeyFields) {
+    auto node =
+        stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1)));
+
+    // Add metadata indicating that "b" is multikey.
+    node->index.multikey = true;
+    node->index.multikeyPaths = MultikeyPaths{{}, {0U}, {}};
+
+    ASSERT_TRUE(node->hasField("a"));
+    ASSERT_FALSE(node->hasField("b"));
+    ASSERT_FALSE(node->hasField("b.c"));
+    ASSERT_TRUE(node->hasField("c"));
+}
+
+TEST(QuerySolutionTest, MultikeyIndexCannotCoverFieldWithAnyMultikeyPathComponent) {
+    auto node =
+        stdx::make_unique<IndexScanNode>(IndexEntry(BSON("a" << 1 << "b.c.d" << 1 << "e" << 1)));
+
+    // Add metadata indicating that "b.c" is multikey.
+    node->index.multikey = true;
+    node->index.multikeyPaths = MultikeyPaths{{}, {1U}, {}};
+
+    ASSERT_TRUE(node->hasField("a"));
+    ASSERT_FALSE(node->hasField("b"));
+    ASSERT_FALSE(node->hasField("b.c"));
+    ASSERT_FALSE(node->hasField("b.c.d"));
+    ASSERT_TRUE(node->hasField("e"));
+}
+
+TEST(QuerySolutionTest, MultikeyIndexWithoutPathLevelInfoCannotProvideAnySorts) {
+    IndexScanNode node{IndexEntry(BSON("a" << 1 << "b" << 1 << "c" << 1))};
+    node.index.multikey = true;
+
+    {
+        OrderedIntervalList oil{};
+        oil.name = "a";
+        oil.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+        node.bounds.fields.push_back(oil);
+    }
+
+    for (auto&& name : {"b"_sd, "c"_sd}) {
+        OrderedIntervalList oil{};
+        oil.name = name.toString();
+        oil.intervals.push_back(IndexBoundsBuilder::makeRangeInterval(
+            BSON("" << 1 << "" << 2), BoundInclusion::kIncludeBothStartAndEndKeys));
+        node.bounds.fields.push_back(oil);
+    }
+
+    node.computeProperties();
+    ASSERT(node.getSort().empty());
+}
+
+TEST(QuerySolutionTest, SimpleRangeAllEqualExcludesFieldWithMultikeyComponent) {
+    IndexScanNode node{
+        IndexEntry(BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1))};
+    node.bounds.isSimpleRange = true;
+    node.bounds.startKey = BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1);
+    node.bounds.endKey = BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1);
+
+    // Add metadata indicating that "c.z" is multikey.
+    node.index.multikey = true;
+    node.index.multikeyPaths = MultikeyPaths{{}, {}, {1U}, {}, {}};
+
+    node.computeProperties();
+
+    ASSERT_EQUALS(node.getSort().size(), 4U);
+    ASSERT(node.getSort().count(BSON("a" << 1 << "b" << 1)));
+    ASSERT(node.getSort().count(BSON("a" << 1)));
+    ASSERT(node.getSort().count(BSON("d" << 1 << "e" << 1)));
+    ASSERT(node.getSort().count(BSON("e" << 1)));
+}
+
+TEST(QuerySolutionTest, MultikeyFieldsEmptyWhenIndexIsNotMultikey) {
+    IndexScanNode node{IndexEntry(BSON("a.b" << 1 << "c.d" << 1))};
+    node.index.multikey = false;
+    node.index.multikeyPaths = MultikeyPaths{};
+    node.computeProperties();
+    ASSERT(node.multikeyFields.empty());
+}
+
+TEST(QuerySolutionTest, MultikeyFieldsEmptyWhenIndexHasNoMultikeynessMetadata) {
+    IndexScanNode node{IndexEntry(BSON("a.b" << 1 << "c.d" << 1))};
+    node.index.multikey = true;
+    node.index.multikeyPaths = MultikeyPaths{};
+    node.computeProperties();
+    ASSERT(node.multikeyFields.empty());
+}
+
+TEST(QuerySolutionTest, MultikeyFieldsChosenCorrectlyWhenIndexHasPathLevelMultikeyMetadata) {
+    IndexScanNode node{IndexEntry(BSON("a.b" << 1 << "c.d" << 1 << "e.f" << 1))};
+    node.index.multikey = true;
+    node.index.multikeyPaths = MultikeyPaths{{0U}, {}, {0U, 1U}};
+    node.computeProperties();
+    ASSERT_EQ(node.multikeyFields.size(), 2U);
+    ASSERT(node.multikeyFields.count("a.b"));
+    ASSERT(node.multikeyFields.count("e.f"));
+}
+
+TEST(QuerySolutionTest, NonSimpleRangeAllEqualExcludesFieldWithMultikeyComponent) {
+    IndexScanNode node{
+        IndexEntry(BSON("a" << 1 << "b" << 1 << "c.z" << 1 << "d" << 1 << "e" << 1))};
+    // Add metadata indicating that "c.z" is multikey.
+    node.index.multikey = true;
+    node.index.multikeyPaths = MultikeyPaths{{}, {}, {1U}, {}, {}};
+
+    for (auto&& name : {"a"_sd, "b"_sd, "c.z"_sd, "d"_sd, "e"_sd}) {
+        OrderedIntervalList oil{};
+        oil.name = name.toString();
+        oil.intervals.push_back(IndexBoundsBuilder::makePointInterval(BSON("" << 1)));
+        node.bounds.fields.push_back(oil);
+    }
+
+    node.computeProperties();
+
+    ASSERT_EQUALS(node.getSort().size(), 4U);
+    ASSERT(node.getSort().count(BSON("a" << 1 << "b" << 1)));
+    ASSERT(node.getSort().count(BSON("a" << 1)));
+    ASSERT(node.getSort().count(BSON("d" << 1 << "e" << 1)));
+    ASSERT(node.getSort().count(BSON("e" << 1)));
 }
 
 }  // namespace

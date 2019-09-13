@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB, Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -54,7 +56,8 @@ void InclusionNode::optimize() {
     }
 }
 
-void InclusionNode::serialize(MutableDocument* output, bool explain) const {
+void InclusionNode::serialize(MutableDocument* output,
+                              boost::optional<ExplainOptions::Verbosity> explain) const {
     // Always put "_id" first if it was included (implicitly or explicitly).
     if (_inclusions.find("_id") != _inclusions.end()) {
         output->addField("_id", Value(true));
@@ -77,7 +80,7 @@ void InclusionNode::serialize(MutableDocument* output, bool explain) const {
         } else {
             auto expressionIt = _expressions.find(field);
             invariant(expressionIt != _expressions.end());
-            output->addField(field, expressionIt->second->serialize(explain));
+            output->addField(field, expressionIt->second->serialize(static_cast<bool>(explain)));
         }
     }
 }
@@ -102,7 +105,7 @@ void InclusionNode::addDependencies(DepsTracker* deps) const {
     }
 }
 
-void InclusionNode::applyInclusions(Document inputDoc, MutableDocument* outputDoc) const {
+void InclusionNode::applyInclusions(const Document& inputDoc, MutableDocument* outputDoc) const {
     auto it = inputDoc.fieldIterator();
     while (it.more()) {
         auto fieldPair = it.next();
@@ -140,29 +143,32 @@ Value InclusionNode::applyInclusionsToValue(Value inputValue) const {
     }
 }
 
-void InclusionNode::addComputedFields(MutableDocument* outputDoc, Variables* vars) const {
+void InclusionNode::addComputedFields(MutableDocument* outputDoc, const Document& root) const {
     for (auto&& field : _orderToProcessAdditionsAndChildren) {
         auto childIt = _children.find(field);
         if (childIt != _children.end()) {
             outputDoc->setField(field,
-                                childIt->second->addComputedFields(outputDoc->peek()[field], vars));
+                                childIt->second->addComputedFields(outputDoc->peek()[field], root));
         } else {
             auto expressionIt = _expressions.find(field);
             invariant(expressionIt != _expressions.end());
-            outputDoc->setField(field, expressionIt->second->evaluate(vars));
+            outputDoc->setField(
+                field,
+                expressionIt->second->evaluate(
+                    root, &(expressionIt->second->getExpressionContext()->variables)));
         }
     }
 }
 
-Value InclusionNode::addComputedFields(Value inputValue, Variables* vars) const {
+Value InclusionNode::addComputedFields(Value inputValue, const Document& root) const {
     if (inputValue.getType() == BSONType::Object) {
         MutableDocument outputDoc(inputValue.getDocument());
-        addComputedFields(&outputDoc, vars);
+        addComputedFields(&outputDoc, root);
         return outputDoc.freezeToValue();
     } else if (inputValue.getType() == BSONType::Array) {
         std::vector<Value> values = inputValue.getArray();
         for (auto it = values.begin(); it != values.end(); ++it) {
-            *it = addComputedFields(*it, vars);
+            *it = addComputedFields(*it, root);
         }
         return Value(std::move(values));
     } else {
@@ -171,7 +177,7 @@ Value InclusionNode::addComputedFields(Value inputValue, Variables* vars) const 
             // document of all the computed values. This case represents applying a projection like
             // {"a.b": {$literal: 1}} to the document {a: 1}. This should yield {a: {b: 1}}.
             MutableDocument outputDoc;
-            addComputedFields(&outputDoc, vars);
+            addComputedFields(&outputDoc, root);
             return outputDoc.freezeToValue();
         }
         // We didn't have any expressions, so just return the missing value.
@@ -238,13 +244,29 @@ void InclusionNode::addPreservedPaths(std::set<std::string>* preservedPaths) con
     }
 }
 
+void InclusionNode::addComputedPaths(std::set<std::string>* computedPaths,
+                                     StringMap<std::string>* renamedPaths) const {
+    for (auto&& computedPair : _expressions) {
+        // The expression's path is the concatenation of the path to this inclusion node,
+        // plus the field name associated with the expression.
+        auto exprPath = FieldPath::getFullyQualifiedPath(_pathToNode, computedPair.first);
+        auto exprComputedPaths = computedPair.second->getComputedPaths(exprPath);
+        computedPaths->insert(exprComputedPaths.paths.begin(), exprComputedPaths.paths.end());
+
+        for (auto&& rename : exprComputedPaths.renames) {
+            (*renamedPaths)[rename.first] = rename.second;
+        }
+    }
+    for (auto&& childPair : _children) {
+        childPair.second->addComputedPaths(computedPaths, renamedPaths);
+    }
+}
+
 //
 // ParsedInclusionProjection
 //
 
-void ParsedInclusionProjection::parse(const boost::intrusive_ptr<ExpressionContext>& expCtx,
-                                      const BSONObj& spec,
-                                      const VariablesParseState& variablesParseState) {
+void ParsedInclusionProjection::parse(const BSONObj& spec) {
     // It is illegal to specify a projection with no output fields.
     bool atLeastOneFieldInOutput = false;
 
@@ -280,7 +302,7 @@ void ParsedInclusionProjection::parse(const boost::intrusive_ptr<ExpressionConte
             }
             case BSONType::Object: {
                 // This is either an expression, or a nested specification.
-                if (parseObjectAsExpression(expCtx, fieldName, elem.Obj(), variablesParseState)) {
+                if (parseObjectAsExpression(fieldName, elem.Obj(), _expCtx->variablesParseState)) {
                     // It was an expression.
                     break;
                 }
@@ -297,14 +319,14 @@ void ParsedInclusionProjection::parse(const boost::intrusive_ptr<ExpressionConte
                 // iteration too soon. Add the last path here.
                 child = child->addOrGetChild(remainingPath.fullPath());
 
-                parseSubObject(expCtx, elem.Obj(), variablesParseState, child);
+                parseSubObject(elem.Obj(), _expCtx->variablesParseState, child);
                 break;
             }
             default: {
                 // This is a literal value.
                 _root->addComputedField(
                     FieldPath(elem.fieldName()),
-                    Expression::parseOperand(expCtx, elem, variablesParseState));
+                    Expression::parseOperand(_expCtx, elem, _expCtx->variablesParseState));
             }
         }
     }
@@ -320,14 +342,12 @@ void ParsedInclusionProjection::parse(const boost::intrusive_ptr<ExpressionConte
             atLeastOneFieldInOutput);
 }
 
-Document ParsedInclusionProjection::applyProjection(Document inputDoc, Variables* vars) const {
+Document ParsedInclusionProjection::applyProjection(const Document& inputDoc) const {
     // All expressions will be evaluated in the context of the input document, before any
     // transformations have been applied.
-    vars->setRoot(inputDoc);
-
     MutableDocument output;
     _root->applyInclusions(inputDoc, &output);
-    _root->addComputedFields(&output, vars);
+    _root->addComputedFields(&output, inputDoc);
 
     // Always pass through the metadata.
     output.copyMetaDataFrom(inputDoc);
@@ -335,7 +355,6 @@ Document ParsedInclusionProjection::applyProjection(Document inputDoc, Variables
 }
 
 bool ParsedInclusionProjection::parseObjectAsExpression(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
     StringData pathToObject,
     const BSONObj& objSpec,
     const VariablesParseState& variablesParseState) {
@@ -344,17 +363,15 @@ bool ParsedInclusionProjection::parseObjectAsExpression(
         // field.
         invariant(objSpec.nFields() == 1);
         _root->addComputedField(pathToObject,
-                                Expression::parseExpression(expCtx, objSpec, variablesParseState));
+                                Expression::parseExpression(_expCtx, objSpec, variablesParseState));
         return true;
     }
     return false;
 }
 
-void ParsedInclusionProjection::parseSubObject(
-    const boost::intrusive_ptr<ExpressionContext>& expCtx,
-    const BSONObj& subObj,
-    const VariablesParseState& variablesParseState,
-    InclusionNode* node) {
+void ParsedInclusionProjection::parseSubObject(const BSONObj& subObj,
+                                               const VariablesParseState& variablesParseState,
+                                               InclusionNode* node) {
     for (auto elem : subObj) {
         invariant(elem.fieldName()[0] != '$');
         // Dotted paths in a sub-object have already been disallowed in
@@ -376,23 +393,39 @@ void ParsedInclusionProjection::parseSubObject(
                 // This is either an expression, or a nested specification.
                 auto fieldName = elem.fieldNameStringData().toString();
                 if (parseObjectAsExpression(
-                        expCtx,
                         FieldPath::getFullyQualifiedPath(node->getPath(), fieldName),
                         elem.Obj(),
                         variablesParseState)) {
                     break;
                 }
                 auto child = node->addOrGetChild(fieldName);
-                parseSubObject(expCtx, elem.Obj(), variablesParseState, child);
+                parseSubObject(elem.Obj(), variablesParseState, child);
                 break;
             }
             default: {
                 // This is a literal value.
-                node->addComputedField(FieldPath(elem.fieldName()),
-                                       Expression::parseOperand(expCtx, elem, variablesParseState));
+                node->addComputedField(
+                    FieldPath(elem.fieldName()),
+                    Expression::parseOperand(_expCtx, elem, variablesParseState));
             }
         }
     }
 }
+
+bool ParsedInclusionProjection::isSubsetOfProjection(const BSONObj& proj) const {
+    std::set<std::string> preservedPaths;
+    _root->addPreservedPaths(&preservedPaths);
+    for (auto&& includedField : preservedPaths) {
+        if (!proj.hasField(includedField))
+            return false;
+    }
+
+    // If the inclusion has any computed fields or renamed fields, then it's not a subset.
+    std::set<std::string> computedPaths;
+    StringMap<std::string> renamedPaths;
+    _root->addComputedPaths(&computedPaths, &renamedPaths);
+    return computedPaths.empty() && renamedPaths.empty();
+}
+
 }  // namespace parsed_aggregation_projection
 }  // namespace mongo

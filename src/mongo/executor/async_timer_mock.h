@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -62,22 +64,29 @@ public:
     /**
      * Advance current time. If the given interval is greater than or equal to the
      * time left on the timer, expire and call callbacks now.
-     *
-     * Returns true if the timer is still active, false if it has now expired.
      */
-    bool fastForward(Milliseconds time);
+    void fastForward(Milliseconds time);
 
     /**
      * Return the amount of time left on this timer.
      */
     Milliseconds timeLeft();
 
+    /**
+     * Reset the timer.
+     */
+    void expireAfter(Milliseconds expiration);
+
+    /**
+     * Returns the number of handlers on this timer.
+     */
+    int jobs();
+
 private:
     void _callAllHandlers(std::error_code ec);
-    void _expire();
 
+    stdx::mutex _mutex;
     Milliseconds _timeLeft;
-    stdx::mutex _handlersMutex;
     std::vector<AsyncTimerInterface::Handler> _handlers;
 };
 
@@ -97,6 +106,8 @@ public:
 
     void asyncWait(AsyncTimerInterface::Handler handler) override;
 
+    void expireAfter(Milliseconds expiration) override;
+
 private:
     // Unfortunate, but it makes the ownership model sane.
     std::shared_ptr<AsyncTimerMockImpl> _timer;
@@ -115,13 +126,7 @@ public:
     /**
      * Create and return a new AsyncTimerMock object.
      */
-    std::unique_ptr<AsyncTimerInterface> make(Milliseconds expiration);
-
-    /**
-     * Create and return a new AsyncTimerMock object.
-     */
-    std::unique_ptr<AsyncTimerInterface> make(asio::io_service::strand* strand,
-                                              Milliseconds expiration) override;
+    std::unique_ptr<AsyncTimerInterface> make(Milliseconds expiration) override;
 
     /**
      * Advance the current "time" and make stale timers expire.
@@ -133,8 +138,13 @@ public:
      */
     Date_t now() override;
 
+    /**
+     * Returns the number of pending jobs across all timers.
+     */
+    int jobs();
+
 private:
-    stdx::mutex _timersMutex;
+    stdx::recursive_mutex _timersMutex;
     stdx::unordered_set<std::shared_ptr<AsyncTimerMockImpl>> _timers;
     Milliseconds _curTime;
 };

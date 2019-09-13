@@ -14,7 +14,10 @@
         assert.commandWorked(res, "Failed to run the top command");
 
         let entriesInTop = Object.keys(res.totals).filter(function(ns) {
-            return ns.startsWith(topDB.getName() + ".");
+            // This filter only includes non-system collections in our test database.
+            const dbPrefix = topDB.getName() + ".";
+            const systemCollectionPrefix = "system.";
+            return ns.startsWith(dbPrefix) && !ns.startsWith(dbPrefix + systemCollectionPrefix);
         });
         let expectedEntryNames = expectedEntries.map(function(coll) {
             return coll.getFullName();
@@ -33,8 +36,8 @@
                           tojson(res.totals));
 
             // We allow an unexpected entry in top if the insert counter has been cleared. This is
-            // probably due to a background job releasing an AutoGetCollectionForRead for that
-            // collection.
+            // probably due to a background job releasing an AutoGetCollectionForReadCommand for
+            // that collection.
             entriesInTop.forEach(function(coll) {
                 if (expectedEntryNames.includes(coll)) {
                     return;

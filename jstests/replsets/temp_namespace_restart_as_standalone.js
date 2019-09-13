@@ -2,7 +2,7 @@
  * Tests that temporary collections are not dropped when a member of a replica set is started up as
  * a stand-alone mongod, i.e. without the --replSet parameter.
  *
- * @tags: [requires_persistence]
+ * @tags: [requires_persistence, requires_majority_read_concern]
  */
 (function() {
     var rst = new ReplSetTest({nodes: 2});
@@ -25,7 +25,7 @@
     assert.commandWorked(primaryDB.runCommand({
         create: "temp_collection",
         temp: true,
-        writeConcern: {w: 2, wtimeout: 60000},
+        writeConcern: {w: 2, wtimeout: ReplSetTest.kDefaultTimeoutMS},
     }));
 
     // Verify that the temporary collection exists on the primary and has temp=true.
@@ -55,7 +55,16 @@
     var secondaryNodeId = rst.getNodeId(secondaryDB.getMongo());
     rst.stop(secondaryNodeId);
 
-    secondaryConn = MongoRunner.runMongod({dbpath: secondaryConn.dbpath, noCleanData: true});
+    var storageEngine = jsTest.options().storageEngine || "wiredTiger";
+    if (storageEngine === "wiredTiger") {
+        secondaryConn = MongoRunner.runMongod({
+            dbpath: secondaryConn.dbpath,
+            noCleanData: true,
+            setParameter: {recoverFromOplogAsStandalone: true}
+        });
+    } else {
+        secondaryConn = MongoRunner.runMongod({dbpath: secondaryConn.dbpath, noCleanData: true});
+    }
     assert.neq(null, secondaryConn, "secondary failed to start up as a stand-alone mongod");
     secondaryDB = secondaryConn.getDB("test");
 
@@ -80,7 +89,8 @@
 
     // Verify that writes are replicated to the temporary collection and can successfully be applied
     // by the secondary after having restarted it.
-    assert.writeOK(primaryDB.temp_collection.insert({}, {writeConcern: {w: 2, wtimeout: 60000}}));
+    assert.writeOK(primaryDB.temp_collection.insert(
+        {}, {writeConcern: {w: 2, wtimeout: ReplSetTest.kDefaultTimeoutMS}}));
 
     rst.stopSet();
 })();

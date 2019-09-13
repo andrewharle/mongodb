@@ -5,7 +5,13 @@
 //   # The former operation may be routed to a secondary in the replica set, whereas the latter must
 //   # be routed to the primary.
 //   assumes_read_preference_unchanged,
+//   does_not_support_stepdowns,
 // ]
+
+// We turn off gossiping the mongo shell's clusterTime because it causes the slow command log
+// messages to get truncated since they'll exceed 512 characters. The truncated log messages will
+// fail to match the find and update patterns defined later on in this test.
+TestData.skipGossipingClusterTime = true;
 
 glcol = db.getLogTest2;
 glcol.drop();
@@ -51,7 +57,7 @@ if (db.isMaster().msg != "isdbgrid") {
     assert(contains(resp.log, function(v) {
         print(v);
         var opString = db.getMongo().useReadCommands() ? " find " : " query ";
-        var filterString = db.getMongo().useReadCommands() ? "filter:" : "query:";
+        var filterString = db.getMongo().useReadCommands() ? "filter:" : "command:";
         return v.indexOf(opString) != -1 && v.indexOf(filterString) != -1 &&
             v.indexOf("keysExamined:") != -1 && v.indexOf("docsExamined:") != -1 &&
             v.indexOf("SENTINEL") != -1;
@@ -59,7 +65,7 @@ if (db.isMaster().msg != "isdbgrid") {
 
     // same, but for update
     assert(contains(resp.log, function(v) {
-        return v.indexOf(" update ") != -1 && v.indexOf("query") != -1 &&
+        return v.indexOf(" update ") != -1 && v.indexOf("command") != -1 &&
             v.indexOf("keysExamined:") != -1 && v.indexOf("docsExamined:") != -1 &&
             v.indexOf("SENTINEL") != -1;
     }));

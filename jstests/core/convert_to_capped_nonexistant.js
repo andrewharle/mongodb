@@ -1,5 +1,14 @@
-// This test ensures that ConvertToCapped()ing a nonexistent collection will not cause the server to
-// abort (SERVER-13750)
+/**
+ * This test ensures that ConvertToCapped()ing a nonexistent collection will not cause the server to
+ * abort (SERVER-13750)
+ *
+ * @tags: [
+ *  requires_non_retryable_commands,
+ *
+ *  # capped collections is not available on embedded
+ *  incompatible_with_embedded,
+ * ]
+ */
 
 var testDb = db.getSiblingDB("convert_to_capped_nonexistent");
 testDb.dropDatabase();

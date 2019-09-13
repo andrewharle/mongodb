@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2013-2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,7 +30,9 @@
 
 #pragma once
 
+#include <memory>
 #include <string>
+#include <vector>
 
 #include "mongo/base/owned_pointer_vector.h"
 #include "mongo/base/status.h"
@@ -67,7 +71,7 @@ class OperationContext;
  */
 class SubplanStage final : public PlanStage {
 public:
-    SubplanStage(OperationContext* txn,
+    SubplanStage(OperationContext* opCtx,
                  Collection* collection,
                  WorkingSet* ws,
                  const QueryPlannerParams& params,
@@ -100,22 +104,10 @@ public:
      * take place.
      *
      * Returns a non-OK status if query planning fails. In particular, this function returns
-     * ErrorCodes::QueryPlanKilled if the query plan was killed during a yield.
+     * ErrorCodes::QueryPlanKilled if the query plan was killed during a yield, or
+     * ErrorCodes::MaxTimeMSExpired if the operation has exceeded its time limit.
      */
     Status pickBestPlan(PlanYieldPolicy* yieldPolicy);
-
-    /**
-     * Takes a match expression, 'root', which has a single "contained OR". This means that
-     * 'root' is an AND with exactly one OR child.
-     *
-     * Returns a logically equivalent query after rewriting so that the contained OR is at the
-     * root of the expression tree.
-     *
-     * Used internally so that the subplanner can be used for contained OR type queries, but
-     * exposed for testing.
-     */
-    static std::unique_ptr<MatchExpression> rewriteToRootedOr(
-        std::unique_ptr<MatchExpression> root);
 
     //
     // For testing.
@@ -156,7 +148,7 @@ private:
         std::unique_ptr<CachedSolution> cachedSolution;
 
         // Query solutions resulting from planning the $or branch.
-        OwnedPointerVector<QuerySolution> solutions;
+        std::vector<std::unique_ptr<QuerySolution>> solutions;
     };
 
     /**
@@ -203,7 +195,7 @@ private:
     std::unique_ptr<QuerySolution> _compositeSolution;
 
     // Holds a list of the results from planning each branch.
-    OwnedPointerVector<BranchPlanningResult> _branchResults;
+    std::vector<std::unique_ptr<BranchPlanningResult>> _branchResults;
 
     // We need this to extract cache-friendly index data from the index assignments.
     std::map<StringData, size_t> _indexMap;

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -133,7 +135,9 @@ TEST_F(NetworkInterfaceMockTest, ConnectionHook) {
     // Since the contract of these methods is that they do not throw, we run the ASSERTs in
     // the test scope.
     net().setConnectionHook(makeTestHook(
-        [&](const HostAndPort& remoteHost, const RemoteCommandResponse& isMasterReply) {
+        [&](const HostAndPort& remoteHost,
+            const BSONObj&,
+            const RemoteCommandResponse& isMasterReply) {
             validateCalled = true;
             hostCorrectForValidate = (remoteHost == testHost());
             replyCorrectForValidate = SimpleBSONObjComparator::kInstance.evaluate(
@@ -143,7 +147,7 @@ TEST_F(NetworkInterfaceMockTest, ConnectionHook) {
         [&](const HostAndPort& remoteHost) {
             makeRequestCalled = true;
             hostCorrectForRequest = (remoteHost == testHost());
-            return boost::make_optional<RemoteCommandRequest>(expectedRequest);
+            return boost::make_optional(expectedRequest);
         },
         [&](const HostAndPort& remoteHost, RemoteCommandResponse&& response) {
             handleReplyCalled = true;
@@ -219,7 +223,9 @@ TEST_F(NetworkInterfaceMockTest, ConnectionHook) {
 
 TEST_F(NetworkInterfaceMockTest, ConnectionHookFailedValidation) {
     net().setConnectionHook(makeTestHook(
-        [&](const HostAndPort& remoteHost, const RemoteCommandResponse& isMasterReply) -> Status {
+        [&](const HostAndPort& remoteHost,
+            const BSONObj&,
+            const RemoteCommandResponse& isMasterReply) -> Status {
             // We just need some obscure non-OK code.
             return {ErrorCodes::ConflictingOperationInProgress, "blah"};
         },
@@ -260,9 +266,9 @@ TEST_F(NetworkInterfaceMockTest, ConnectionHookFailedValidation) {
 TEST_F(NetworkInterfaceMockTest, ConnectionHookNoRequest) {
     bool makeRequestCalled = false;
     net().setConnectionHook(makeTestHook(
-        [&](const HostAndPort& remoteHost, const RemoteCommandResponse& isMasterReply) -> Status {
-            return Status::OK();
-        },
+        [&](const HostAndPort& remoteHost,
+            const BSONObj&,
+            const RemoteCommandResponse& isMasterReply) -> Status { return Status::OK(); },
         [&](const HostAndPort& remoteHost) -> StatusWith<boost::optional<RemoteCommandRequest>> {
             makeRequestCalled = true;
             return {boost::none};
@@ -296,9 +302,9 @@ TEST_F(NetworkInterfaceMockTest, ConnectionHookNoRequest) {
 TEST_F(NetworkInterfaceMockTest, ConnectionHookMakeRequestFails) {
     bool makeRequestCalled = false;
     net().setConnectionHook(makeTestHook(
-        [&](const HostAndPort& remoteHost, const RemoteCommandResponse& isMasterReply) -> Status {
-            return Status::OK();
-        },
+        [&](const HostAndPort& remoteHost,
+            const BSONObj&,
+            const RemoteCommandResponse& isMasterReply) -> Status { return Status::OK(); },
         [&](const HostAndPort& remoteHost) -> StatusWith<boost::optional<RemoteCommandRequest>> {
             makeRequestCalled = true;
             return {ErrorCodes::InvalidSyncSource, "blah"};
@@ -333,9 +339,9 @@ TEST_F(NetworkInterfaceMockTest, ConnectionHookMakeRequestFails) {
 TEST_F(NetworkInterfaceMockTest, ConnectionHookHandleReplyFails) {
     bool handleReplyCalled = false;
     net().setConnectionHook(makeTestHook(
-        [&](const HostAndPort& remoteHost, const RemoteCommandResponse& isMasterReply) -> Status {
-            return Status::OK();
-        },
+        [&](const HostAndPort& remoteHost,
+            const BSONObj&,
+            const RemoteCommandResponse& isMasterReply) -> Status { return Status::OK(); },
         [&](const HostAndPort& remoteHost) -> StatusWith<boost::optional<RemoteCommandRequest>> {
             return boost::make_optional<RemoteCommandRequest>({});
         },

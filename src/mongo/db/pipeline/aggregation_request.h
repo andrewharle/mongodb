@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,6 +36,7 @@
 #include "mongo/bson/bsonelement.h"
 #include "mongo/bson/bsonobj.h"
 #include "mongo/db/namespace_string.h"
+#include "mongo/db/query/explain_options.h"
 
 namespace mongo {
 
@@ -46,34 +49,71 @@ class Document;
  */
 class AggregationRequest {
 public:
-    static const StringData kCommandName;
-    static const StringData kCursorName;
-    static const StringData kBatchSizeName;
-    static const StringData kFromRouterName;
-    static const StringData kPipelineName;
-    static const StringData kCollationName;
-    static const StringData kExplainName;
-    static const StringData kAllowDiskUseName;
+    static constexpr StringData kCommandName = "aggregate"_sd;
+    static constexpr StringData kCursorName = "cursor"_sd;
+    static constexpr StringData kBatchSizeName = "batchSize"_sd;
+    static constexpr StringData kFromMongosName = "fromMongos"_sd;
+    static constexpr StringData kNeedsMergeName = "needsMerge"_sd;
+    static constexpr StringData kMergeByPBRTName = "mergeByPBRT"_sd;
+    static constexpr StringData kPipelineName = "pipeline"_sd;
+    static constexpr StringData kCollationName = "collation"_sd;
+    static constexpr StringData kExplainName = "explain"_sd;
+    static constexpr StringData kAllowDiskUseName = "allowDiskUse"_sd;
+    static constexpr StringData kHintName = "hint"_sd;
+    static constexpr StringData kCommentName = "comment"_sd;
 
-    static const long long kDefaultBatchSize;
+    static constexpr long long kDefaultBatchSize = 101;
+
+    /**
+     * Parse an aggregation pipeline definition from 'pipelineElem'. Returns a non-OK status if
+     * pipeline is not an array or if any of the array elements are not objects.
+     */
+    static StatusWith<std::vector<BSONObj>> parsePipelineFromBSON(BSONElement pipelineElem);
 
     /**
      * Create a new instance of AggregationRequest by parsing the raw command object. Returns a
      * non-OK status if a required field was missing, if there was an unrecognized field name or if
      * there was a bad value for one of the fields.
+     *
+     * If we are parsing a request for an explained aggregation with an explain verbosity provided,
+     * then 'explainVerbosity' contains this information. In this case, 'cmdObj' may not itself
+     * contain the explain specifier. Otherwise, 'explainVerbosity' should be boost::none.
      */
-    static StatusWith<AggregationRequest> parseFromBSON(NamespaceString nss, const BSONObj& cmdObj);
+    static StatusWith<AggregationRequest> parseFromBSON(
+        NamespaceString nss,
+        const BSONObj& cmdObj,
+        boost::optional<ExplainOptions::Verbosity> explainVerbosity = boost::none);
+
+    /**
+     * Convenience overload which constructs the request's NamespaceString from the given database
+     * name and command object.
+     */
+    static StatusWith<AggregationRequest> parseFromBSON(
+        const std::string& dbName,
+        const BSONObj& cmdObj,
+        boost::optional<ExplainOptions::Verbosity> explainVerbosity = boost::none);
+
+    /*
+     * The first field in 'cmdObj' must be a string representing a valid collection name, or the
+     * number 1. In the latter case, returns a reserved namespace that does not represent a user
+     * collection. See 'NamespaceString::makeCollectionlessAggregateNSS()'.
+     */
+    static NamespaceString parseNs(const std::string& dbname, const BSONObj& cmdObj);
 
     /**
      * Constructs an AggregationRequest over the given namespace with the given pipeline. All
      * options aside from the pipeline assume their default values.
      */
-    AggregationRequest(NamespaceString nss, std::vector<BSONObj> pipeline);
+    AggregationRequest(NamespaceString nss, std::vector<BSONObj> pipeline)
+        : _nss(std::move(nss)), _pipeline(std::move(pipeline)), _batchSize(kDefaultBatchSize) {}
 
     /**
      * Serializes the options to a Document. Note that this serialization includes the original
      * pipeline object, as specified. Callers will likely want to override this field with a
      * serialization of a parsed and optimized Pipeline object.
+     *
+     * The explain option is not serialized. Since the explain command format is {explain:
+     * {aggregate: ...}, ...}, explain options are not part of the aggregate command object.
      */
     Document serializeToCommandObj() const;
 
@@ -81,7 +121,7 @@ public:
     // Getters.
     //
 
-    boost::optional<long long> getBatchSize() const {
+    long long getBatchSize() const {
         return _batchSize;
     }
 
@@ -96,16 +136,28 @@ public:
         return _pipeline;
     }
 
-    bool isCursorCommand() const {
-        return _cursorCommand;
+    /**
+     * Returns true if this request originated from a mongoS.
+     */
+    bool isFromMongos() const {
+        return _fromMongos;
     }
 
-    bool isExplain() const {
-        return _explain;
+    /**
+     * Returns true if this request represents the shards part of a split pipeline, and should
+     * produce mergeable output.
+     */
+    bool needsMerge() const {
+        return _needsMerge;
     }
 
-    bool isFromRouter() const {
-        return _fromRouter;
+    /**
+     * Returns true if this request is a change stream pipeline which originated from a mongoS that
+     * can merge based on the documents' raw resume tokens and the 'postBatchResumeToken' field. If
+     * not, then the mongoD will need to produce the old {ts, uuid, docKey} $sortKey format instead.
+     */
+    bool mergeByPBRT() const {
+        return _mergeByPBRT;
     }
 
     bool shouldAllowDiskUse() const {
@@ -123,13 +175,36 @@ public:
         return _collation;
     }
 
+    BSONObj getHint() const {
+        return _hint;
+    }
+
+    const std::string& getComment() const {
+        return _comment;
+    }
+
+    boost::optional<ExplainOptions::Verbosity> getExplain() const {
+        return _explainMode;
+    }
+
+    unsigned int getMaxTimeMS() const {
+        return _maxTimeMS;
+    }
+
+    const BSONObj& getReadConcern() const {
+        return _readConcern;
+    }
+
+    const BSONObj& getUnwrappedReadPref() const {
+        return _unwrappedReadPref;
+    }
+
     //
     // Setters for optional fields.
     //
 
     /**
-     * Must be either unset or non-negative. Negative batchSize is illegal but batchSize of 0 is
-     * allowed.
+     * Negative batchSize is illegal but batchSize of 0 is allowed.
      */
     void setBatchSize(long long batchSize) {
         uassert(40203, "batchSize must be non-negative", batchSize >= 0);
@@ -140,46 +215,90 @@ public:
         _collation = collation.getOwned();
     }
 
-    void setCursorCommand(bool isCursorCommand) {
-        _cursorCommand = isCursorCommand;
+    void setHint(BSONObj hint) {
+        _hint = hint.getOwned();
     }
 
-    void setExplain(bool isExplain) {
-        _explain = isExplain;
+    void setComment(const std::string& comment) {
+        _comment = comment;
+    }
+
+    void setExplain(boost::optional<ExplainOptions::Verbosity> verbosity) {
+        _explainMode = verbosity;
     }
 
     void setAllowDiskUse(bool allowDiskUse) {
         _allowDiskUse = allowDiskUse;
     }
 
-    void setFromRouter(bool isFromRouter) {
-        _fromRouter = isFromRouter;
+    void setFromMongos(bool isFromMongos) {
+        _fromMongos = isFromMongos;
+    }
+
+    void setNeedsMerge(bool needsMerge) {
+        _needsMerge = needsMerge;
+    }
+
+    void setMergeByPBRT(bool mergeByPBRT) {
+        _mergeByPBRT = mergeByPBRT;
     }
 
     void setBypassDocumentValidation(bool shouldBypassDocumentValidation) {
         _bypassDocumentValidation = shouldBypassDocumentValidation;
     }
 
+    void setMaxTimeMS(unsigned int maxTimeMS) {
+        _maxTimeMS = maxTimeMS;
+    }
+
+    void setReadConcern(BSONObj readConcern) {
+        _readConcern = readConcern.getOwned();
+    }
+
+    void setUnwrappedReadPref(BSONObj unwrappedReadPref) {
+        _unwrappedReadPref = unwrappedReadPref.getOwned();
+    }
+
 private:
     // Required fields.
-
     const NamespaceString _nss;
 
     // An unparsed version of the pipeline.
     const std::vector<BSONObj> _pipeline;
 
-    // Optional fields.
+    long long _batchSize;
 
-    boost::optional<long long> _batchSize;
+    // Optional fields.
 
     // An owned copy of the user-specified collation object, or an empty object if no collation was
     // specified.
     BSONObj _collation;
 
-    bool _explain = false;
+    // The hint provided, if any.  If the hint was by index key pattern, the value of '_hint' is
+    // the key pattern hinted.  If the hint was by index name, the value of '_hint' is
+    // {$hint: <String>}, where <String> is the index name hinted.
+    BSONObj _hint;
+
+    // The comment parameter attached to this aggregation, empty if not set.
+    std::string _comment;
+
+    BSONObj _readConcern;
+
+    // The unwrapped readPreference object, if one was given to us by the mongos command processor.
+    // This object will be empty when no readPreference is specified or if the request does not
+    // originate from mongos.
+    BSONObj _unwrappedReadPref;
+
+    // The explain mode to use, or boost::none if this is not a request for an aggregation explain.
+    boost::optional<ExplainOptions::Verbosity> _explainMode;
+
     bool _allowDiskUse = false;
-    bool _fromRouter = false;
+    bool _fromMongos = false;
+    bool _needsMerge = false;
+    bool _mergeByPBRT = false;
     bool _bypassDocumentValidation = false;
-    bool _cursorCommand = false;
+
+    // A user-specified maxTimeMS limit, or a value of '0' if not specified.
+    unsigned int _maxTimeMS = 0;
 };
 }  // namespace mongo

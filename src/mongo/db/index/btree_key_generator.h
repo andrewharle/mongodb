@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2013 10gen Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -143,18 +145,17 @@ private:
         // The array to which 'positionallyIndexedElt' belongs.
         BSONObj arrayObj;
 
-        // If we find a positionally indexed element, we traverse the remainder of the path
-        // until we find either another array element or the end of the path. The result of
-        // this traversal (implemented using extractAllElementsAlongPath()), is stored here and used
-        // during the recursive call for each array element.
+        // If we find a positionally indexed element, we traverse the remainder of the path until we
+        // find either another array element or the end of the path. The result of this traversal is
+        // stored here and used during the recursive call for each array element.
         //
         // Example:
         //   Suppose we have key pattern {"a.1.b.0.c": 1}. The document for which we are
         //   generating keys is {a: [0, {b: [{c: 99}]}]}. We will find that {b: [{c: 99}]}
         //   is a positionally indexed element and store it as 'positionallyIndexedElt'.
         //
-        //   We then call extractAllElementsAlongPath() to traverse the remainder of the path,
-        //   "b.1.c". The result is the array [{c: 99}] which is stored here as 'dottedElt'.
+        //   We then traverse the remainder of the path, "b.0.c", until encountering an array. The
+        //   result is the array [{c: 99}] which is stored here as 'dottedElt'.
         BSONElement dottedElt;
 
         // The remaining path that must be traversed in 'dottedElt' to find the indexed
@@ -197,8 +198,9 @@ private:
                               const std::vector<PositionalPathInfo>& positionalInfo,
                               MultikeyPaths* multikeyPaths) const;
     /**
-     * A call to getKeysImplWithArray() begins by calling this for each field in the key
-     * pattern. It uses extractAllElementsAlongPath() to traverse the path '*field' in 'obj'.
+     * A call to getKeysImplWithArray() begins by calling this for each field in the key pattern. It
+     * traverses the path '*field' in 'obj' until either reaching the end of the path or an array
+     * element.
      *
      * The 'positionalInfo' arg is used for handling a field path where 'obj' has an
      * array indexed by position. See the comments for PositionalPathInfo for more detail.

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2012 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -43,6 +45,7 @@
 #include "mongo/db/auth/privilege.h"
 #include "mongo/db/client.h"
 #include "mongo/db/commands.h"
+#include "mongo/db/commands/fsync_locked.h"
 #include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/write_conflict_exception.h"
 #include "mongo/db/db.h"
@@ -62,7 +65,7 @@ using std::stringstream;
 namespace {
 // Ensures that only one command is operating on fsyncLock state at a time. As a 'ResourceMutex',
 // lock time will be reported for a given user operation.
-Lock::ResourceMutex commandMutex;
+Lock::ResourceMutex commandMutex("fsyncCommandMutex");
 }
 
 /**
@@ -78,13 +81,13 @@ public:
     virtual void run();
 };
 
-class FSyncCommand : public Command {
+class FSyncCommand : public ErrmsgCommandDeprecated {
 public:
     static const char* url() {
         return "http://dochub.mongodb.org/core/fsynccommand";
     }
 
-    FSyncCommand() : Command("fsync") {}
+    FSyncCommand() : ErrmsgCommandDeprecated("fsync") {}
 
     virtual ~FSyncCommand() {
         // The FSyncLockThread is owned by the FSyncCommand and accesses FsyncCommand state. It must
@@ -101,29 +104,28 @@ public:
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
-    virtual bool slaveOk() const {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
     virtual bool adminOnly() const {
         return true;
     }
-    virtual void help(stringstream& h) const {
-        h << url();
+    std::string help() const override {
+        return url();
     }
     virtual void addRequiredPrivileges(const std::string& dbname,
                                        const BSONObj& cmdObj,
-                                       std::vector<Privilege>* out) {
+                                       std::vector<Privilege>* out) const {
         ActionSet actions;
         actions.addAction(ActionType::fsync);
         out->push_back(Privilege(ResourcePattern::forClusterResource(), actions));
     }
-    virtual bool run(OperationContext* txn,
-                     const string& dbname,
-                     BSONObj& cmdObj,
-                     int,
-                     string& errmsg,
-                     BSONObjBuilder& result) {
-        if (txn->lockState()->isLocked()) {
+    virtual bool errmsgRun(OperationContext* opCtx,
+                           const string& dbname,
+                           const BSONObj& cmdObj,
+                           string& errmsg,
+                           BSONObjBuilder& result) {
+        if (opCtx->lockState()->isLocked()) {
             errmsg = "fsync: Cannot execute fsync command from contexts that hold a data lock";
             return false;
         }
@@ -138,23 +140,22 @@ public:
             // the simple fsync command case
             if (sync) {
                 // can this be GlobalRead? and if it can, it should be nongreedy.
-                ScopedTransaction transaction(txn, MODE_X);
-                Lock::GlobalWrite w(txn->lockState());
+                Lock::GlobalWrite w(opCtx);
                 // TODO SERVER-26822: Replace MMAPv1 specific calls with ones that are storage
                 // engine agnostic.
-                getDur().commitNow(txn);
+                getDur().commitNow(opCtx);
 
                 //  No WriteUnitOfWork needed, as this does no writes of its own.
             }
 
             // Take a global IS lock to ensure the storage engine is not shutdown
-            Lock::GlobalLock global(txn->lockState(), MODE_IS, UINT_MAX);
-            StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
-            result.append("numFiles", storageEngine->flushAllFiles(sync));
+            Lock::GlobalLock global(opCtx, MODE_IS);
+            StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
+            result.append("numFiles", storageEngine->flushAllFiles(opCtx, sync));
             return true;
         }
 
-        Lock::ExclusiveLock lk(txn->lockState(), commandMutex);
+        Lock::ExclusiveLock lk(opCtx->lockState(), commandMutex);
         if (!sync) {
             errmsg = "fsync: sync option must be true when using lock";
             return false;
@@ -186,7 +187,7 @@ public:
             if (!status.isOK()) {
                 releaseLock();
                 warning() << "fsyncLock failed. Lock count reset to 0. Status: " << status;
-                return appendCommandStatus(result, status);
+                uassertStatusOK(status);
             }
         }
 
@@ -266,17 +267,17 @@ private:
     bool _fsyncLocked = false;
 } fsyncCmd;
 
-class FSyncUnlockCommand : public Command {
+class FSyncUnlockCommand : public ErrmsgCommandDeprecated {
 public:
-    FSyncUnlockCommand() : Command("fsyncUnlock") {}
+    FSyncUnlockCommand() : ErrmsgCommandDeprecated("fsyncUnlock") {}
 
 
     virtual bool supportsWriteConcern(const BSONObj& cmd) const override {
         return false;
     }
 
-    bool slaveOk() const override {
-        return true;
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
+        return AllowedOnSecondary::kAlways;
     }
 
     bool adminOnly() const override {
@@ -285,22 +286,21 @@ public:
 
     Status checkAuthForCommand(Client* client,
                                const std::string& dbname,
-                               const BSONObj& cmdObj) override {
+                               const BSONObj& cmdObj) const override {
         bool isAuthorized = AuthorizationSession::get(client)->isAuthorizedForActionsOnResource(
             ResourcePattern::forClusterResource(), ActionType::unlock);
 
         return isAuthorized ? Status::OK() : Status(ErrorCodes::Unauthorized, "Unauthorized");
     }
 
-    bool run(OperationContext* txn,
-             const std::string& db,
-             BSONObj& cmdObj,
-             int options,
-             std::string& errmsg,
-             BSONObjBuilder& result) override {
+    bool errmsgRun(OperationContext* opCtx,
+                   const std::string& db,
+                   const BSONObj& cmdObj,
+                   std::string& errmsg,
+                   BSONObjBuilder& result) override {
         log() << "command: unlock requested";
 
-        Lock::ExclusiveLock lk(txn->lockState(), commandMutex);
+        Lock::ExclusiveLock lk(opCtx->lockState(), commandMutex);
 
         if (unlockFsync()) {
             const auto lockCount = fsyncCmd.getLockCount();
@@ -337,32 +337,32 @@ SimpleMutex filesLockedFsync;
 
 void FSyncLockThread::run() {
     Client::initThread("fsyncLockWorker");
+    ON_BLOCK_EXIT([] { Client::destroy(); });
     stdx::lock_guard<SimpleMutex> lkf(filesLockedFsync);
     stdx::unique_lock<stdx::mutex> lk(fsyncCmd.lockStateMutex);
 
     invariant(fsyncCmd.getLockCount_inLock() == 1);
 
     try {
-        const ServiceContext::UniqueOperationContext txnPtr = cc().makeOperationContext();
-        OperationContext& txn = *txnPtr;
-        ScopedTransaction transaction(&txn, MODE_X);
-        Lock::GlobalWrite global(txn.lockState());  // No WriteUnitOfWork needed
+        const ServiceContext::UniqueOperationContext opCtxPtr = cc().makeOperationContext();
+        OperationContext& opCtx = *opCtxPtr;
+        Lock::GlobalWrite global(&opCtx);  // No WriteUnitOfWork needed
 
         try {
             // TODO SERVER-26822: Replace MMAPv1 specific calls with ones that are storage engine
             // agnostic.
-            getDur().syncDataAndTruncateJournal(&txn);
+            getDur().syncDataAndTruncateJournal(&opCtx);
         } catch (const std::exception& e) {
             error() << "error doing syncDataAndTruncateJournal: " << e.what();
             fsyncCmd.threadStatus = Status(ErrorCodes::CommandFailed, e.what());
             fsyncCmd.acquireFsyncLockSyncCV.notify_one();
             return;
         }
-        txn.lockState()->downgradeGlobalXtoSForMMAPV1();
-        StorageEngine* storageEngine = getGlobalServiceContext()->getGlobalStorageEngine();
+        opCtx.lockState()->downgradeGlobalXtoSForMMAPV1();
+        StorageEngine* storageEngine = getGlobalServiceContext()->getStorageEngine();
 
         try {
-            storageEngine->flushAllFiles(true);
+            storageEngine->flushAllFiles(&opCtx, true);
         } catch (const std::exception& e) {
             error() << "error doing flushAll: " << e.what();
             fsyncCmd.threadStatus = Status(ErrorCodes::CommandFailed, e.what());
@@ -370,10 +370,9 @@ void FSyncLockThread::run() {
             return;
         }
         try {
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_BEGIN {
-                uassertStatusOK(storageEngine->beginBackup(&txn));
-            }
-            MONGO_WRITE_CONFLICT_RETRY_LOOP_END(&txn, "beginBackup", "global");
+            writeConflictRetry(&opCtx, "beginBackup", "global", [&storageEngine, &opCtx] {
+                uassertStatusOK(storageEngine->beginBackup(&opCtx));
+            });
         } catch (const DBException& e) {
             error() << "storage engine unable to begin backup : " << e.toString();
             fsyncCmd.threadStatus = e.toStatus();
@@ -388,7 +387,7 @@ void FSyncLockThread::run() {
             fsyncCmd.releaseFsyncLockSyncCV.wait(lk);
         }
 
-        storageEngine->endBackup(&txn);
+        storageEngine->endBackup(&opCtx);
 
     } catch (const std::exception& e) {
         severe() << "FSyncLockThread exception: " << e.what();
@@ -396,7 +395,8 @@ void FSyncLockThread::run() {
     }
 }
 
-bool lockedForWriting() {
-    return fsyncCmd.fsyncLocked();
+MONGO_INITIALIZER(fsyncLockedForWriting)(InitializerContext* context) {
+    setLockedForWritingImpl([]() { return fsyncCmd.fsyncLocked(); });
+    return Status::OK();
 }
 }

@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -38,8 +40,6 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/repl/collection_bulk_loader.h"
 #include "mongo/db/repl/storage_interface.h"
-#include "mongo/db/repl/task_runner.h"
-#include "mongo/util/concurrency/old_thread_pool.h"
 
 namespace mongo {
 namespace repl {
@@ -61,16 +61,13 @@ public:
         BSONObj toBSON() const;
     };
 
-    CollectionBulkLoaderImpl(OperationContext* txn,
-                             Collection* coll,
-                             const BSONObj idIndexSpec,
-                             std::unique_ptr<OldThreadPool> threadPool,
-                             std::unique_ptr<TaskRunner> runner,
-                             std::unique_ptr<AutoGetOrCreateDb> autoDB,
-                             std::unique_ptr<AutoGetCollection> autoColl);
+    CollectionBulkLoaderImpl(ServiceContext::UniqueClient&& client,
+                             ServiceContext::UniqueOperationContext&& opCtx,
+                             std::unique_ptr<AutoGetCollection>&& autoColl,
+                             const BSONObj& idIndexSpec);
     virtual ~CollectionBulkLoaderImpl();
 
-    virtual Status init(Collection* coll, const std::vector<BSONObj>& secondaryIndexSpecs) override;
+    virtual Status init(const std::vector<BSONObj>& secondaryIndexSpecs) override;
 
     virtual Status insertDocuments(const std::vector<BSONObj>::const_iterator begin,
                                    const std::vector<BSONObj>::const_iterator end) override;
@@ -83,16 +80,13 @@ public:
 
 private:
     void _releaseResources();
-    Status _runTaskReleaseResourcesOnFailure(
-        TaskRunner::SynchronousTask task,
-        TaskRunner::NextAction nextAction = TaskRunner::NextAction::kKeepOperationContext);
 
-    std::unique_ptr<OldThreadPool> _threadPool;
-    std::unique_ptr<TaskRunner> _runner;
+    template <typename F>
+    Status _runTaskReleaseResourcesOnFailure(F task) noexcept;
+
+    ServiceContext::UniqueClient _client;
+    ServiceContext::UniqueOperationContext _opCtx;
     std::unique_ptr<AutoGetCollection> _autoColl;
-    std::unique_ptr<AutoGetOrCreateDb> _autoDB;
-    OperationContext* _txn = nullptr;
-    Collection* _coll = nullptr;
     NamespaceString _nss;
     std::unique_ptr<MultiIndexBlock> _idIndexBlock;
     std::unique_ptr<MultiIndexBlock> _secondaryIndexesBlock;

@@ -1,3 +1,11 @@
+// @tags: [
+//   assumes_superuser_permissions,
+//   assumes_write_concern_unchanged,
+//   creates_and_authenticates_user,
+//   requires_auth,
+//   requires_non_retryable_commands,
+// ]
+
 var mydb = db.getSiblingDB('auth1_db');
 mydb.dropAllUsers();
 

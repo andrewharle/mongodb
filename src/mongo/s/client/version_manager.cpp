@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2010-2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,15 +36,12 @@
 
 #include "mongo/client/dbclient_rs.h"
 #include "mongo/db/namespace_string.h"
-#include "mongo/s/catalog/sharding_catalog_client.h"
 #include "mongo/s/catalog_cache.h"
-#include "mongo/s/catalog_cache.h"
-#include "mongo/s/chunk_version.h"
 #include "mongo/s/client/shard_connection.h"
 #include "mongo/s/client/shard_registry.h"
 #include "mongo/s/grid.h"
-#include "mongo/s/mongos_options.h"
-#include "mongo/s/set_shard_version_request.h"
+#include "mongo/s/is_mongos.h"
+#include "mongo/s/request_types/set_shard_version_request.h"
 #include "mongo/s/stale_exception.h"
 #include "mongo/util/log.h"
 
@@ -118,7 +117,7 @@ bool setShardVersion(OperationContext* opCtx,
     ShardId shardId;
     ConnectionString shardCS;
     {
-        const auto shard = grid.shardRegistry()->getShardForHostNoReload(
+        const auto shard = Grid::get(opCtx)->shardRegistry()->getShardForHostNoReload(
             uassertStatusOK(HostAndPort::parse(conn->getServerAddress())));
         uassert(ErrorCodes::ShardNotFound,
                 str::stream() << conn->getServerAddress() << " is not recognized as a shard",
@@ -187,14 +186,15 @@ bool initShardVersionEmptyNS(OperationContext* opCtx, DBClientBase* conn_in) {
         }
 
         BSONObj result;
-        const bool ok = setShardVersion(opCtx,
-                                        conn,
-                                        "",
-                                        grid.shardRegistry()->getConfigServerConnectionString(),
-                                        ChunkVersion(),
-                                        NULL,
-                                        true,
-                                        result);
+        const bool ok =
+            setShardVersion(opCtx,
+                            conn,
+                            "",
+                            Grid::get(opCtx)->shardRegistry()->getConfigServerConnectionString(),
+                            ChunkVersion(),
+                            NULL,
+                            true,
+                            result);
 
         LOG(3) << "initial sharding result : " << result;
 
@@ -271,7 +271,7 @@ bool checkShardVersion(OperationContext* opCtx,
     auto& routingInfo = routingInfoStatus.getValue();
 
     const auto manager = routingInfo.cm();
-    const auto primary = routingInfo.primary();
+    const auto primary = routingInfo.db().primary();
 
     unsigned long long officialSequenceNumber = 0;
 
@@ -311,7 +311,7 @@ bool checkShardVersion(OperationContext* opCtx,
                                      << shard->getConnString().toString()
                                      << ")");
 
-            throw SendStaleConfigException(ns, msg, refVersion, currentVersion);
+            uasserted(StaleConfigInfo(nss, refVersion, currentVersion), msg);
         }
     } else if (refManager) {
         string msg(str::stream() << "not sharded (" << (!manager ? string("<none>") : str::stream()
@@ -325,8 +325,9 @@ bool checkShardVersion(OperationContext* opCtx,
                                  << conn_in->getServerAddress()
                                  << ")");
 
-        throw SendStaleConfigException(
-            ns, msg, refManager->getVersion(shard->getId()), ChunkVersion::UNSHARDED());
+        uasserted(
+            StaleConfigInfo(nss, refManager->getVersion(shard->getId()), ChunkVersion::UNSHARDED()),
+            msg);
     }
 
     // Has the ChunkManager been reloaded since the last time we updated the shard version over
@@ -379,7 +380,7 @@ bool checkShardVersion(OperationContext* opCtx,
         return true;
     }
 
-    Grid::get(opCtx)->catalogCache()->onStaleConfigError(std::move(routingInfo));
+    Grid::get(opCtx)->catalogCache()->onStaleShardVersion(std::move(routingInfo));
 
     const int maxNumTries = 7;
     if (tryNumber < maxNumTries) {

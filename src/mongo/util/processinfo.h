@@ -1,30 +1,33 @@
 // processinfo.h
 
-/*    Copyright 2009 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -58,69 +61,78 @@ public:
     /**
      * Get the type of os (e.g. Windows, Linux, Mac OS)
      */
-    const std::string& getOsType() const {
+    static const std::string& getOsType() {
         return sysInfo().osType;
     }
 
     /**
      * Get the os Name (e.g. Ubuntu, Gentoo, Windows Server 2008)
      */
-    const std::string& getOsName() const {
+    static const std::string& getOsName() {
         return sysInfo().osName;
     }
 
     /**
      * Get the os version (e.g. 10.04, 11.3.0, 6.1 (build 7600))
      */
-    const std::string& getOsVersion() const {
+    static const std::string& getOsVersion() {
         return sysInfo().osVersion;
     }
 
     /**
      * Get the cpu address size (e.g. 32, 36, 64)
      */
-    unsigned getAddrSize() const {
+    static unsigned getAddrSize() {
         return sysInfo().addrSize;
     }
 
     /**
-     * Get the total amount of system memory in MB
+     * Get the size of total memory available to the process in MB
      */
-    unsigned long long getMemSizeMB() const {
+    static unsigned long long getMemSizeMB() {
+        return sysInfo().memLimit / (1024 * 1024);
+    }
+
+    /**
+     * Get the total memory available on the machine in MB
+     */
+    static unsigned long long getSystemMemSizeMB() {
         return sysInfo().memSize / (1024 * 1024);
     }
 
     /**
-     * Get the number of available CPUs. Depending on the OS, the number can be the
-     * number of available CPUs to the current process or scheduler.
-     */
-    boost::optional<unsigned long> getNumAvailableCores();
-
-    /**
      * Get the number of CPUs
      */
-    unsigned getNumCores() const {
+    static unsigned getNumCores() {
         return sysInfo().numCores;
+    }
+
+    /**
+     * Get the number of cores available. Make a best effort to get the cores for this process.
+     * If that information is not available, get the total number of CPUs.
+     */
+    static unsigned long getNumAvailableCores() {
+        return ProcessInfo::getNumCoresForProcess().value_or(ProcessInfo::getNumCores());
     }
 
     /**
      * Get the system page size in bytes.
      */
     static unsigned long long getPageSize() {
-        return systemInfo->pageSize;
+        return sysInfo().pageSize;
     }
 
     /**
      * Get the CPU architecture (e.g. x86, x86_64)
      */
-    const std::string& getArch() const {
+    static const std::string& getArch() {
         return sysInfo().cpuArch;
     }
 
     /**
      * Determine if NUMA is enabled (interleaved) for this process
      */
-    bool hasNumaEnabled() const {
+    static bool hasNumaEnabled() {
         return sysInfo().hasNuma;
     }
 
@@ -128,14 +140,14 @@ public:
      * Determine if file zeroing is necessary for newly allocated data files.
      */
     static bool isDataFileZeroingNeeded() {
-        return systemInfo->fileZeroNeeded;
+        return sysInfo().fileZeroNeeded;
     }
 
     /**
      * Determine if we need to workaround slow msync performance on Illumos/Solaris
      */
     static bool preferMsyncOverFSync() {
-        return systemInfo->preferMsyncOverFSync;
+        return sysInfo().preferMsyncOverFSync;
     }
 
     /**
@@ -194,6 +206,7 @@ private:
         std::string osVersion;
         unsigned addrSize;
         unsigned long long memSize;
+        unsigned long long memLimit;
         unsigned numCores;
         unsigned long long pageSize;
         std::string cpuArch;
@@ -215,6 +228,7 @@ private:
         SystemInfo()
             : addrSize(0),
               memSize(0),
+              memLimit(0),
               numCores(0),
               pageSize(0),
               hasNuma(false),
@@ -230,21 +244,21 @@ private:
     };
 
     ProcessId _pid;
-    static stdx::mutex _sysInfoLock;
 
     static bool checkNumaEnabled();
 
-    static ProcessInfo::SystemInfo* systemInfo;
-
-    inline const SystemInfo& sysInfo() const {
-        return *systemInfo;
+    inline static const SystemInfo& sysInfo() {
+        static ProcessInfo::SystemInfo systemInfo;
+        return systemInfo;
     }
 
-public:
-    static void initializeSystemInfo();
+private:
+    /**
+     * Get the number of available CPUs. Depending on the OS, the number can be the
+     * number of available CPUs to the current process or scheduler.
+     */
+    static boost::optional<unsigned long> getNumCoresForProcess();
 };
 
 bool writePidFile(const std::string& path);
-
-void printMemInfo(const char* whereContextStr = 0);
 }

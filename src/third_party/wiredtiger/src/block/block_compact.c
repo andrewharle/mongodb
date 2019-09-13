@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2016 MongoDB, Inc.
+ * Copyright (c) 2014-2019 MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -38,19 +38,15 @@ __wt_block_compact_start(WT_SESSION_IMPL *session, WT_BLOCK *block)
 int
 __wt_block_compact_end(WT_SESSION_IMPL *session, WT_BLOCK *block)
 {
-	WT_UNUSED(session);
-
 	/* Restore the original allocation plan. */
 	__wt_block_configure_first_fit(block, false);
 
-#ifdef HAVE_VERBOSE
 	/* Dump the results of the compaction pass. */
 	if (WT_VERBOSE_ISSET(session, WT_VERB_COMPACT)) {
 		__wt_spin_lock(session, &block->live_lock);
 		__block_dump_avail(session, block, false);
 		__wt_spin_unlock(session, &block->live_lock);
 	}
-#endif
 	return (0);
 }
 
@@ -182,7 +178,6 @@ __wt_block_compact_page_skip(WT_SESSION_IMPL *session,
 	}
 	__wt_spin_unlock(session, &block->live_lock);
 
-#ifdef HAVE_VERBOSE
 	if (WT_VERBOSE_ISSET(session, WT_VERB_COMPACT)) {
 		++block->compact_pages_reviewed;
 		if (*skipp)
@@ -190,7 +185,6 @@ __wt_block_compact_page_skip(WT_SESSION_IMPL *session,
 		else
 			++block->compact_pages_written;
 	}
-#endif
 
 	return (0);
 }
@@ -202,8 +196,8 @@ __wt_block_compact_page_skip(WT_SESSION_IMPL *session,
 static void
 __block_dump_avail(WT_SESSION_IMPL *session, WT_BLOCK *block, bool start)
 {
-	WT_EXTLIST *el;
 	WT_EXT *ext;
+	WT_EXTLIST *el;
 	wt_off_t decile[10], percentile[100], size, v;
 	u_int i;
 
@@ -242,8 +236,10 @@ __block_dump_avail(WT_SESSION_IMPL *session, WT_BLOCK *block, bool start)
 	memset(percentile, 0, sizeof(percentile));
 	WT_EXT_FOREACH(ext, el->off)
 		for (i = 0; i < ext->size / 512; ++i) {
-			++decile[((ext->off + i * 512) * 10) / size];
-			++percentile[((ext->off + i * 512) * 100) / size];
+			++decile[
+			    ((ext->off + (wt_off_t)i * 512) * 10) / size];
+			++percentile[
+			    ((ext->off + (wt_off_t)i * 512) * 100) / size];
 		}
 
 #ifdef __VERBOSE_OUTPUT_PERCENTILE

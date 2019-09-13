@@ -22,7 +22,7 @@ load('./jstests/libs/cleanup_orphaned_util.js');
     assert.commandWorked(admin.runCommand({shardCollection: ns, key: {key: 'hashed'}}));
 
     // Makes four chunks by default, two on each shard.
-    var chunks = st.config.chunks.find().sort({min: 1}).toArray();
+    var chunks = st.config.chunks.find({ns: ns}).sort({min: 1}).toArray();
     assert.eq(4, chunks.length);
 
     var chunkWithDoc = chunks[1];
@@ -123,6 +123,7 @@ load('./jstests/libs/cleanup_orphaned_util.js');
     assert.eq(1, recipColl.count());
     assert.eq(1, coll.count());
 
+    MongoRunner.stopMongod(staticMongod);
     st.stop();
 
 })();

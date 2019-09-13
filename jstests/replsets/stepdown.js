@@ -8,6 +8,10 @@
 
 load("jstests/replsets/rslib.js");
 
+// We are bypassing collection validation because this test runs "shutdown" command so the server is
+// expected to be down when MongoRunner.stopMongod is called.
+TestData.skipCollectionAndIndexValidation = true;
+
 var replTest = new ReplSetTest({
     name: 'testSet',
     nodes: {"n0": {rsConfig: {priority: 2}}, "n1": {}, "n2": {rsConfig: {votes: 1, priority: 0}}},
@@ -40,8 +44,8 @@ function unlockNodes(nodes) {
 var lockedNodes = [];
 try {
     // lock secondaries
-    jsTestLog('Locking nodes: ' + tojson(replTest.liveNodes.slaves));
-    replTest.liveNodes.slaves.forEach(function(node) {
+    jsTestLog('Locking nodes: ' + tojson(replTest._slaves));
+    replTest._slaves.forEach(function(node) {
         jsTestLog('Locking node: ' + node);
         jsTestLog(
             'fsync lock ' + node + ' result: ' +
@@ -107,15 +111,7 @@ master = replTest.getPrimary();
 var firstMaster = master;
 print("\nmaster is now " + firstMaster);
 
-try {
-    assert.commandWorked(master.getDB("admin").runCommand({replSetStepDown: 100, force: true}));
-} catch (e) {
-    // ignore errors due to connection failures as we expect the master to close connections
-    // on stepdown
-    if (!isNetworkError(e)) {
-        throw e;
-    }
-}
+assert.adminCommandWorkedAllowingNetworkError(master, {replSetStepDown: 100, force: true});
 
 print("\nget a master");
 replTest.getPrimary();
@@ -129,8 +125,8 @@ assert.soon(function() {
 replTest.add();
 print("\ncheck shutdown command");
 
-master = replTest.liveNodes.master;
-var slave = replTest.liveNodes.slaves[0];
+master = replTest._master;
+var slave = replTest._slaves[0];
 
 try {
     slave.adminCommand({shutdown: 1});

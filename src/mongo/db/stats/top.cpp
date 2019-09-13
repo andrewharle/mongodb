@@ -1,24 +1,26 @@
 // top.cpp
-/*
- *    Copyright (C) 2010 10gen Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -72,10 +74,10 @@ Top& Top::get(ServiceContext* service) {
     return getTop(service);
 }
 
-void Top::record(OperationContext* txn,
+void Top::record(OperationContext* opCtx,
                  StringData ns,
                  LogicalOp logicalOp,
-                 int lockType,
+                 LockType lockType,
                  long long micros,
                  bool command,
                  Command::ReadWriteType readWriteType) {
@@ -91,23 +93,23 @@ void Top::record(OperationContext* txn,
     }
 
     CollectionData& coll = _usage[hashedNs];
-    _record(txn, coll, logicalOp, lockType, micros, readWriteType);
+    _record(opCtx, coll, logicalOp, lockType, micros, readWriteType);
 }
 
-void Top::_record(OperationContext* txn,
+void Top::_record(OperationContext* opCtx,
                   CollectionData& c,
                   LogicalOp logicalOp,
-                  int lockType,
+                  LockType lockType,
                   long long micros,
                   Command::ReadWriteType readWriteType) {
 
-    _incrementHistogram(txn, micros, &c.opLatencyHistogram, readWriteType);
+    _incrementHistogram(opCtx, micros, &c.opLatencyHistogram, readWriteType);
 
     c.total.inc(micros);
 
-    if (lockType > 0)
+    if (lockType == LockType::WriteLocked)
         c.writeLock.inc(micros);
-    else if (lockType < 0)
+    else if (lockType == LockType::ReadLocked)
         c.readLock.inc(micros);
 
     switch (logicalOp) {
@@ -206,11 +208,11 @@ void Top::appendLatencyStats(StringData ns, bool includeHistograms, BSONObjBuild
     builder->append("latencyStats", latencyStatsBuilder.obj());
 }
 
-void Top::incrementGlobalLatencyStats(OperationContext* txn,
+void Top::incrementGlobalLatencyStats(OperationContext* opCtx,
                                       uint64_t latency,
                                       Command::ReadWriteType readWriteType) {
     stdx::lock_guard<SimpleMutex> guard(_lock);
-    _incrementHistogram(txn, latency, &_globalHistogramStats, readWriteType);
+    _incrementHistogram(opCtx, latency, &_globalHistogramStats, readWriteType);
 }
 
 void Top::appendGlobalLatencyStats(bool includeHistograms, BSONObjBuilder* builder) {
@@ -218,12 +220,17 @@ void Top::appendGlobalLatencyStats(bool includeHistograms, BSONObjBuilder* build
     _globalHistogramStats.append(includeHistograms, builder);
 }
 
-void Top::_incrementHistogram(OperationContext* txn,
+void Top::incrementGlobalTransactionLatencyStats(uint64_t latency) {
+    stdx::lock_guard<SimpleMutex> guard(_lock);
+    _globalHistogramStats.increment(latency, Command::ReadWriteType::kTransaction);
+}
+
+void Top::_incrementHistogram(OperationContext* opCtx,
                               long long latency,
                               OperationLatencyHistogram* histogram,
                               Command::ReadWriteType readWriteType) {
     // Only update histogram if operation came from a user.
-    Client* client = txn->getClient();
+    Client* client = opCtx->getClient();
     if (client->isFromUserConnection() && !client->isInDirectClient()) {
         histogram->increment(latency, readWriteType);
     }

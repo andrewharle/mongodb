@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2015 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -28,8 +30,6 @@
 
 #include "mongo/platform/basic.h"
 
-#include "mongo/db/repl/old_update_position_args.h"
-#include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/reporter.h"
 #include "mongo/db/repl/update_position_args.h"
 #include "mongo/executor/network_interface_mock.h"
@@ -45,8 +45,6 @@ using namespace mongo::repl;
 using executor::NetworkInterfaceMock;
 using executor::RemoteCommandRequest;
 using executor::RemoteCommandResponse;
-
-using ResponseStatus = mongo::executor::TaskExecutor::ResponseStatus;
 
 class MockProgressManager {
 public:
@@ -66,27 +64,17 @@ public:
         _configVersion = configVersion;
     }
 
-    StatusWith<BSONObj> prepareReplSetUpdatePositionCommand(
-        ReplicationCoordinator::ReplSetUpdatePositionCommandStyle commandStyle) {
+    StatusWith<BSONObj> prepareReplSetUpdatePositionCommand() {
         BSONObjBuilder cmdBuilder;
         cmdBuilder.append(UpdatePositionArgs::kCommandFieldName, 1);
         BSONArrayBuilder arrayBuilder(
             cmdBuilder.subarrayStart(UpdatePositionArgs::kUpdateArrayFieldName));
         for (auto&& itr : _progressMap) {
             BSONObjBuilder entry(arrayBuilder.subobjStart());
-            switch (commandStyle) {
-                case ReplicationCoordinator::ReplSetUpdatePositionCommandStyle::kNewStyle:
-                    itr.second.lastDurableOpTime.append(
-                        &entry, UpdatePositionArgs::kDurableOpTimeFieldName);
-                    itr.second.lastAppliedOpTime.append(
-                        &entry, UpdatePositionArgs::kAppliedOpTimeFieldName);
-                    break;
-                case ReplicationCoordinator::ReplSetUpdatePositionCommandStyle::kOldStyle:
-                    // Assume protocol version 1.
-                    itr.second.lastDurableOpTime.append(&entry,
-                                                        OldUpdatePositionArgs::kOpTimeFieldName);
-                    break;
-            }
+            itr.second.lastDurableOpTime.append(&entry,
+                                                UpdatePositionArgs::kDurableOpTimeFieldName);
+            itr.second.lastAppliedOpTime.append(&entry,
+                                                UpdatePositionArgs::kAppliedOpTimeFieldName);
             entry.append(UpdatePositionArgs::kMemberIdFieldName, itr.first);
             if (_configVersion != -1) {
                 entry.append(UpdatePositionArgs::kConfigVersionFieldName, _configVersion);
@@ -122,7 +110,7 @@ public:
      */
     BSONObj processNetworkResponse(const BSONObj& obj,
                                    bool expectReadyRequestsAfterProcessing = false);
-    BSONObj processNetworkResponse(const ResponseStatus rs,
+    BSONObj processNetworkResponse(const RemoteCommandResponse rs,
                                    bool expectReadyRequestsAfterProcessing = false);
 
     void runUntil(Date_t when, bool expectReadyRequestsAfterAdvancingClock = false);
@@ -160,19 +148,16 @@ void ReporterTest::setUp() {
     posUpdater = stdx::make_unique<MockProgressManager>();
     posUpdater->updateMap(0, OpTime({3, 0}, 1), OpTime({3, 0}, 1));
 
-    prepareReplSetUpdatePositionCommandFn =
-        stdx::bind(&MockProgressManager::prepareReplSetUpdatePositionCommand,
-                   posUpdater.get(),
-                   stdx::placeholders::_1);
+    prepareReplSetUpdatePositionCommandFn = [updater = posUpdater.get()] {
+        return updater->prepareReplSetUpdatePositionCommand();
+    };
 
-    reporter = stdx::make_unique<Reporter>(
-        _executorProxy.get(),
-        [this](ReplicationCoordinator::ReplSetUpdatePositionCommandStyle commandStyle) {
-            return prepareReplSetUpdatePositionCommandFn(commandStyle);
-        },
-        HostAndPort("h1"),
-        Milliseconds(1000),
-        Milliseconds(5000));
+    reporter =
+        stdx::make_unique<Reporter>(_executorProxy.get(),
+                                    [this]() { return prepareReplSetUpdatePositionCommandFn(); },
+                                    HostAndPort("h1"),
+                                    Milliseconds(1000),
+                                    Milliseconds(5000));
     launchExecutorThread();
 
     if (triggerAtSetUp()) {
@@ -185,7 +170,8 @@ void ReporterTest::setUp() {
 }
 
 void ReporterTest::tearDown() {
-    executor::ThreadPoolExecutorTest::tearDown();
+    getExecutor().shutdown();
+    getExecutor().join();
     // Executor may still invoke reporter's callback before shutting down.
     reporter.reset();
     posUpdater.reset();
@@ -212,7 +198,7 @@ BSONObj ReporterTest::processNetworkResponse(const BSONObj& obj,
     return cmdObj;
 }
 
-BSONObj ReporterTest::processNetworkResponse(const ResponseStatus rs,
+BSONObj ReporterTest::processNetworkResponse(const RemoteCommandResponse rs,
                                              bool expectReadyRequestsAfterProcessing) {
     auto net = getNet();
     net->enterNetwork();
@@ -326,10 +312,9 @@ TEST_F(ReporterTestNoTriggerAtSetUp,
 
 TEST_F(ReporterTestNoTriggerAtSetUp, IsNotActiveAfterUpdatePositionTimeoutExpires) {
 
-    prepareReplSetUpdatePositionCommandFn =
-        stdx::bind(&MockProgressManager::prepareReplSetUpdatePositionCommand,
-                   posUpdater.get(),
-                   stdx::placeholders::_1);
+    auto prepareReplSetUpdatePositionCommandFn = [updater = posUpdater.get()] {
+        return updater->prepareReplSetUpdatePositionCommand();
+    };
 
     // Create a new test Reporter so we can configure the update position timeout.
     Milliseconds updatePositionTimeout = Milliseconds(5000);
@@ -418,9 +403,8 @@ TEST_F(ReporterTest, InvalidReplicaSetResponseWithSameConfigVersionOnSyncTargetS
     assertReporterDone();
 }
 
-TEST_F(
-    ReporterTest,
-    InvalidReplicaSetResponseWithNewerConfigVersionOnSyncTargetToAnNewCommandStyleRequestDoesNotStopTheReporter) {
+TEST_F(ReporterTest,
+       InvalidReplicaSetResponseWithNewerConfigVersionOnSyncTargetDoesNotStopTheReporter) {
     // Reporter should not retry update command on sync source immediately after seeing newer
     // configuration.
     ASSERT_OK(reporter->trigger());
@@ -431,32 +415,6 @@ TEST_F(
                                      << "newer config"
                                      << "configVersion"
                                      << posUpdater->getConfigVersion() + 1));
-
-    ASSERT_TRUE(reporter->isActive());
-}
-
-TEST_F(
-    ReporterTest,
-    InvalidReplicaSetResponseWithNewerConfigVersionOnSyncTargetToAnOldCommandStyleRequestDoesNotStopTheReporter) {
-    auto expectedNewStyleCommandRequest = unittest::assertGet(prepareReplSetUpdatePositionCommandFn(
-        ReplicationCoordinator::ReplSetUpdatePositionCommandStyle::kNewStyle));
-
-    auto commandRequest =
-        processNetworkResponse(BSON("ok" << 0 << "code" << int(ErrorCodes::BadValue) << "errmsg"
-                                         << "Unexpected field durableOpTime in UpdateInfoArgs"),
-                               true);
-    ASSERT_BSONOBJ_EQ(expectedNewStyleCommandRequest, commandRequest);
-
-    // Update command object should match old style (pre-3.2.4).
-    auto expectedOldStyleCommandRequest = unittest::assertGet(prepareReplSetUpdatePositionCommandFn(
-        ReplicationCoordinator::ReplSetUpdatePositionCommandStyle::kOldStyle));
-
-    commandRequest = processNetworkResponse(
-        BSON("ok" << 0 << "code" << int(ErrorCodes::InvalidReplicaSetConfig) << "errmsg"
-                  << "newer config"
-                  << "configVersion"
-                  << posUpdater->getConfigVersion() + 1));
-    ASSERT_BSONOBJ_EQ(expectedOldStyleCommandRequest, commandRequest);
 
     ASSERT_TRUE(reporter->isActive());
 }
@@ -549,9 +507,9 @@ TEST_F(ReporterTest, ShuttingReporterDownWhileSecondCommandRequestIsInProgressSt
 
 TEST_F(ReporterTestNoTriggerAtSetUp, CommandPreparationFailureStopsTheReporter) {
     Status expectedStatus(ErrorCodes::UnknownError, "unknown error");
-    prepareReplSetUpdatePositionCommandFn =
-        [expectedStatus](ReplicationCoordinator::ReplSetUpdatePositionCommandStyle commandStyle)
-        -> StatusWith<BSONObj> { return expectedStatus; };
+    prepareReplSetUpdatePositionCommandFn = [expectedStatus]() -> StatusWith<BSONObj> {
+        return expectedStatus;
+    };
     ASSERT_OK(reporter->trigger());
 
     ASSERT_EQUALS(expectedStatus, reporter->join());
@@ -567,44 +525,13 @@ TEST_F(ReporterTest, CommandPreparationFailureDuringRescheduleStopsTheReporter) 
 
     // This will cause command preparation to fail for the subsequent request.
     Status expectedStatus(ErrorCodes::UnknownError, "unknown error");
-    prepareReplSetUpdatePositionCommandFn =
-        [expectedStatus](ReplicationCoordinator::ReplSetUpdatePositionCommandStyle commandStyle)
-        -> StatusWith<BSONObj> { return expectedStatus; };
+    prepareReplSetUpdatePositionCommandFn = [expectedStatus]() -> StatusWith<BSONObj> {
+        return expectedStatus;
+    };
 
     processNetworkResponse(BSON("ok" << 1));
 
     ASSERT_EQUALS(expectedStatus, reporter->join());
-    assertReporterDone();
-}
-
-// If a remote server (most likely running with version before 3.2.4) returns ErrorCodes::BadValue
-// on a new style replSetUpdateCommand command object, we should regenerate the command with
-// pre-3.2.4 style arguments and retry the remote command.
-TEST_F(ReporterTest,
-       BadValueErrorOnNewStyleCommandShouldCauseRescheduleImmediatelyWithOldStyleCommand) {
-    runReadyScheduledTasks();
-
-    auto expectedNewStyleCommandRequest = unittest::assertGet(prepareReplSetUpdatePositionCommandFn(
-        ReplicationCoordinator::ReplSetUpdatePositionCommandStyle::kNewStyle));
-
-    auto commandRequest =
-        processNetworkResponse(BSON("ok" << 0 << "code" << int(ErrorCodes::BadValue) << "errmsg"
-                                         << "Unexpected field durableOpTime in UpdateInfoArgs"),
-                               true);
-    ASSERT_BSONOBJ_EQ(expectedNewStyleCommandRequest, commandRequest);
-
-    auto expectedOldStyleCommandRequest = unittest::assertGet(prepareReplSetUpdatePositionCommandFn(
-        ReplicationCoordinator::ReplSetUpdatePositionCommandStyle::kOldStyle));
-
-    commandRequest = processNetworkResponse(BSON("ok" << 1));
-
-    // Update command object should match old style (pre-3.2.2).
-    ASSERT_BSONOBJ_NE(expectedNewStyleCommandRequest, expectedOldStyleCommandRequest);
-    ASSERT_BSONOBJ_EQ(expectedOldStyleCommandRequest, commandRequest);
-
-    reporter->shutdown();
-
-    ASSERT_EQUALS(ErrorCodes::CallbackCanceled, reporter->join());
     assertReporterDone();
 }
 
@@ -676,7 +603,8 @@ TEST_F(ReporterTestNoTriggerAtSetUp, FailingToScheduleRemoteCommandTaskShouldMak
             : unittest::TaskExecutorProxy(executor) {}
         virtual StatusWith<executor::TaskExecutor::CallbackHandle> scheduleRemoteCommand(
             const executor::RemoteCommandRequest& request,
-            const RemoteCommandCallbackFn& cb) override {
+            const RemoteCommandCallbackFn& cb,
+            const transport::BatonHandle& baton = nullptr) override {
             // Any error status other than ShutdownInProgress will cause the reporter to fassert.
             return Status(ErrorCodes::ShutdownInProgress,
                           "failed to send remote command - shutdown in progress");
@@ -727,9 +655,9 @@ TEST_F(ReporterTest, KeepAliveTimeoutFailingToScheduleRemoteCommandShouldMakeRep
     ASSERT_TRUE(reporter->isActive());
 
     Status expectedStatus(ErrorCodes::UnknownError, "failed to prepare update command");
-    prepareReplSetUpdatePositionCommandFn =
-        [expectedStatus](ReplicationCoordinator::ReplSetUpdatePositionCommandStyle commandStyle)
-        -> StatusWith<BSONObj> { return expectedStatus; };
+    prepareReplSetUpdatePositionCommandFn = [expectedStatus]() -> StatusWith<BSONObj> {
+        return expectedStatus;
+    };
 
     runUntil(until);
 

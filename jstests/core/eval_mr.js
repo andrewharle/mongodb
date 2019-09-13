@@ -1,6 +1,13 @@
 // Test that the eval command can't be used to invoke the mapReduce command.  SERVER-17889.
 //
-// @tags: [requires_eval_command]
+// @tags: [
+//   # Cannot implicitly shard accessed collections because of following errmsg: Cannot output to a
+//   # non-sharded collection because sharded collection exists already.
+//   assumes_unsharded_collection,
+//   does_not_support_stepdowns,
+//   requires_eval_command,
+//   requires_non_retryable_commands,
+// ]
 (function() {
     "use strict";
     db.eval_mr.drop();

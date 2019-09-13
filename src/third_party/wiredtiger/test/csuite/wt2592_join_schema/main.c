@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -70,7 +70,7 @@ main(int argc, char *argv[])
 	WT_SESSION *session;
 	const char *country, *tablename;
 	char countryuri[256], joinuri[256], yearuri[256];
-	uint64_t recno, population;
+	uint64_t population, recno;
 	uint16_t year;
 	int count, ret;
 

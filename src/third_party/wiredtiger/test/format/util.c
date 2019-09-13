@@ -1,5 +1,5 @@
 /*-
- * Public Domain 2014-2016 MongoDB, Inc.
+ * Public Domain 2014-2019 MongoDB, Inc.
  * Public Domain 2008-2014 WiredTiger, Inc.
  *
  * This is free and unencumbered software released into the public domain.
@@ -33,7 +33,7 @@
 #endif
 
 void
-key_len_setup(void)
+key_init(void)
 {
 	size_t i;
 	uint32_t max;
@@ -61,7 +61,7 @@ key_len_setup(void)
 }
 
 void
-key_gen_setup(WT_ITEM *key)
+key_gen_init(WT_ITEM *key)
 {
 	size_t i, len;
 	char *p;
@@ -75,6 +75,13 @@ key_gen_setup(WT_ITEM *key)
 	key->memsize = len;
 	key->data = key->mem;
 	key->size = 0;
+}
+
+void
+key_gen_teardown(WT_ITEM *key)
+{
+	free(key->mem);
+	memset(key, 0, sizeof(*key));
 }
 
 static void
@@ -134,10 +141,12 @@ key_gen_insert(WT_RAND_STATE *rnd, WT_ITEM *key, uint64_t keyno)
 	    "11", "12", "13", "14", "15"
 	};
 
-	key_gen_common(key, keyno, suffix[mmrand(rnd, 1, 15) - 1]);
+	key_gen_common(key, keyno, suffix[mmrand(rnd, 0, 14)]);
 }
 
-static uint32_t val_dup_data_len;	/* Length of duplicate data items */
+static char	*val_base;		/* Base/original value */
+static uint32_t  val_dup_data_len;	/* Length of duplicate data items */
+static uint32_t  val_len;		/* Length of data items */
 
 static inline uint32_t
 value_len(WT_RAND_STATE *rnd, uint64_t keyno, uint32_t min, uint32_t max)
@@ -157,12 +166,9 @@ value_len(WT_RAND_STATE *rnd, uint64_t keyno, uint32_t min, uint32_t max)
 }
 
 void
-val_gen_setup(WT_RAND_STATE *rnd, WT_ITEM *value)
+val_init(void)
 {
-	size_t i, len;
-	char *p;
-
-	memset(value, 0, sizeof(WT_ITEM));
+	size_t i;
 
 	/*
 	 * Set initial buffer contents to recognizable text.
@@ -171,18 +177,37 @@ val_gen_setup(WT_RAND_STATE *rnd, WT_ITEM *value)
 	 * into the buffer by a few extra bytes, used to generate different
 	 * data for column-store run-length encoded files.
 	 */
-	len = MAX(KILOBYTE(100), g.c_value_max) + 20;
-	p = dmalloc(len);
-	for (i = 0; i < len; ++i)
-		p[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[i % 26];
+	val_len = MAX(KILOBYTE(100), g.c_value_max) + 20;
+	val_base = dmalloc(val_len);
+	for (i = 0; i < val_len; ++i)
+		val_base[i] = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"[i % 26];
 
-	value->mem = p;
-	value->memsize = len;
+	val_dup_data_len = value_len(NULL,
+	    (uint64_t)mmrand(NULL, 1, 20), g.c_value_min, g.c_value_max);
+}
+
+void
+val_teardown(void)
+{
+	free(val_base);
+	val_base = NULL;
+	val_dup_data_len = val_len = 0;
+}
+
+void
+val_gen_init(WT_ITEM *value)
+{
+	value->mem = dmalloc(val_len);
+	value->memsize = val_len;
 	value->data = value->mem;
 	value->size = 0;
+}
 
-	val_dup_data_len = value_len(rnd,
-	    (uint64_t)mmrand(rnd, 1, 20), g.c_value_min, g.c_value_max);
+void
+val_gen_teardown(WT_ITEM *value)
+{
+	free(value->mem);
+	memset(value, 0, sizeof(*value));
 }
 
 void
@@ -227,14 +252,16 @@ val_gen(WT_RAND_STATE *rnd, WT_ITEM *value, uint64_t keyno)
 	 * variable-length column-stores use a duplicate data value to test RLE.
 	 */
 	if (g.type == VAR && mmrand(rnd, 1, 100) < g.c_repeat_data_pct) {
+		value->size = val_dup_data_len;
+		memcpy(p, val_base, value->size);
 		(void)strcpy(p, "DUPLICATEV");
 		p[10] = '/';
-		value->size = val_dup_data_len;
 	} else {
-		u64_to_string_zf(keyno, p, 11);
-		p[10] = '/';
 		value->size =
 		    value_len(rnd, keyno, g.c_value_min, g.c_value_max);
+		memcpy(p, val_base, value->size);
+		u64_to_string_zf(keyno, p, 11);
+		p[10] = '/';
 	}
 }
 
@@ -408,8 +435,9 @@ path_setup(const char *home)
 uint32_t
 rng(WT_RAND_STATE *rnd)
 {
-	char buf[64];
-	uint32_t r;
+	u_long ulv;
+	uint32_t v;
+	char *endptr, buf[64];
 
 	/*
 	 * Threaded operations have their own RNG information, otherwise we
@@ -439,16 +467,20 @@ rng(WT_RAND_STATE *rnd)
 			testutil_die(errno, "random number log");
 		}
 
-		return ((uint32_t)strtoul(buf, NULL, 10));
+		errno = 0;
+		ulv = strtoul(buf, &endptr, 10);
+		testutil_assert(errno == 0 && endptr[0] == '\n');
+		testutil_assert(ulv <= UINT32_MAX);
+		return ((uint32_t)ulv);
 	}
 
-	r = __wt_random(rnd);
+	v = __wt_random(rnd);
 
 	/* Save and flush the random number so we're up-to-date on error. */
-	(void)fprintf(g.randfp, "%" PRIu32 "\n", r);
+	(void)fprintf(g.randfp, "%" PRIu32 "\n", v);
 	(void)fflush(g.randfp);
 
-	return (r);
+	return (v);
 }
 
 /*
@@ -469,17 +501,152 @@ fclose_and_clear(FILE **fpp)
 }
 
 /*
+ * checkpoint --
+ *	Periodically take a checkpoint
+ */
+WT_THREAD_RET
+checkpoint(void *arg)
+{
+	WT_CONNECTION *conn;
+	WT_DECL_RET;
+	WT_SESSION *session;
+	u_int secs;
+	const char *ckpt_config;
+	char config_buf[64];
+	bool backup_locked;
+
+	(void)arg;
+	conn = g.wts_conn;
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
+
+	for (secs = mmrand(NULL, 1, 10); !g.workers_finished;) {
+		if (secs > 0) {
+			__wt_sleep(1, 0);
+			--secs;
+			continue;
+		}
+
+		/*
+		 * LSM and data-sources don't support named checkpoints. Also,
+		 * don't attempt named checkpoints during a hot backup. It's
+		 * OK to create named checkpoints during a hot backup, but we
+		 * can't delete them, so repeating an already existing named
+		 * checkpoint will fail when we can't drop the previous one.
+		 */
+		ckpt_config = NULL;
+		backup_locked = false;
+		if (!DATASOURCE("helium") && !DATASOURCE("kvsbdb") &&
+		    !DATASOURCE("lsm"))
+			switch (mmrand(NULL, 1, 20)) {
+			case 1:
+				/*
+				 * 5% create a named snapshot. Rotate between a
+				 * few names to test multiple named snapshots in
+				 * the system.
+				 */
+				ret = pthread_rwlock_trywrlock(&g.backup_lock);
+				if (ret == 0) {
+					backup_locked = true;
+					testutil_check(__wt_snprintf(
+					    config_buf, sizeof(config_buf),
+					    "name=mine.%" PRIu32,
+					    mmrand(NULL, 1, 4)));
+					ckpt_config = config_buf;
+				} else if (ret != EBUSY)
+					testutil_check(ret);
+				break;
+			case 2:
+				/*
+				 * 5% drop all named snapshots.
+				 */
+				ret = pthread_rwlock_trywrlock(&g.backup_lock);
+				if (ret == 0) {
+					backup_locked = true;
+					ckpt_config = "drop=(all)";
+				} else if (ret != EBUSY)
+					testutil_check(ret);
+				break;
+			}
+
+		testutil_check(session->checkpoint(session, ckpt_config));
+
+		if (backup_locked)
+			testutil_check(pthread_rwlock_unlock(&g.backup_lock));
+
+		secs = mmrand(NULL, 5, 40);
+	}
+
+	testutil_check(session->close(session, NULL));
+	return (WT_THREAD_RET_VALUE);
+}
+
+/*
+ * timestamp --
+ *	Periodically update the oldest timestamp.
+ */
+WT_THREAD_RET
+timestamp(void *arg)
+{
+	WT_CONNECTION *conn;
+	WT_DECL_RET;
+	WT_SESSION *session;
+	char buf[64];
+	bool done;
+
+	(void)(arg);
+	conn = g.wts_conn;
+
+	testutil_check(conn->open_session(conn, NULL, NULL, &session));
+
+	testutil_check(
+	    __wt_snprintf(buf, sizeof(buf), "%s", "oldest_timestamp="));
+
+	/* Update the oldest timestamp at least once every 15 seconds. */
+	done = false;
+	do {
+		/*
+		 * Do a final bump of the oldest timestamp as part of shutting
+		 * down the worker threads, otherwise recent operations can
+		 * prevent verify from running.
+		 */
+		if (g.workers_finished)
+			done = true;
+		else
+			random_sleep(&g.rnd, 15);
+
+		/*
+		 * Lock out transaction timestamp operations. The lock acts as a
+		 * barrier ensuring we've checked if the workers have finished,
+		 * we don't want that line reordered.
+		 */
+		testutil_check(pthread_rwlock_wrlock(&g.ts_lock));
+
+		ret = conn->query_timestamp(conn,
+		    buf + strlen("oldest_timestamp="), "get=all_committed");
+		testutil_assert(ret == 0 || ret == WT_NOTFOUND);
+		if (ret == 0)
+			testutil_check(conn->set_timestamp(conn, buf));
+
+		testutil_check(pthread_rwlock_unlock(&g.ts_lock));
+	} while (!done);
+
+	testutil_check(session->close(session, NULL));
+	return (WT_THREAD_RET_VALUE);
+}
+
+/*
  * alter --
  *	Periodically alter a table's metadata.
  */
-void *
+WT_THREAD_RET
 alter(void *arg)
 {
 	WT_CONNECTION *conn;
+	WT_DECL_RET;
 	WT_SESSION *session;
 	u_int period;
-	bool access_value;
 	char buf[32];
+	bool access_value;
 
 	(void)(arg);
 	conn = g.wts_conn;
@@ -501,14 +668,54 @@ alter(void *arg)
 		    "access_pattern_hint=%s",
 		    access_value ? "random" : "none"));
 		access_value = !access_value;
-		if (session->alter(session, g.uri, buf) != 0)
-			break;
+		/*
+		 * Alter can return EBUSY if concurrent with other operations.
+		 */
+		while ((ret = session->alter(session, g.uri, buf)) != 0 &&
+		    ret != EBUSY)
+			testutil_die(ret, "session.alter");
 		while (period > 0 && !g.workers_finished) {
 			--period;
-			sleep(1);
+			__wt_sleep(1, 0);
 		}
 	}
 
 	testutil_check(session->close(session, NULL));
-	return (NULL);
+	return (WT_THREAD_RET_VALUE);
+}
+
+/*
+ * print_item_data --
+ *	Display a single data/size pair, with a tag.
+ */
+void
+print_item_data(const char *tag, const uint8_t *data, size_t size)
+{
+	static const char hex[] = "0123456789abcdef";
+	u_char ch;
+
+	fprintf(stderr, "\t%s {", tag);
+	if (g.type == FIX)
+		fprintf(stderr, "0x%02x", data[0]);
+	else
+		for (; size > 0; --size, ++data) {
+			ch = data[0];
+			if (__wt_isprint(ch))
+				fprintf(stderr, "%c", (int)ch);
+			else
+				fprintf(stderr, "%x%x",
+				    (u_int)hex[(data[0] & 0xf0) >> 4],
+				    (u_int)hex[data[0] & 0x0f]);
+		}
+	fprintf(stderr, "}\n");
+}
+
+/*
+ * print_item --
+ *	Display a single data/size pair, with a tag.
+ */
+void
+print_item(const char *tag, WT_ITEM *item)
+{
+	print_item_data(tag, item->data, item->size);
 }

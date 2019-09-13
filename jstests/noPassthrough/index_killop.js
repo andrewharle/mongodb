@@ -4,7 +4,7 @@
 (function() {
     "use strict";
 
-    const conn = MongoRunner.runMongod({smallfiles: "", nojournal: ""});
+    const conn = MongoRunner.runMongod({smallfiles: ""});
     assert.neq(null, conn, "mongod was unable to start up");
 
     const testDB = conn.getDB("test");
@@ -21,7 +21,7 @@
             // Identify the index build as the createIndex command
             // It is assumed that no other clients are concurrently
             // accessing the 'test' database.
-            if ((op.op == 'query' || op.op == 'command') && 'createIndexes' in op.query) {
+            if ((op.op == 'query' || op.op == 'command') && 'createIndexes' in op.command) {
                 indexBuildOpId = op.opid;
             }
         });
@@ -66,4 +66,5 @@
 
     testAbortIndexBuild({background: true});
     testAbortIndexBuild({background: false});
+    MongoRunner.stopMongod(conn);
 })();

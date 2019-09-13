@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2017 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -26,6 +28,8 @@
  *    it in the license file.
  */
 
+#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kSharding
+
 #include "mongo/platform/basic.h"
 
 #include "mongo/s/config_server_catalog_cache_loader.h"
@@ -33,8 +37,11 @@
 #include "mongo/db/client.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/s/catalog/sharding_catalog_client.h"
+#include "mongo/s/database_version_helpers.h"
 #include "mongo/s/grid.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/util/fail_point_service.h"
+#include "mongo/util/log.h"
 
 namespace mongo {
 
@@ -47,7 +54,7 @@ namespace {
  */
 ThreadPool::Options makeDefaultThreadPoolOptions() {
     ThreadPool::Options options;
-    options.poolName = "CatalogCacheLoader";
+    options.poolName = "ConfigServerCatalogCacheLoader";
     options.minThreads = 0;
     options.maxThreads = 6;
 
@@ -79,9 +86,9 @@ struct QueryAndSort {
  * current position in the chunk cursor.
  */
 QueryAndSort createConfigDiffQuery(const NamespaceString& nss, ChunkVersion collectionVersion) {
-    return {BSON(ChunkType::ns() << nss.ns() << ChunkType::DEPRECATED_lastmod() << GTE
+    return {BSON(ChunkType::ns() << nss.ns() << ChunkType::lastmod() << GTE
                                  << Timestamp(collectionVersion.toLong())),
-            BSON(ChunkType::DEPRECATED_lastmod() << 1)};
+            BSON(ChunkType::lastmod() << 1)};
 }
 
 /**
@@ -90,10 +97,10 @@ QueryAndSort createConfigDiffQuery(const NamespaceString& nss, ChunkVersion coll
 CollectionAndChangedChunks getChangedChunks(OperationContext* opCtx,
                                             const NamespaceString& nss,
                                             ChunkVersion sinceVersion) {
-    const auto catalogClient = Grid::get(opCtx)->catalogClient(opCtx);
+    const auto catalogClient = Grid::get(opCtx)->catalogClient();
 
     // Decide whether to do a full or partial load based on the state of the collection
-    const auto coll = uassertStatusOK(catalogClient->getCollection(opCtx, nss.ns())).value;
+    const auto coll = uassertStatusOK(catalogClient->getCollection(opCtx, nss)).value;
     uassert(ErrorCodes::NamespaceNotFound,
             str::stream() << "Collection " << nss.ns() << " is dropped.",
             !coll.getDropped());
@@ -107,26 +114,25 @@ CollectionAndChangedChunks getChangedChunks(OperationContext* opCtx,
     const auto diffQuery = createConfigDiffQuery(nss, startingCollectionVersion);
 
     // Query the chunks which have changed
-    std::vector<ChunkType> changedChunks;
     repl::OpTime opTime;
-    uassertStatusOK(Grid::get(opCtx)->catalogClient(opCtx)->getChunks(
-        opCtx,
-        diffQuery.query,
-        diffQuery.sort,
-        boost::none,
-        &changedChunks,
-        &opTime,
-        repl::ReadConcernLevel::kMajorityReadConcern));
+    const std::vector<ChunkType> changedChunks = uassertStatusOK(
+        Grid::get(opCtx)->catalogClient()->getChunks(opCtx,
+                                                     diffQuery.query,
+                                                     diffQuery.sort,
+                                                     boost::none,
+                                                     &opTime,
+                                                     repl::ReadConcernLevel::kMajorityReadConcern));
 
     uassert(ErrorCodes::ConflictingOperationInProgress,
             "No chunks were found for the collection",
             !changedChunks.empty());
 
-    return {coll.getEpoch(),
-            coll.getKeyPattern().toBSON(),
-            coll.getDefaultCollation(),
-            coll.getUnique(),
-            std::move(changedChunks)};
+    return CollectionAndChangedChunks(coll.getUUID(),
+                                      coll.getEpoch(),
+                                      coll.getKeyPattern().toBSON(),
+                                      coll.getDefaultCollation(),
+                                      coll.getUnique(),
+                                      std::move(changedChunks));
 }
 
 }  // namespace
@@ -141,14 +147,37 @@ ConfigServerCatalogCacheLoader::~ConfigServerCatalogCacheLoader() {
     _threadPool.join();
 }
 
-std::shared_ptr<Notification<void>> ConfigServerCatalogCacheLoader::getChunksSince(
-    const NamespaceString& nss,
-    ChunkVersion version,
-    stdx::function<void(OperationContext*, StatusWith<CollectionAndChangedChunks>)> callbackFn) {
+void ConfigServerCatalogCacheLoader::initializeReplicaSetRole(bool isPrimary) {
+    MONGO_UNREACHABLE;
+}
 
+void ConfigServerCatalogCacheLoader::onStepDown() {
+    MONGO_UNREACHABLE;
+}
+
+void ConfigServerCatalogCacheLoader::onStepUp() {
+    MONGO_UNREACHABLE;
+}
+
+void ConfigServerCatalogCacheLoader::notifyOfCollectionVersionUpdate(const NamespaceString& nss) {
+    MONGO_UNREACHABLE;
+}
+
+void ConfigServerCatalogCacheLoader::waitForCollectionFlush(OperationContext* opCtx,
+                                                            const NamespaceString& nss) {
+    MONGO_UNREACHABLE;
+}
+
+void ConfigServerCatalogCacheLoader::waitForDatabaseFlush(OperationContext* opCtx,
+                                                          StringData dbName) {
+    MONGO_UNREACHABLE;
+}
+
+std::shared_ptr<Notification<void>> ConfigServerCatalogCacheLoader::getChunksSince(
+    const NamespaceString& nss, ChunkVersion version, GetChunksSinceCallbackFn callbackFn) {
     auto notify = std::make_shared<Notification<void>>();
 
-    uassertStatusOK(_threadPool.schedule([ this, nss, version, notify, callbackFn ]() noexcept {
+    uassertStatusOK(_threadPool.schedule([ nss, version, notify, callbackFn ]() noexcept {
         auto opCtx = Client::getCurrent()->makeOperationContext();
 
         auto swCollAndChunks = [&]() -> StatusWith<CollectionAndChangedChunks> {
@@ -164,6 +193,29 @@ std::shared_ptr<Notification<void>> ConfigServerCatalogCacheLoader::getChunksSin
     }));
 
     return notify;
+}
+
+void ConfigServerCatalogCacheLoader::getDatabase(
+    StringData dbName,
+    stdx::function<void(OperationContext*, StatusWith<DatabaseType>)> callbackFn) {
+    uassertStatusOK(_threadPool.schedule([ name = dbName.toString(), callbackFn ]() noexcept {
+        auto opCtx = Client::getCurrent()->makeOperationContext();
+
+        auto swDbt = [&]() -> StatusWith<DatabaseType> {
+            try {
+                return uassertStatusOK(
+                           Grid::get(opCtx.get())
+                               ->catalogClient()
+                               ->getDatabase(
+                                   opCtx.get(), name, repl::ReadConcernLevel::kMajorityReadConcern))
+                    .value;
+            } catch (const DBException& ex) {
+                return ex.toStatus();
+            }
+        }();
+
+        callbackFn(opCtx.get(), std::move(swDbt));
+    }));
 }
 
 }  // namespace mongo

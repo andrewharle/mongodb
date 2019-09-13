@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -61,11 +63,11 @@ using stdx::make_unique;
 // static
 const char* MultiPlanStage::kStageType = "MULTI_PLAN";
 
-MultiPlanStage::MultiPlanStage(OperationContext* txn,
+MultiPlanStage::MultiPlanStage(OperationContext* opCtx,
                                const Collection* collection,
                                CanonicalQuery* cq,
                                CachingMode cachingMode)
-    : PlanStage(kStageType, txn),
+    : PlanStage(kStageType, opCtx),
       _collection(collection),
       _cachingMode(cachingMode),
       _query(cq),
@@ -77,8 +79,10 @@ MultiPlanStage::MultiPlanStage(OperationContext* txn,
     invariant(_collection);
 }
 
-void MultiPlanStage::addPlan(QuerySolution* solution, PlanStage* root, WorkingSet* ws) {
-    _candidates.push_back(CandidatePlan(solution, root, ws));
+void MultiPlanStage::addPlan(std::unique_ptr<QuerySolution> solution,
+                             PlanStage* root,
+                             WorkingSet* ws) {
+    _candidates.push_back(CandidatePlan(std::move(solution), root, ws));
     _children.emplace_back(root);
 }
 
@@ -127,7 +131,7 @@ PlanStage::StageState MultiPlanStage::doWork(WorkingSetID* out) {
         // if the best solution fails. Alternatively we could try to
         // defer cache insertion to be after the first produced result.
 
-        _collection->infoCache()->getPlanCache()->remove(*_query);
+        _collection->infoCache()->getPlanCache()->remove(*_query).transitional_ignore();
 
         _bestPlanIdx = _backupPlanIdx;
         _backupPlanIdx = kNoSuchPlan;
@@ -149,15 +153,14 @@ Status MultiPlanStage::tryYield(PlanYieldPolicy* yieldPolicy) {
     //   2) some stage requested a yield due to a document fetch, or
     //   3) we need to yield and retry due to a WriteConflictException.
     // In all cases, the actual yielding happens here.
-    if (yieldPolicy->shouldYield()) {
-        bool alive = yieldPolicy->yield(_fetcher.get());
+    if (yieldPolicy->shouldYieldOrInterrupt()) {
+        auto yieldStatus = yieldPolicy->yieldOrInterrupt(_fetcher.get());
 
-        if (!alive) {
+        if (!yieldStatus.isOK()) {
             _failure = true;
-            Status failStat(ErrorCodes::QueryPlanKilled,
-                            "PlanExecutor killed during plan selection");
-            _statusMemberId = WorkingSetCommon::allocateStatusMember(_candidates[0].ws, failStat);
-            return failStat;
+            _statusMemberId =
+                WorkingSetCommon::allocateStatusMember(_candidates[0].ws, yieldStatus);
+            return yieldStatus;
         }
     }
 
@@ -169,17 +172,17 @@ Status MultiPlanStage::tryYield(PlanYieldPolicy* yieldPolicy) {
 }
 
 // static
-size_t MultiPlanStage::getTrialPeriodWorks(OperationContext* txn, const Collection* collection) {
+size_t MultiPlanStage::getTrialPeriodWorks(OperationContext* opCtx, const Collection* collection) {
     // Run each plan some number of times. This number is at least as great as
     // 'internalQueryPlanEvaluationWorks', but may be larger for big collections.
-    size_t numWorks = internalQueryPlanEvaluationWorks;
+    size_t numWorks = internalQueryPlanEvaluationWorks.load();
     if (NULL != collection) {
         // For large collections, the number of works is set to be this
         // fraction of the collection size.
         double fraction = internalQueryPlanEvaluationCollFraction;
 
-        numWorks = std::max(static_cast<size_t>(internalQueryPlanEvaluationWorks),
-                            static_cast<size_t>(fraction * collection->numRecords(txn)));
+        numWorks = std::max(static_cast<size_t>(internalQueryPlanEvaluationWorks.load()),
+                            static_cast<size_t>(fraction * collection->numRecords(opCtx)));
     }
 
     return numWorks;
@@ -189,7 +192,7 @@ size_t MultiPlanStage::getTrialPeriodWorks(OperationContext* txn, const Collecti
 size_t MultiPlanStage::getTrialPeriodNumToReturn(const CanonicalQuery& query) {
     // Determine the number of results which we will produce during the plan
     // ranking phase before stopping.
-    size_t numResults = static_cast<size_t>(internalQueryPlanEvaluationMaxResults);
+    size_t numResults = static_cast<size_t>(internalQueryPlanEvaluationMaxResults.load());
     if (query.getQueryRequest().getNToReturn()) {
         numResults =
             std::min(static_cast<size_t>(*query.getQueryRequest().getNToReturn()), numResults);
@@ -323,7 +326,13 @@ Status MultiPlanStage::pickBestPlan(PlanYieldPolicy* yieldPolicy) {
         }
 
         if (validSolutions) {
-            _collection->infoCache()->getPlanCache()->add(*_query, solutions, ranking.release());
+            _collection->infoCache()
+                ->getPlanCache()
+                ->add(*_query,
+                      solutions,
+                      ranking.release(),
+                      getOpCtx()->getServiceContext()->getPreciseClockSource()->now())
+                .transitional_ignore();
         }
     }
 
@@ -365,7 +374,7 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
             doneWorking = true;
         } else if (PlanStage::NEED_YIELD == state) {
             if (id == WorkingSet::INVALID_ID) {
-                if (!yieldPolicy->allowedToYield())
+                if (!yieldPolicy->canAutoYield())
                     throw WriteConflictException();
             } else {
                 WorkingSetMember* member = candidate.ws->get(id);
@@ -374,7 +383,7 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
                 _fetcher.reset(member->releaseFetcher());
             }
 
-            if (yieldPolicy->allowedToYield()) {
+            if (yieldPolicy->canAutoYield()) {
                 yieldPolicy->forceYield();
             }
 
@@ -405,7 +414,7 @@ bool MultiPlanStage::workAllPlans(size_t numResults, PlanYieldPolicy* yieldPolic
 
 namespace {
 
-void invalidateHelper(OperationContext* txn,
+void invalidateHelper(OperationContext* opCtx,
                       WorkingSet* ws,  // may flag for review
                       const RecordId& recordId,
                       list<WorkingSetID>* idsToInvalidate,
@@ -413,14 +422,14 @@ void invalidateHelper(OperationContext* txn,
     for (auto it = idsToInvalidate->begin(); it != idsToInvalidate->end(); ++it) {
         WorkingSetMember* member = ws->get(*it);
         if (member->hasRecordId() && member->recordId == recordId) {
-            WorkingSetCommon::fetchAndInvalidateRecordId(txn, member, collection);
+            WorkingSetCommon::fetchAndInvalidateRecordId(opCtx, member, collection);
         }
     }
 }
 
 }  // namespace
 
-void MultiPlanStage::doInvalidate(OperationContext* txn,
+void MultiPlanStage::doInvalidate(OperationContext* opCtx,
                                   const RecordId& recordId,
                                   InvalidationType type) {
     if (_failure) {
@@ -429,15 +438,15 @@ void MultiPlanStage::doInvalidate(OperationContext* txn,
 
     if (bestPlanChosen()) {
         CandidatePlan& bestPlan = _candidates[_bestPlanIdx];
-        invalidateHelper(txn, bestPlan.ws, recordId, &bestPlan.results, _collection);
+        invalidateHelper(opCtx, bestPlan.ws, recordId, &bestPlan.results, _collection);
         if (hasBackupPlan()) {
             CandidatePlan& backupPlan = _candidates[_backupPlanIdx];
-            invalidateHelper(txn, backupPlan.ws, recordId, &backupPlan.results, _collection);
+            invalidateHelper(opCtx, backupPlan.ws, recordId, &backupPlan.results, _collection);
         }
     } else {
         for (size_t ix = 0; ix < _candidates.size(); ++ix) {
             invalidateHelper(
-                txn, _candidates[ix].ws, recordId, &_candidates[ix].results, _collection);
+                opCtx, _candidates[ix].ws, recordId, &_candidates[ix].results, _collection);
         }
     }
 }

@@ -1,4 +1,7 @@
-// @tags: [requires_collmod_command]
+// Cannot implicitly shard accessed collections because of collection existing when none
+// expected.
+// @tags: [assumes_no_implicit_collection_creation_after_drop, requires_non_retryable_commands]
+
 (function() {
     "use strict";
 

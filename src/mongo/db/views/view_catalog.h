@@ -1,30 +1,32 @@
+
 /**
-*    Copyright (C) 2016 MongoDB Inc.
-*
-*    This program is free software: you can redistribute it and/or  modify
-*    it under the terms of the GNU Affero General Public License, version 3,
-*    as published by the Free Software Foundation.
-*
-*    This program is distributed in the hope that it will be useful,
-*    but WITHOUT ANY WARRANTY; without even the implied warranty of
-*    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-*    GNU Affero General Public License for more details.
-*
-*    You should have received a copy of the GNU Affero General Public License
-*    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-*
-*    As a special exception, the copyright holders give permission to link the
-*    code of portions of this program with the OpenSSL library under certain
-*    conditions as described in each individual source file and distribute
-*    linked combinations including the program with the OpenSSL library. You
-*    must comply with the GNU Affero General Public License in all respects for
-*    all of the code used other than as permitted herein. If you modify file(s)
-*    with this exception, you may extend this exception to your version of the
-*    file(s), but you are not obligated to do so. If you do not wish to do so,
-*    delete this exception statement from your version. If you delete this
-*    exception statement from all source files in the program, then also delete
-*    it in the license file.
-*/
+ *    Copyright (C) 2018-present MongoDB, Inc.
+ *
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
+ *
+ *    This program is distributed in the hope that it will be useful,
+ *    but WITHOUT ANY WARRANTY; without even the implied warranty of
+ *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+ *    Server Side Public License for more details.
+ *
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
+ *
+ *    As a special exception, the copyright holders give permission to link the
+ *    code of portions of this program with the OpenSSL library under certain
+ *    conditions as described in each individual source file and distribute
+ *    linked combinations including the program with the OpenSSL library. You
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
+ */
 
 #pragma once
 
@@ -70,7 +72,7 @@ public:
      * executes under the catalog's mutex, so it must not access other methods of the catalog,
      * acquire locks or run for a long time.
      */
-    void iterate(OperationContext* txn, ViewIteratorCallback callback);
+    void iterate(OperationContext* opCtx, ViewIteratorCallback callback);
 
     /**
      * Create a new view 'viewName' with contents defined by running the specified aggregation
@@ -81,7 +83,7 @@ public:
      *
      * Must be in WriteUnitOfWork. View creation rolls back if the unit of work aborts.
      */
-    Status createView(OperationContext* txn,
+    Status createView(OperationContext* opCtx,
                       const NamespaceString& viewName,
                       const NamespaceString& viewOn,
                       const BSONArray& pipeline,
@@ -92,14 +94,14 @@ public:
      *
      * Must be in WriteUnitOfWork. The drop rolls back if the unit of work aborts.
      */
-    Status dropView(OperationContext* txn, const NamespaceString& viewName);
+    Status dropView(OperationContext* opCtx, const NamespaceString& viewName);
 
     /**
      * Modify the view named 'viewName' to have the new 'viewOn' and 'pipeline'.
      *
      * Must be in WriteUnitOfWork. The modification rolls back if the unit of work aborts.
      */
-    Status modifyView(OperationContext* txn,
+    Status modifyView(OperationContext* opCtx,
                       const NamespaceString& viewName,
                       const NamespaceString& viewOn,
                       const BSONArray& pipeline);
@@ -108,14 +110,14 @@ public:
      * Look up the 'nss' in the view catalog, returning a shared pointer to a View definition, or
      * nullptr if it doesn't exist.
      */
-    std::shared_ptr<ViewDefinition> lookup(OperationContext* txn, StringData nss);
+    std::shared_ptr<ViewDefinition> lookup(OperationContext* opCtx, StringData nss);
 
     /**
      * Resolve the views on 'nss', transforming the pipeline appropriately. This function returns a
      * fully-resolved view definition containing the backing namespace, the resolved pipeline and
      * the collation to use for the operation.
      */
-    StatusWith<ResolvedView> resolveView(OperationContext* txn, const NamespaceString& nss);
+    StatusWith<ResolvedView> resolveView(OperationContext* opCtx, const NamespaceString& nss);
 
     /**
      * Reload the views catalog if marked invalid. No-op if already valid. Does only minimal
@@ -124,7 +126,7 @@ public:
      * cycle detection etc. This is implicitly called by other methods when the ViewCatalog is
      * marked invalid, and on first opening a database.
      */
-    Status reloadIfNeeded(OperationContext* txn);
+    Status reloadIfNeeded(OperationContext* opCtx);
 
     /**
      * To be called when direct modifications to the DurableViewCatalog have been committed, so
@@ -136,7 +138,7 @@ public:
     }
 
 private:
-    Status _createOrUpdateView_inlock(OperationContext* txn,
+    Status _createOrUpdateView_inlock(OperationContext* opCtx,
                                       const NamespaceString& viewName,
                                       const NamespaceString& viewOn,
                                       const BSONArray& pipeline,
@@ -145,21 +147,28 @@ private:
      * Parses the view definition pipeline, attempts to upsert into the view graph, and refreshes
      * the graph if necessary. Returns an error status if the resulting graph would be invalid.
      */
-    Status _upsertIntoGraph(OperationContext* txn, const ViewDefinition& viewDef);
+    Status _upsertIntoGraph(OperationContext* opCtx, const ViewDefinition& viewDef);
+
+    /**
+     * Returns Status::OK with the set of involved namespaces if the given pipeline is eligible to
+     * act as a view definition. Otherwise, returns ErrorCodes::OptionNotSupportedOnView.
+     */
+    StatusWith<stdx::unordered_set<NamespaceString>> _validatePipeline_inlock(
+        OperationContext* opCtx, const ViewDefinition& viewDef) const;
 
     /**
      * Returns Status::OK if each view namespace in 'refs' has the same default collation as 'view'.
      * Otherwise, returns ErrorCodes::OptionNotSupportedOnView.
      */
-    Status _validateCollation_inlock(OperationContext* txn,
+    Status _validateCollation_inlock(OperationContext* opCtx,
                                      const ViewDefinition& view,
                                      const std::vector<NamespaceString>& refs);
 
-    std::shared_ptr<ViewDefinition> _lookup_inlock(OperationContext* txn, StringData ns);
-    Status _reloadIfNeeded_inlock(OperationContext* txn);
+    std::shared_ptr<ViewDefinition> _lookup_inlock(OperationContext* opCtx, StringData ns);
+    Status _reloadIfNeeded_inlock(OperationContext* opCtx);
 
-    void _requireValidCatalog_inlock(OperationContext* txn) {
-        uassertStatusOK(_reloadIfNeeded_inlock(txn));
+    void _requireValidCatalog_inlock(OperationContext* opCtx) {
+        uassertStatusOK(_reloadIfNeeded_inlock(opCtx));
         invariant(_valid.load());
     }
 

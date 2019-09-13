@@ -1,28 +1,31 @@
-/*    Copyright 2014 MongoDB Inc.
+
+/**
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects
- *    for all of the code used other than as permitted herein. If you modify
- *    file(s) with this exception, you may extend this exception to your
- *    version of the file(s), but you are not obligated to do so. If you do not
- *    wish to do so, delete this exception statement from your version. If you
- *    delete this exception statement from all source files in the program,
- *    then also delete it in the license file.
+ *    must comply with the Server Side Public License in all respects for
+ *    all of the code used other than as permitted herein. If you modify file(s)
+ *    with this exception, you may extend this exception to your version of the
+ *    file(s), but you are not obligated to do so. If you do not wish to do so,
+ *    delete this exception statement from your version. If you delete this
+ *    exception statement from all source files in the program, then also delete
+ *    it in the license file.
  */
 
 #pragma once
@@ -149,8 +152,15 @@ public:
     /**
      * Returns a std::string with the format name/server1,server2.
      * If name is empty, returns just comma-separated list of servers.
+     * It IS updated to reflect the current members of the set.
      */
     std::string getServerAddress() const;
+
+    /**
+     * Returns the URI that was used to construct this monitor.
+     * It IS NOT updated to reflect the current members of the set.
+     */
+    const MongoURI& getOriginalUri() const;
 
     /**
      * Is server part of this set? Uses only cached information.
@@ -158,9 +168,10 @@ public:
     bool contains(const HostAndPort& server) const;
 
     /**
-     * Writes information about our cached view of the set to a BSONObjBuilder.
+     * Writes information about our cached view of the set to a BSONObjBuilder. If
+     * forFTDC, trim to minimize its size for full-time diagnostic data capture.
      */
-    void appendInfo(BSONObjBuilder& b) const;
+    void appendInfo(BSONObjBuilder& b, bool forFTDC = false) const;
 
     /**
      * Returns true if the monitor knows a usable primary from it's interal view.
@@ -225,9 +236,20 @@ public:
     static void cleanup();
 
     /**
+     * Use these to speed up tests by disabling the sleep-and-retry loops and cause errors to be
+     * reported immediately.
+     */
+    static void disableRefreshRetries_forTest();
+
+    /**
      * Permanently stops all monitoring on replica sets.
      */
     static void shutdown();
+
+    /**
+     * Returns the refresh period that is given to all new SetStates.
+     */
+    static Seconds getDefaultRefreshPeriod();
 
     //
     // internal types (defined in replica_set_monitor_internal.h)
@@ -262,10 +284,14 @@ public:
 
 private:
     /**
-     * A callback passed to a task executor to refresh the replica set. It reschedules itself until
-     * its canceled in d-tor.
+     * Schedules a refresh via the task executor. (Task is automatically canceled in the d-tor.)
      */
-    void _refresh(const executor::TaskExecutor::CallbackArgs&);
+    void _scheduleRefresh(Date_t when);
+
+    /**
+     * This function refreshes the replica set and calls _scheduleRefresh() again.
+     */
+    void _doScheduledRefresh(const executor::TaskExecutor::CallbackHandle& currentHandle);
 
     // Serializes refresh and protects _refresherHandle
     stdx::mutex _mutex;
@@ -296,9 +322,7 @@ public:
      *
      * This is called by ReplicaSetMonitor::getHostWithRefresh()
      */
-    HostAndPort refreshUntilMatches(const ReadPreferenceSetting& criteria) {
-        return _refreshUntilMatches(&criteria);
-    };
+    HostAndPort refreshUntilMatches(const ReadPreferenceSetting& criteria);
 
     /**
      * Refresh all hosts. Equivalent to refreshUntilMatches with a criteria that never
@@ -306,9 +330,7 @@ public:
      *
      * This is intended to be called periodically, possibly from a background thread.
      */
-    void refreshAll() {
-        _refreshUntilMatches(NULL);
-    }
+    void refreshAll();
 
     //
     // Remaining methods are only for testing and internal use.
@@ -356,13 +378,6 @@ public:
     void failedHost(const HostAndPort& host, const Status& status);
 
     /**
-     * True if this Refresher started a new full scan rather than joining an existing one.
-     */
-    bool startedNewScan() const {
-        return _startedNewScan;
-    }
-
-    /**
      * Starts a new scan over the hosts in set.
      */
     static ScanStatePtr startNewScan(const SetState* set);
@@ -398,7 +413,6 @@ private:
     // Both pointers are never NULL
     SetStatePtr _set;
     ScanStatePtr _scan;  // May differ from _set->currentScan if a new scan has started.
-    bool _startedNewScan;
 };
 
 }  // namespace mongo

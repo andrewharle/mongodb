@@ -92,22 +92,34 @@ var Explainable = (function() {
         // Explainable operations.
         //
 
-        /**
-         * Adds "explain: true" to "extraOpts", and then passes through to the regular collection's
-         * aggregate helper.
-         */
         this.aggregate = function(pipeline, extraOpts) {
             if (!(pipeline instanceof Array)) {
-                // support legacy varargs form. (Also handles db.foo.aggregate())
+                // Support legacy varargs form. (Also handles db.foo.aggregate())
                 pipeline = Array.from(arguments);
                 extraOpts = {};
             }
 
             // Add the explain option.
-            extraOpts = extraOpts || {};
-            extraOpts.explain = true;
+            let extraOptsCopy = Object.extend({}, (extraOpts || {}));
 
-            return this._collection.aggregate(pipeline, extraOpts);
+            // For compatibility with 3.4 and older versions, when the verbosity is "queryPlanner",
+            // we use the explain option to the aggregate command. Otherwise we issue an explain
+            // command wrapping the agg command, which is supported by newer versions of the server.
+            if (this._verbosity === "queryPlanner") {
+                extraOptsCopy.explain = true;
+                return this._collection.aggregate(pipeline, extraOptsCopy);
+            } else {
+                // The aggregate command requires a cursor field.
+                if (!extraOptsCopy.hasOwnProperty("cursor")) {
+                    extraOptsCopy = Object.extend(extraOptsCopy, {cursor: {}});
+                }
+
+                let aggCmd = Object.extend(
+                    {"aggregate": this._collection.getName(), "pipeline": pipeline}, extraOptsCopy);
+                let explainCmd = {"explain": aggCmd, "verbosity": this._verbosity};
+                let explainResult = this._collection.runReadCommand(explainCmd);
+                return throwOrReturn(explainResult);
+            }
         };
 
         this.count = function(query, options) {
@@ -187,6 +199,7 @@ var Explainable = (function() {
             var upsert = parsed.upsert;
             var multi = parsed.multi;
             var collation = parsed.collation;
+            var arrayFilters = parsed.arrayFilters;
 
             var bulk = this._collection.initializeOrderedBulkOp();
             var updateOp = bulk.find(query);
@@ -197,6 +210,10 @@ var Explainable = (function() {
 
             if (collation) {
                 updateOp.collation(collation);
+            }
+
+            if (arrayFilters) {
+                updateOp.arrayFilters(arrayFilters);
             }
 
             if (multi) {

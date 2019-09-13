@@ -1,23 +1,25 @@
+
 /**
- *    Copyright (C) 2014 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -32,12 +34,14 @@
 
 #include "mongo/db/concurrency/lock_manager.h"
 
-#include <sstream>
+#include <third_party/murmurhash3/MurmurHash3.h>
 
-#include "mongo/base/simple_string_data_comparator.h"
+#include "mongo/base/data_type_endian.h"
+#include "mongo/base/data_view.h"
 #include "mongo/base/static_assert.h"
 #include "mongo/bson/bsonobjbuilder.h"
 #include "mongo/config.h"
+#include "mongo/db/concurrency/d_concurrency.h"
 #include "mongo/db/concurrency/locker.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/log.h"
@@ -96,6 +100,11 @@ uint32_t modeMask(LockMode mode) {
     return 1 << mode;
 }
 
+uint64_t hashStringData(StringData str) {
+    char hash[16];
+    MurmurHash3_x64_128(str.rawData(), str.size(), 0, hash);
+    return static_cast<size_t>(ConstDataView(hash).read<LittleEndian<std::uint64_t>>());
+}
 
 /**
  * Maps the resource id to a human-readable string.
@@ -181,7 +190,7 @@ struct LockHead {
     }
 
     /**
-     * Finish creation of request and put it on the lockhead's conflict or granted queues. Returns
+     * Finish creation of request and put it on the LockHead's conflict or granted queues. Returns
      * LOCK_WAITING for conflict case and LOCK_OK otherwise.
      */
     LockResult newRequest(LockRequest* request) {
@@ -275,7 +284,7 @@ struct LockHead {
     // the end of the queue. Conversion requests are granted from the beginning forward.
     LockRequestList grantedList;
 
-    // Counts the grants and coversion counts for each of the supported lock modes. These
+    // Counts the grants and conversion counts for each of the supported lock modes. These
     // counts should exactly match the aggregated modes on the granted list.
     uint32_t grantedCounts[LockModesCount];
 
@@ -290,7 +299,7 @@ struct LockHead {
     // Doubly-linked list of requests, which have not been granted yet because they conflict
     // with the set of granted modes. Requests are queued at the end of the queue and are
     // granted from the beginning forward, which gives these locks FIFO ordering. Exceptions
-    // are high-priorty locks, such as the MMAP V1 flush lock.
+    // are high-priority locks, such as the MMAP V1 flush lock.
     LockRequestList conflictList;
 
     // Counts the conflicting requests for each of the lock modes. These counts should exactly
@@ -331,7 +340,7 @@ struct LockHead {
  * of resourceId to PartitionedLockHead.
  *
  * As long as all lock requests for a resource have an intent mode, as opposed to a conflicting
- * mode, its LockHead may reference ParitionedLockHeads. A partitioned LockHead will not have
+ * mode, its LockHead may reference PartitionedLockHeads. A partitioned LockHead will not have
  * any conflicts. The total set of granted requests (with intent mode) is the union of
  * its grantedList and all grantedLists in PartitionedLockHeads.
  *
@@ -390,7 +399,7 @@ void LockHead::migratePartitionedLockHeads() {
             partition->data.erase(it);
             delete partitionedLock;
         }
-        // Don't pop-back to early as otherwise the lock will be considered not partioned in
+        // Don't pop-back to early as otherwise the lock will be considered not partitioned in
         // newRequest().
         partitions.pop_back();
     }
@@ -623,7 +632,7 @@ bool LockManager::unlock(LockRequest* request) {
         _onLockModeChanged(lock, lock->grantedCounts[request->convertMode] == 0);
     } else {
         // Invalid request status
-        invariant(false);
+        MONGO_UNREACHABLE;
     }
 
     return (request->recursiveCount == 0);
@@ -1117,14 +1126,14 @@ uint64_t ResourceId::fullHash(ResourceType type, uint64_t hashId) {
 }
 
 ResourceId::ResourceId(ResourceType type, StringData ns)
-    : _fullHash(fullHash(type, SimpleStringDataComparator::kInstance.hash(ns))) {
+    : _fullHash(fullHash(type, hashStringData(ns))) {
 #ifdef MONGO_CONFIG_DEBUG_BUILD
     _nsCopy = ns.toString();
 #endif
 }
 
 ResourceId::ResourceId(ResourceType type, const std::string& ns)
-    : _fullHash(fullHash(type, SimpleStringDataComparator::kInstance.hash(ns))) {
+    : _fullHash(fullHash(type, hashStringData(ns))) {
 #ifdef MONGO_CONFIG_DEBUG_BUILD
     _nsCopy = ns;
 #endif
@@ -1135,6 +1144,9 @@ ResourceId::ResourceId(ResourceType type, uint64_t hashId) : _fullHash(fullHash(
 std::string ResourceId::toString() const {
     StringBuilder ss;
     ss << "{" << _fullHash << ": " << resourceTypeName(getType()) << ", " << getHashId();
+    if (getType() == RESOURCE_MUTEX) {
+        ss << ", " << Lock::ResourceMutex::getName(*this);
+    }
 
 #ifdef MONGO_CONFIG_DEBUG_BUILD
     ss << ", " << _nsCopy;

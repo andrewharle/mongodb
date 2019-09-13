@@ -1,3 +1,11 @@
+// @tags: [
+//   does_not_support_stepdowns,
+//   requires_non_retryable_commands,
+//   requires_non_retryable_writes,
+//   requires_collstats,
+//   requires_capped,
+// ]
+
 // Test various user operations against "system.profile" collection.  SERVER-18111.
 
 var testDB = db.getSiblingDB("system_profile");
@@ -8,12 +16,13 @@ assert.commandWorked(testDB.dropDatabase());
 assert.commandWorked(testDB.createCollection("system.profile"));
 testDB.system.profile.drop();
 
-// convertToCapped should succeed.
+// convertToCapped should fail.
 assert.commandWorked(testDB.dropDatabase());
 assert.commandWorked(testDB.createCollection("system.profile"));
 assert.eq(false, testDB.system.profile.stats().capped);
-assert.commandWorked(testDB.system.profile.convertToCapped(1024 * 1024));
-assert.eq(true, testDB.system.profile.stats().capped);
+assert.commandFailedWithCode(testDB.system.profile.convertToCapped(1024 * 1024),
+                             ErrorCodes.BadValue);
+assert.eq(false, testDB.system.profile.stats().capped);
 
 // Basic write operations should fail.
 assert.commandWorked(testDB.dropDatabase());

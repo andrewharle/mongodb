@@ -73,6 +73,13 @@ function isWiredTiger(db) {
 }
 
 /**
+ * Returns true if the current storage engine is ephemeralForTest, and false otherwise.
+ */
+function isEphemeralForTest(db) {
+    return getStorageEngineName(db) === 'ephemeralForTest';
+}
+
+/**
  * Returns true if the current storage engine is ephemeral, and false otherwise.
  */
 function isEphemeral(db) {
@@ -87,4 +94,20 @@ function isEphemeral(db) {
 function supportsDocumentLevelConcurrency(db) {
     var engine = getStorageEngineName(db);
     return ['wiredTiger', 'rocksdb', 'inMemory'].indexOf(engine) !== -1;
+}
+
+/**
+ * Returns true if the current storage engine supports committed reads.
+ *
+ * Throws an error if db is connected to a mongos, or if there is no reported storage engine.
+ */
+function supportsCommittedReads(db) {
+    var status = db.serverStatus();
+    assert.commandWorked(status);
+
+    assert(isMongod(db), 'no storage engine is reported when connected to mongos');
+    assert.neq(
+        'undefined', typeof status.storageEngine, 'missing storage engine info in server status');
+
+    return status.storageEngine.supportsCommittedReads;
 }

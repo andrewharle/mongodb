@@ -1,23 +1,25 @@
+
 /**
- *    Copyright 2016 MongoDB Inc.
+ *    Copyright (C) 2018-present MongoDB, Inc.
  *
- *    This program is free software: you can redistribute it and/or  modify
- *    it under the terms of the GNU Affero General Public License, version 3,
- *    as published by the Free Software Foundation.
+ *    This program is free software: you can redistribute it and/or modify
+ *    it under the terms of the Server Side Public License, version 1,
+ *    as published by MongoDB, Inc.
  *
  *    This program is distributed in the hope that it will be useful,
  *    but WITHOUT ANY WARRANTY; without even the implied warranty of
  *    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
- *    GNU Affero General Public License for more details.
+ *    Server Side Public License for more details.
  *
- *    You should have received a copy of the GNU Affero General Public License
- *    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+ *    You should have received a copy of the Server Side Public License
+ *    along with this program. If not, see
+ *    <http://www.mongodb.com/licensing/server-side-public-license>.
  *
  *    As a special exception, the copyright holders give permission to link the
  *    code of portions of this program with the OpenSSL library under certain
  *    conditions as described in each individual source file and distribute
  *    linked combinations including the program with the OpenSSL library. You
- *    must comply with the GNU Affero General Public License in all respects for
+ *    must comply with the Server Side Public License in all respects for
  *    all of the code used other than as permitted herein. If you modify file(s)
  *    with this exception, you may extend this exception to your version of the
  *    file(s), but you are not obligated to do so. If you do not wish to do so,
@@ -34,9 +36,9 @@
 
 #include "mongo/db/jsobj.h"
 #include "mongo/db/repl/oplog_entry.h"
+#include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/sync_source_selector.h"
 #include "mongo/rpc/get_status_from_command_result.h"
-#include "mongo/rpc/metadata/server_selection_metadata.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/assert_util.h"
 #include "mongo/util/destructor_guard.h"
@@ -54,7 +56,6 @@ const Seconds SyncSourceResolver::kFirstOplogEntryEmptyBlacklistDuration(10);
 const Seconds SyncSourceResolver::kFirstOplogEntryNullTimestampBlacklistDuration(10);
 const Minutes SyncSourceResolver::kTooStaleBlacklistDuration(1);
 const Seconds SyncSourceResolver::kNoRequiredOpTimeBlacklistDuration(60);
-const int SyncSourceResolver::kUninitializedRollbackId(-1);
 
 SyncSourceResolver::SyncSourceResolver(executor::TaskExecutor* taskExecutor,
                                        SyncSourceSelector* syncSourceSelector,
@@ -169,13 +170,17 @@ std::unique_ptr<Fetcher> SyncSourceResolver::_makeFirstOplogEntryFetcher(
         _taskExecutor,
         candidate,
         kLocalOplogNss.db().toString(),
-        BSON("find" << kLocalOplogNss.coll() << "limit" << 1 << "sort" << BSON("$natural" << 1)),
-        stdx::bind(&SyncSourceResolver::_firstOplogEntryFetcherCallback,
-                   this,
-                   stdx::placeholders::_1,
-                   candidate,
-                   earliestOpTimeSeen),
-        rpc::ServerSelectionMetadata(true, boost::none).toBSON(),
+        BSON("find" << kLocalOplogNss.coll() << "limit" << 1 << "sort" << BSON("$natural" << 1)
+                    << "projection"
+                    << BSON(OplogEntryBase::kTimestampFieldName << 1
+                                                                << OplogEntryBase::kTermFieldName
+                                                                << 1)),
+        [=](const StatusWith<Fetcher::QueryResponse>& response,
+            Fetcher::NextAction*,
+            BSONObjBuilder*) {
+            return _firstOplogEntryFetcherCallback(response, candidate, earliestOpTimeSeen);
+        },
+        ReadPreferenceSetting::secondaryPreferredMetadata(),
         kFetcherTimeout /* find network timeout */,
         kFetcherTimeout /* getMore network timeout */);
 }
@@ -192,13 +197,12 @@ std::unique_ptr<Fetcher> SyncSourceResolver::_makeRequiredOpTimeFetcher(HostAndP
         BSON("find" << kLocalOplogNss.coll() << "oplogReplay" << true << "filter"
                     << BSON("ts" << BSON("$gte" << _requiredOpTime.getTimestamp() << "$lte"
                                                 << _requiredOpTime.getTimestamp()))),
-        stdx::bind(&SyncSourceResolver::_requiredOpTimeFetcherCallback,
-                   this,
-                   stdx::placeholders::_1,
-                   candidate,
-                   earliestOpTimeSeen,
-                   rbid),
-        rpc::ServerSelectionMetadata(true, boost::none).toBSON(),
+        [=](const StatusWith<Fetcher::QueryResponse>& response,
+            Fetcher::NextAction*,
+            BSONObjBuilder*) {
+            return _requiredOpTimeFetcherCallback(response, candidate, earliestOpTimeSeen, rbid);
+        },
+        ReadPreferenceSetting::secondaryPreferredMetadata(),
         kFetcherTimeout /* find network timeout */,
         kFetcherTimeout /* getMore network timeout */);
 }
@@ -243,9 +247,18 @@ OpTime SyncSourceResolver::_parseRemoteEarliestOpTime(const HostAndPort& candida
         return OpTime();
     }
 
-    const OplogEntry oplogEntry(firstObjFound);
-    const auto remoteEarliestOpTime = oplogEntry.getOpTime();
-    if (remoteEarliestOpTime.isNull()) {
+    const auto remoteEarliestOpTime = OpTime::parseFromOplogEntry(firstObjFound);
+    if (!remoteEarliestOpTime.isOK()) {
+        const auto until = _taskExecutor->now() + kFirstOplogEntryNullTimestampBlacklistDuration;
+        log() << "Blacklisting " << candidate << " due to error parsing OpTime from the oldest"
+              << " oplog entry for " << kFirstOplogEntryNullTimestampBlacklistDuration
+              << " until: " << until << ". Error: " << remoteEarliestOpTime.getStatus()
+              << ", Entry: " << redact(firstObjFound);
+        _syncSourceSelector->blacklistSyncSource(candidate, until);
+        return OpTime();
+    }
+
+    if (remoteEarliestOpTime.getValue().isNull()) {
         // First document in remote oplog is empty.
         const auto until = _taskExecutor->now() + kFirstOplogEntryNullTimestampBlacklistDuration;
         log() << "Blacklisting " << candidate << " due to null timestamp in first document for "
@@ -254,7 +267,7 @@ OpTime SyncSourceResolver::_parseRemoteEarliestOpTime(const HostAndPort& candida
         return OpTime();
     }
 
-    return remoteEarliestOpTime;
+    return remoteEarliestOpTime.getValue();
 }
 
 void SyncSourceResolver::_firstOplogEntryFetcherCallback(
@@ -265,12 +278,13 @@ void SyncSourceResolver::_firstOplogEntryFetcherCallback(
         _finishCallback(Status(ErrorCodes::CallbackCanceled,
                                str::stream()
                                    << "sync source resolver shut down while probing candidate: "
-                                   << candidate));
+                                   << candidate))
+            .transitional_ignore();
         return;
     }
 
     if (ErrorCodes::CallbackCanceled == queryResult.getStatus()) {
-        _finishCallback(queryResult.getStatus());
+        _finishCallback(queryResult.getStatus()).transitional_ignore();
         return;
     }
 
@@ -281,14 +295,14 @@ void SyncSourceResolver::_firstOplogEntryFetcherCallback(
               << "' for " << kFetcherErrorBlacklistDuration << " until: " << until;
         _syncSourceSelector->blacklistSyncSource(candidate, until);
 
-        _chooseAndProbeNextSyncSource(earliestOpTimeSeen);
+        _chooseAndProbeNextSyncSource(earliestOpTimeSeen).transitional_ignore();
         return;
     }
 
     const auto& queryResponse = queryResult.getValue();
     const auto remoteEarliestOpTime = _parseRemoteEarliestOpTime(candidate, queryResponse);
     if (remoteEarliestOpTime.isNull()) {
-        _chooseAndProbeNextSyncSource(earliestOpTimeSeen);
+        _chooseAndProbeNextSyncSource(earliestOpTimeSeen).transitional_ignore();
         return;
     }
 
@@ -315,13 +329,13 @@ void SyncSourceResolver::_firstOplogEntryFetcherCallback(
             earliestOpTimeSeen = remoteEarliestOpTime;
         }
 
-        _chooseAndProbeNextSyncSource(earliestOpTimeSeen);
+        _chooseAndProbeNextSyncSource(earliestOpTimeSeen).transitional_ignore();
         return;
     }
 
     auto status = _scheduleRBIDRequest(candidate, earliestOpTimeSeen);
     if (!status.isOK()) {
-        _finishCallback(status);
+        _finishCallback(status).ignore();
     }
 }
 
@@ -341,12 +355,9 @@ Status SyncSourceResolver::_scheduleRBIDRequest(HostAndPort candidate, OpTime ea
     invariant(_state == State::kRunning);
     auto handle = _taskExecutor->scheduleRemoteCommand(
         {candidate, "admin", BSON("replSetGetRBID" << 1), nullptr, kFetcherTimeout},
-        stdx::bind(&SyncSourceResolver::_rbidRequestCallback,
-                   this,
-                   candidate,
-                   earliestOpTimeSeen,
-                   stdx::placeholders::_1));
-
+        [=](const executor::TaskExecutor::RemoteCommandCallbackArgs& rbidReply) {
+            _rbidRequestCallback(candidate, earliestOpTimeSeen, rbidReply);
+        });
     if (!handle.isOK()) {
         return handle.getStatus();
     }
@@ -360,11 +371,11 @@ void SyncSourceResolver::_rbidRequestCallback(
     OpTime earliestOpTimeSeen,
     const executor::TaskExecutor::RemoteCommandCallbackArgs& rbidReply) {
     if (rbidReply.response.status == ErrorCodes::CallbackCanceled) {
-        _finishCallback(rbidReply.response.status);
+        _finishCallback(rbidReply.response.status).transitional_ignore();
         return;
     }
 
-    int rbid = kUninitializedRollbackId;
+    int rbid = ReplicationProcess::kUninitializedRollbackId;
     try {
         uassertStatusOK(rbidReply.response.status);
         uassertStatusOK(getStatusFromCommandResult(rbidReply.response.data));
@@ -374,7 +385,7 @@ void SyncSourceResolver::_rbidRequestCallback(
         log() << "Blacklisting " << candidate << " due to error: '" << ex << "' for "
               << kFetcherErrorBlacklistDuration << " until: " << until;
         _syncSourceSelector->blacklistSyncSource(candidate, until);
-        _chooseAndProbeNextSyncSource(earliestOpTimeSeen);
+        _chooseAndProbeNextSyncSource(earliestOpTimeSeen).transitional_ignore();
         return;
     }
 
@@ -384,12 +395,12 @@ void SyncSourceResolver::_rbidRequestCallback(
         auto status =
             _scheduleFetcher(_makeRequiredOpTimeFetcher(candidate, earliestOpTimeSeen, rbid));
         if (!status.isOK()) {
-            _finishCallback(status);
+            _finishCallback(status).transitional_ignore();
         }
         return;
     }
 
-    _finishCallback(candidate, rbid);
+    _finishCallback(candidate, rbid).ignore();
 }
 
 Status SyncSourceResolver::_compareRequiredOpTimeWithQueryResponse(
@@ -430,12 +441,13 @@ void SyncSourceResolver::_requiredOpTimeFetcherCallback(
                                                 "required optime "
                                              << _requiredOpTime.toString()
                                              << " in candidate's oplog: "
-                                             << candidate));
+                                             << candidate))
+            .transitional_ignore();
         return;
     }
 
     if (ErrorCodes::CallbackCanceled == queryResult.getStatus()) {
-        _finishCallback(queryResult.getStatus());
+        _finishCallback(queryResult.getStatus()).transitional_ignore();
         return;
     }
 
@@ -447,7 +459,7 @@ void SyncSourceResolver::_requiredOpTimeFetcherCallback(
               << " until: " << until << ". required optime: " << _requiredOpTime;
         _syncSourceSelector->blacklistSyncSource(candidate, until);
 
-        _chooseAndProbeNextSyncSource(earliestOpTimeSeen);
+        _chooseAndProbeNextSyncSource(earliestOpTimeSeen).transitional_ignore();
         return;
     }
 
@@ -464,11 +476,11 @@ void SyncSourceResolver::_requiredOpTimeFetcherCallback(
                   << " until: " << until;
         _syncSourceSelector->blacklistSyncSource(candidate, until);
 
-        _chooseAndProbeNextSyncSource(earliestOpTimeSeen);
+        _chooseAndProbeNextSyncSource(earliestOpTimeSeen).transitional_ignore();
         return;
     }
 
-    _finishCallback(candidate, rbid);
+    _finishCallback(candidate, rbid).ignore();
 }
 
 Status SyncSourceResolver::_chooseAndProbeNextSyncSource(OpTime earliestOpTimeSeen) {
@@ -479,7 +491,8 @@ Status SyncSourceResolver::_chooseAndProbeNextSyncSource(OpTime earliestOpTimeSe
 
     if (candidateResult.getValue().empty()) {
         if (earliestOpTimeSeen.isNull()) {
-            return _finishCallback(candidateResult.getValue(), kUninitializedRollbackId);
+            return _finishCallback(candidateResult.getValue(),
+                                   ReplicationProcess::kUninitializedRollbackId);
         }
 
         SyncSourceResolverResponse response;
@@ -500,7 +513,7 @@ Status SyncSourceResolver::_chooseAndProbeNextSyncSource(OpTime earliestOpTimeSe
 Status SyncSourceResolver::_finishCallback(HostAndPort hostAndPort, int rbid) {
     SyncSourceResolverResponse response;
     response.syncSourceStatus = std::move(hostAndPort);
-    if (rbid != kUninitializedRollbackId) {
+    if (rbid != ReplicationProcess::kUninitializedRollbackId) {
         response.rbid = rbid;
     }
     return _finishCallback(response);
