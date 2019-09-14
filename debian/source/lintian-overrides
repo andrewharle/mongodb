@@ -3,3 +3,4 @@ mongodb source: source-is-missing jstests/core/*
 
 # False positive triggered by line length
 mongodb source: source-is-missing src/mongo/shell/utils.js line length *
+mongodb source: source-is-missing jstests/ssl/x509_all_the_oids.js line length *
