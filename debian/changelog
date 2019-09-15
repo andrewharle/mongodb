@@ -1,3 +1,14 @@
+mongodb (1:4.0.12-1) experimental; urgency=medium
+
+  * Non-maintainer upload.
+  * Prepare for new upstream release 4.0.X
+  * Rediff patches
+  * Added mozjs files necessary for the armhf build.
+  * Fix GCC -fpermissive error on armhf
+  * Debian configuration changes for mongodb 4.0.X - armhf
+
+ -- Andrew Harle <46223597+andrewharle@users.noreply.github.com>  Sun, 15 Sep 2019 11:30:15 +0200
+
 mongodb (1:3.4.18-2) unstable; urgency=medium
 
   * Strip test binaries to reduce build disk usage, fixing FTBFS on most
