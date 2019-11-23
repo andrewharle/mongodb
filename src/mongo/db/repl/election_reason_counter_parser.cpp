@@ -1,6 +1,5 @@
-
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2019-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -28,26 +27,23 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
-
-#include <memory>
-
-#include "mongo/db/logical_session_cache_factory_mongos.h"
-
-#include "mongo/db/logical_session_cache_impl.h"
-#include "mongo/db/server_parameters.h"
-#include "mongo/db/service_liaison_mongos.h"
-#include "mongo/db/sessions_collection_sharded.h"
-#include "mongo/stdx/memory.h"
+#include "mongo/db/repl/election_reason_counter_parser.h"
 
 namespace mongo {
+namespace repl {
 
-std::unique_ptr<LogicalSessionCache> makeLogicalSessionCacheS() {
-    auto liaison = stdx::make_unique<ServiceLiaisonMongos>();
-    auto sessionsColl = stdx::make_unique<SessionsCollectionSharded>();
 
-    return stdx::make_unique<LogicalSessionCacheImpl>(
-        std::move(liaison), std::move(sessionsColl), nullptr, LogicalSessionCacheImpl::Options{});
+ElectionReasonCounter parseElectionReasonCounter(const BSONElement& element) {
+    ElectionReasonCounter counter;
+
+    return counter.parse(IDLParserErrorContext("ElectionReasonCounter"), element.Obj());
 }
 
+void serializeElectionReasonCounterToBSON(ElectionReasonCounter counter,
+                                          StringData fieldName,
+                                          BSONObjBuilder* builder) {
+    builder->append(fieldName, counter.toBSON());
+}
+
+}  // namespace repl
 }  // namespace mongo

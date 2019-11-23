@@ -1,6 +1,5 @@
-
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2019-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -28,34 +27,18 @@
  *    it in the license file.
  */
 
-#include "mongo/platform/basic.h"
+#pragma once
 
-#include "mongo/db/commands/server_status.h"
-#include "mongo/db/jsobj.h"
-#include "mongo/db/logical_session_cache.h"
-#include "mongo/db/operation_context.h"
+#include "mongo/db/repl/election_reason_counter.h"
 
 namespace mongo {
+namespace repl {
 
-namespace {
+ElectionReasonCounter parseElectionReasonCounter(const BSONElement& element);
 
-class LogicalSessionSSS : public ServerStatusSection {
-public:
-    LogicalSessionSSS() : ServerStatusSection("logicalSessionRecordCache") {}
+void serializeElectionReasonCounterToBSON(ElectionReasonCounter counter,
+                                          StringData fieldName,
+                                          BSONObjBuilder* builder);
 
-    virtual ~LogicalSessionSSS() {}
-
-    virtual bool includeByDefault() const {
-        return true;
-    }
-
-    virtual BSONObj generateSection(OperationContext* opCtx,
-                                    const BSONElement& configElement) const {
-        auto lsCache = LogicalSessionCache::get(opCtx);
-        return lsCache ? lsCache->getStats().toBSON() : BSONObj();
-    }
-
-} LogicalSessionSSS;
-
-}  // namespace
+}  // namespace repl
 }  // namespace mongo

@@ -72,7 +72,8 @@ public:
                 LOG(debugLevel) << "Command on database " << request.getDatabase()
                                 << " timed out waiting for read concern to be satisfied. Command: "
                                 << redact(ServiceEntryPointCommon::getRedactedCopyForLogging(
-                                       invocation->definition(), request.body));
+                                       invocation->definition(), request.body))
+                                << ". Info: " << redact(rcStatus);
             }
 
             uassertStatusOK(rcStatus);
@@ -151,9 +152,9 @@ public:
         }
     }
 
-    void advanceConfigOptimeFromRequestMetadata(OperationContext* opCtx) const override {
+    void advanceConfigOpTimeFromRequestMetadata(OperationContext* opCtx) const override {
         // Handle config optime information that may have been sent along with the command.
-        rpc::advanceConfigOptimeFromRequestMetadata(opCtx);
+        rpc::advanceConfigOpTimeFromRequestMetadata(opCtx);
     }
 
     std::unique_ptr<PolymorphicScoped> scopedOperationCompletionShardingActions(

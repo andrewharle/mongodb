@@ -34,6 +34,7 @@
 #include "mongo/db/logical_session_id.h"
 #include "mongo/db/session.h"
 #include "mongo/db/session_killer.h"
+#include "mongo/db/sessions_collection.h"
 #include "mongo/stdx/condition_variable.h"
 #include "mongo/stdx/mutex.h"
 #include "mongo/stdx/unordered_map.h"
@@ -69,6 +70,16 @@ public:
      * exist or has no UUID. Acquires a lock on the collection. Required for rollback via refetch.
      */
     static boost::optional<UUID> getTransactionTableUUID(OperationContext* opCtx);
+
+    /**
+     * Locates session entries from the in-memory catalog and in 'config.transactions' which have
+     * not been referenced before 'possiblyExpired' and deletes them.
+     *
+     * Returns the number of sessions, which were reaped from the persisted store on disk.
+     */
+    static int reapSessionsOlderThan(OperationContext* opCtx,
+                                     SessionsCollection& sessionsCollection,
+                                     Date_t possiblyExpired);
 
     /**
      * Resets the transaction table to an uninitialized state.
@@ -128,6 +139,11 @@ public:
                       const SessionKiller::Matcher& matcher,
                       stdx::function<void(OperationContext*, Session*)> workerFn);
 
+    /**
+     * Returns the total number of entries currently cached on the session catalog.
+     */
+    size_t size() const;
+
 private:
     struct SessionRuntimeInfo {
         SessionRuntimeInfo(LogicalSessionId lsid) : txnState(std::move(lsid)) {}
@@ -137,6 +153,9 @@ private:
         // check it out.
         bool checkedOut{false};
 
+        // Keeps the last time this session was checked-out
+        Date_t lastCheckout{Date_t::now()};
+
         // Signaled when the state becomes available. Uses the transaction table's mutex to protect
         // the state transitions.
         stdx::condition_variable availableCondVar;
@@ -145,6 +164,8 @@ private:
         // currently has it checked out
         Session txnState;
     };
+
+    using SessionRuntimeInfoMap = LogicalSessionIdMap<std::shared_ptr<SessionRuntimeInfo>>;
 
     /**
      * May release and re-acquire it zero or more times before returning. The returned
@@ -159,8 +180,21 @@ private:
      */
     void _releaseSession(const LogicalSessionId& lsid);
 
-    stdx::mutex _mutex;
-    LogicalSessionIdMap<std::shared_ptr<SessionRuntimeInfo>> _txnTable;
+    void _invalidateSession(WithLock, SessionRuntimeInfoMap::iterator it);
+
+    /**
+     * Snapshots the set of in-memory sessions currently on the catalog, checks whether they are
+     * still in use though the passed 'sessionsCollection' and if any have expired, calls
+     * 'invalidateSession' on them.
+     */
+    void _reapInMemorySessionsOlderThan(OperationContext* opCtx,
+                                        SessionsCollection& sessionsCollection,
+                                        Date_t possiblyExpired);
+
+    // Protects the state below
+    mutable stdx::mutex _mutex;
+
+    SessionRuntimeInfoMap _txnTable;
 };
 
 /**
