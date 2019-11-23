@@ -2,3 +2,4 @@ hardened-build.patch
 strip-test-binaries.patch
 mozjs45-arm.patch
 fix-gcc-and-fpermissive.patch
+0005-Use-jinja2-2.10.1-to-resolve-CVE-2019-10906.patch
