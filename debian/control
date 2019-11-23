@@ -39,6 +39,7 @@ Build-Depends:
  valgrind,
  qemu-system-arm <cross !nocheck>,
  binfmt-support <cross !nocheck>,
+ qemu-user <cross !nocheck>,
  qemu-user-static <cross !nocheck>
 Standards-Version: 4.2.1
 Vcs-Git: https://github.com/andrewharle/mongodb.git

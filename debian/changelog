@@ -1,3 +1,9 @@
+mongodb (1:4.0.13-1) experimental; urgency=medium
+
+  * New upstream version 4.0.13
+
+ -- Andrew Harle <46223597+andrewharle@users.noreply.github.com>  Sat, 23 Nov 2019 22:37:32 +0100
+
 mongodb (1:4.0.12-1) experimental; urgency=medium
 
   * Non-maintainer upload.
