@@ -1,6 +1,16 @@
+From: Andrew Harle <46223597+andrewharle@users.noreply.github.com>
+Date: Sat, 23 Nov 2019 15:01:17 +0100
+Subject: hardened-build
+
+---
+ SConstruct | 5 +++++
+ 1 file changed, 5 insertions(+)
+
+diff --git a/SConstruct b/SConstruct
+index ede13c1..9af8086 100644
 --- a/SConstruct
 +++ b/SConstruct
-@@ -977,6 +977,11 @@
+@@ -977,6 +977,11 @@ envDict = dict(BUILD_ROOT=buildDir,
                 INSTALL_DIR=installDir,
                 CONFIG_HEADER_DEFINES={},
                 LIBDEPS_TAG_EXPANSIONS=[],

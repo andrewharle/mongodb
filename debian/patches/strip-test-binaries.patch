@@ -1,14 +1,22 @@
-Description: Strip test binaries by default
- This is needed to reduce build size to within Launchpad's limit.
-Author: Dimitri John Ledkov <xnox@ubuntu.com>
+From: Dimitri John Ledkov <xnox@ubuntu.com>
+Date: Sat, 23 Nov 2019 15:01:17 +0100
+Subject: Strip test binaries by default
+
 Bug: https://jira.mongodb.org/browse/SERVER-34079
 Bug-Ubuntu: https://launchpad.net/bugs/1763119
 Forwarded: no
 Last-Update: 2018-03-23
 
---- mongodb-4.0.12.orig/site_scons/site_tools/mongo_unittest.py
-+++ mongodb-4.0.12/site_scons/site_tools/mongo_unittest.py
-@@ -23,7 +23,14 @@ def build_cpp_unit_test(env, target, sou
+This is needed to reduce build size to within Launchpad's limit.
+---
+ site_scons/site_tools/mongo_unittest.py | 7 +++++++
+ 1 file changed, 7 insertions(+)
+
+diff --git a/site_scons/site_tools/mongo_unittest.py b/site_scons/site_tools/mongo_unittest.py
+index 2ad0f51..47a0308 100644
+--- a/site_scons/site_tools/mongo_unittest.py
++++ b/site_scons/site_tools/mongo_unittest.py
+@@ -23,7 +23,14 @@ def build_cpp_unit_test(env, target, source, **kwargs):
      libdeps = kwargs.get('LIBDEPS', [])
      libdeps.append( '$BUILD_DIR/mongo/unittest/unittest_main' )
  
