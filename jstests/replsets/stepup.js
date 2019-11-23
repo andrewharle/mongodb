@@ -1,9 +1,9 @@
 // Tests the replSetStepUp command.
 
 load("jstests/replsets/rslib.js");
+load('jstests/replsets/libs/election_metrics.js');
 
 (function() {
-
     "use strict";
     var name = "stepup";
     var rst = new ReplSetTest({name: name, nodes: 2});
@@ -14,6 +14,8 @@ load("jstests/replsets/rslib.js");
 
     var primary = rst.getPrimary();
     var secondary = rst.getSecondary();
+
+    const initialSecondaryStatus = assert.commandWorked(secondary.adminCommand({serverStatus: 1}));
 
     // Step up the primary. Return OK because it's already the primary.
     var res = primary.adminCommand({replSetStepUp: 1});
@@ -42,6 +44,30 @@ load("jstests/replsets/rslib.js");
 
     // Make sure the step up succeeded.
     assert.eq(secondary, rst.getPrimary());
+
+    const newSecondaryStatus = assert.commandWorked(secondary.adminCommand({serverStatus: 1}));
+
+    // Check that both the 'called' and 'successful' fields of stepUpCmd have been incremented in
+    // serverStatus, and that they have not been incremented in any of the other election reason
+    // counters.
+    verifyServerStatusElectionReasonCounterChange(
+        initialSecondaryStatus.electionMetrics, newSecondaryStatus.electionMetrics, "stepUpCmd", 1);
+    verifyServerStatusElectionReasonCounterChange(initialSecondaryStatus.electionMetrics,
+                                                  newSecondaryStatus.electionMetrics,
+                                                  "priorityTakeover",
+                                                  0);
+    verifyServerStatusElectionReasonCounterChange(initialSecondaryStatus.electionMetrics,
+                                                  newSecondaryStatus.electionMetrics,
+                                                  "catchUpTakeover",
+                                                  0);
+    verifyServerStatusElectionReasonCounterChange(initialSecondaryStatus.electionMetrics,
+                                                  newSecondaryStatus.electionMetrics,
+                                                  "electionTimeout",
+                                                  0);
+    verifyServerStatusElectionReasonCounterChange(initialSecondaryStatus.electionMetrics,
+                                                  newSecondaryStatus.electionMetrics,
+                                                  "freezeTimeout",
+                                                  0);
 
     rst.stopSet();
 })();

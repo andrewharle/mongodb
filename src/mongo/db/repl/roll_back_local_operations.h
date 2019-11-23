@@ -52,6 +52,9 @@ namespace repl {
 MONGO_FAIL_POINT_DECLARE(rollbackHangBeforeFinish);
 MONGO_FAIL_POINT_DECLARE(rollbackHangThenFailAfterWritingMinValid);
 
+// This is needed by rs_rollback and rollback_impl.
+MONGO_FAIL_POINT_DECLARE(rollbackHangAfterTransitionToRollback);
+
 class RollBackLocalOperations {
     MONGO_DISALLOW_COPYING(RollBackLocalOperations);
 
@@ -59,7 +62,7 @@ public:
     class RollbackCommonPoint {
 
     public:
-        RollbackCommonPoint(BSONObj oplogBSON, RecordId recordId);
+        RollbackCommonPoint(BSONObj oplogBSON, RecordId recordId, BSONObj nextOplogBSON);
 
         RecordId getRecordId() const {
             return _recordId;
@@ -73,10 +76,16 @@ public:
             return _wallClockTime;
         }
 
+        boost::optional<Date_t> getFirstOpWallClockTimeAfterCommonPoint() {
+            return _firstWallClockTimeAfterCommonPoint;
+        }
+
     private:
         RecordId _recordId;
         OpTime _opTime;
         boost::optional<Date_t> _wallClockTime;
+        // The wall clock time of the first operation after the common point if it exists.
+        boost::optional<Date_t> _firstWallClockTimeAfterCommonPoint;
     };
 
     /**

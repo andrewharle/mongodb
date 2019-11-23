@@ -1,6 +1,5 @@
-
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2019-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -30,13 +29,31 @@
 
 #pragma once
 
-#include <memory>
-
-#include "mongo/db/logical_session_cache.h"
-#include "mongo/db/service_liaison.h"
+#include "mongo/db/repl/election_reason_counter_gen.h"
 
 namespace mongo {
+namespace repl {
 
-std::unique_ptr<LogicalSessionCache> makeLogicalSessionCacheEmbedded();
+/**
+ * Wrapper around the IDL struct ElectionReasonCounterBase that has increment methods.
+ */
+class ElectionReasonCounter : public ElectionReasonCounterBase {
+public:
+    using ElectionReasonCounterBase::getCalled;
+    using ElectionReasonCounterBase::setCalled;
+    using ElectionReasonCounterBase::getSuccessful;
+    using ElectionReasonCounterBase::setSuccessful;
 
+    void incrementCalled() {
+        setCalled(getCalled() + 1);
+    }
+
+    void incrementSuccessful() {
+        setSuccessful(getSuccessful() + 1);
+    }
+
+    ElectionReasonCounter parse(const IDLParserErrorContext& ctxt, const BSONObj& bsonObject);
+};
+
+}  // namespace repl
 }  // namespace mongo

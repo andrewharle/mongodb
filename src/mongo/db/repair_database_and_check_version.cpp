@@ -51,6 +51,7 @@
 #include "mongo/db/repair_database.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_process.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/storage/mmap_v1/mmap_v1_options.h"
 #include "mongo/db/storage/storage_repair_observer.h"
@@ -76,11 +77,6 @@ MONGO_FAIL_POINT_DEFINE(exitBeforeDataRepair);
 MONGO_FAIL_POINT_DEFINE(exitBeforeRepairInvalidatesConfig);
 
 namespace {
-
-const std::string mustDowngradeErrorMsg = str::stream()
-    << "UPGRADE PROBLEM: The data files need to be fully upgraded to version 3.6 before attempting "
-       "an upgrade to 4.0; see "
-    << feature_compatibility_version_documentation::kUpgradeLink << " for more details.";
 
 Status restoreMissingFeatureCompatibilityVersionDocument(OperationContext* opCtx,
                                                          const std::vector<std::string>& dbNames) {
@@ -194,7 +190,18 @@ Status ensureAllCollectionsHaveUUIDs(OperationContext* opCtx,
                 // We expect all collections to have UUIDs starting in FCV 3.6, so if we are missing
                 // a UUID then the user never upgraded to FCV 3.6 and this startup attempt is
                 // illegal.
-                return {ErrorCodes::MustDowngrade, mustDowngradeErrorMsg};
+                return {
+                    ErrorCodes::MustDowngrade,
+                    str::stream()
+                        << "Collection "
+                        << coll->ns().ns()
+                        << " is missing an UUID. We expect all collections to have UUIDs starting "
+                           "in FCV 3.6. Please make sure the FCV is version 3.6 before attempting "
+                           "an upgrade to 4.0; see "
+                        << feature_compatibility_version_documentation::kUpgradeLink
+                        << " for more details. "
+                        << "If the FCV is already 3.6, please try --repair with a 3.6 binary or "
+                           "initial sync to fix the data files."};
             }
         }
     }
@@ -398,16 +405,24 @@ StatusWith<bool> repairDatabasesAndCheckVersion(OperationContext* opCtx) {
         // config.
         auto repairObserver = StorageRepairObserver::get(opCtx->getServiceContext());
         repairObserver->onRepairDone(opCtx);
-        if (repairObserver->isDataModified()) {
+        if (repairObserver->getModifications().size() > 0) {
             warning() << "Modifications made by repair:";
             const auto& mods = repairObserver->getModifications();
             for (const auto& mod : mods) {
-                warning() << "  " << mod;
+                warning() << "  " << mod.getDescription();
             }
+        }
+        if (repairObserver->isDataInvalidated()) {
             if (hasReplSetConfigDoc(opCtx)) {
                 warning() << "WARNING: Repair may have modified replicated data. This node will no "
                              "longer be able to join a replica set without a full re-sync";
             }
+        }
+
+        // There were modifications, but only benign ones.
+        if (repairObserver->getModifications().size() > 0 && !repairObserver->isDataInvalidated()) {
+            log() << "Repair has made modifications to unreplicated data. The data is healthy and "
+                     "the node is eligible to be returned to the replica set.";
         }
     }
 
@@ -571,9 +586,16 @@ StatusWith<bool> repairDatabasesAndCheckVersion(OperationContext* opCtx) {
         }
     }
 
+    auto replProcess = repl::ReplicationProcess::get(opCtx);
+    auto needInitialSync = false;
+    if (replProcess) {
+        auto initialSyncFlag = replProcess->getConsistencyMarkers()->getInitialSyncFlag(opCtx);
+        // The node did not complete the last initial sync. We should attempt initial sync again.
+        needInitialSync = initialSyncFlag && replSettings.usingReplSets();
+    }
     // Fail to start up if there is no featureCompatibilityVersion document and there are non-local
-    // databases present.
-    if (!fcvDocumentExists && nonLocalDatabases && !skipUUIDAndFCVCheck) {
+    // databases present and we do not need to start up via initial sync.
+    if (!fcvDocumentExists && nonLocalDatabases && !skipUUIDAndFCVCheck && !needInitialSync) {
         severe()
             << "Unable to start up mongod due to missing featureCompatibilityVersion document.";
         if (opCtx->getServiceContext()->getStorageEngine()->isMmapV1()) {

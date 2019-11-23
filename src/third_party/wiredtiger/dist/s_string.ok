@@ -402,6 +402,7 @@ Uryyb
 VARCHAR
 VLDB
 VMSG
+VPM
 VR
 VX
 Vc
@@ -1307,6 +1308,7 @@ unmodify
 unordered
 unpackv
 unpadded
+unreconciled
 unreferenced
 unregister
 unsized
@@ -1342,6 +1344,7 @@ versa
 vfprintf
 vm
 vpack
+vpmsum
 vprintf
 vrfy
 vsize
