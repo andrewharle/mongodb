@@ -32,62 +32,40 @@
 
 #include "mongo/platform/basic.h"
 
-#include <memory>
-
 #include "mongo/db/logical_session_cache_factory_mongod.h"
 
 #include "mongo/db/logical_session_cache_impl.h"
 #include "mongo/db/service_liaison_mongod.h"
+#include "mongo/db/session_catalog.h"
 #include "mongo/db/sessions_collection_config_server.h"
 #include "mongo/db/sessions_collection_rs.h"
 #include "mongo/db/sessions_collection_sharded.h"
 #include "mongo/db/sessions_collection_standalone.h"
-#include "mongo/db/transaction_reaper.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
 
-namespace {
-
-std::shared_ptr<SessionsCollection> makeSessionsCollection(LogicalSessionCacheServer state) {
-    switch (state) {
-        case LogicalSessionCacheServer::kSharded:
-            return std::make_shared<SessionsCollectionSharded>();
-        case LogicalSessionCacheServer::kConfigServer:
-            return std::make_shared<SessionsCollectionConfigServer>();
-        case LogicalSessionCacheServer::kReplicaSet:
-            return std::make_shared<SessionsCollectionRS>();
-        case LogicalSessionCacheServer::kStandalone:
-            return std::make_shared<SessionsCollectionStandalone>();
-        default:
-            MONGO_UNREACHABLE;
-    }
-}
-
-}  // namespace
-
 std::unique_ptr<LogicalSessionCache> makeLogicalSessionCacheD(LogicalSessionCacheServer state) {
-    auto liaison = stdx::make_unique<ServiceLiaisonMongod>();
+    auto liaison = std::make_unique<ServiceLiaisonMongod>();
 
-    // Set up the logical session cache
-    auto sessionsColl = makeSessionsCollection(state);
-
-    auto reaper = [&]() -> std::shared_ptr<TransactionReaper> {
+    auto sessionsColl = [&]() -> std::shared_ptr<SessionsCollection> {
         switch (state) {
             case LogicalSessionCacheServer::kSharded:
-                return TransactionReaper::make(TransactionReaper::Type::kSharded, sessionsColl);
+                return std::make_shared<SessionsCollectionSharded>();
+            case LogicalSessionCacheServer::kConfigServer:
+                return std::make_shared<SessionsCollectionConfigServer>();
             case LogicalSessionCacheServer::kReplicaSet:
-                return TransactionReaper::make(TransactionReaper::Type::kReplicaSet, sessionsColl);
-            default:
-                return nullptr;
+                return std::make_shared<SessionsCollectionRS>();
+            case LogicalSessionCacheServer::kStandalone:
+                return std::make_shared<SessionsCollectionStandalone>();
         }
+
+        MONGO_UNREACHABLE;
     }();
 
-    return stdx::make_unique<LogicalSessionCacheImpl>(std::move(liaison),
-                                                      std::move(sessionsColl),
-                                                      std::move(reaper),
-                                                      LogicalSessionCacheImpl::Options{});
+    return std::make_unique<LogicalSessionCacheImpl>(
+        std::move(liaison), std::move(sessionsColl), SessionCatalog::reapSessionsOlderThan);
 }
 
 }  // namespace mongo

@@ -1,6 +1,5 @@
-
 /**
- *    Copyright (C) 2018-present MongoDB, Inc.
+ *    Copyright (C) 2019-present MongoDB, Inc.
  *
  *    This program is free software: you can redistribute it and/or modify
  *    it under the terms of the Server Side Public License, version 1,
@@ -28,30 +27,16 @@
  *    it in the license file.
  */
 
-#define MONGO_LOG_DEFAULT_COMPONENT ::mongo::logger::LogComponent::kControl
-
-#include "mongo/platform/basic.h"
-
-#include <memory>
-
-#include "mongo/embedded/logical_session_cache_factory_embedded.h"
-
-#include "mongo/db/logical_session_cache_impl.h"
-#include "mongo/db/service_liaison_mongod.h"
-#include "mongo/db/sessions_collection_standalone.h"
-#include "mongo/stdx/memory.h"
-#include "mongo/util/log.h"
+#include "mongo/db/repl/election_reason_counter.h"
 
 namespace mongo {
+namespace repl {
 
-std::unique_ptr<LogicalSessionCache> makeLogicalSessionCacheEmbedded() {
-    auto liaison = std::make_unique<ServiceLiaisonMongod>();
-
-    // Set up the logical session cache
-    auto sessionsColl = std::make_shared<SessionsCollectionStandalone>();
-
-    return stdx::make_unique<LogicalSessionCacheImpl>(
-        std::move(liaison), std::move(sessionsColl), nullptr, LogicalSessionCacheImpl::Options{});
+ElectionReasonCounter ElectionReasonCounter::parse(const IDLParserErrorContext& ctxt,
+                                                   const BSONObj& bsonObject) {
+    this->parseProtected(ctxt, bsonObject);
+    return *this;
 }
 
+}  // namespace repl
 }  // namespace mongo

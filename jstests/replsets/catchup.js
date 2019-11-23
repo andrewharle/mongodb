@@ -5,6 +5,7 @@
 
     load("jstests/libs/check_log.js");
     load("jstests/libs/write_concern_util.js");
+    load("jstests/replsets/libs/election_metrics.js");
     load("jstests/replsets/rslib.js");
 
     var name = "catch_up";
@@ -65,6 +66,7 @@
             assert.writeOK(oldPrimary.getDB("test").foo.insert({x: i}));
         }
         var latestOpOnOldPrimary = getLatestOp(oldPrimary);
+
         // New primary wins immediately, but needs to catch up.
         var newPrimary = stepUpNode(oldSecondaries[0]);
         var latestOpOnNewPrimary = getLatestOp(newPrimary);
@@ -97,19 +99,51 @@
     rst.awaitReplication();
 
     jsTest.log("Case 1: The primary is up-to-date after refreshing heartbeats.");
+    let initialNewPrimaryStatus =
+        assert.commandWorked(rst.getSecondary().adminCommand({serverStatus: 1}));
+
     // Should complete transition to primary immediately.
     var newPrimary = stepUpNode(rst.getSecondary());
     // Should win an election and finish the transition very quickly.
     assert.eq(newPrimary, rst.getPrimary());
     rst.awaitReplication();
 
+    // Check that the 'numCatchUps' field has not been incremented in serverStatus.
+    let newNewPrimaryStatus = assert.commandWorked(newPrimary.adminCommand({serverStatus: 1}));
+    verifyServerStatusChange(initialNewPrimaryStatus.electionMetrics,
+                             newNewPrimaryStatus.electionMetrics,
+                             'numCatchUps',
+                             0);
+    // Check that the 'numCatchUpsAlreadyCaughtUp' field has been incremented in serverStatus, and
+    // that none of the other reasons for catchup concluding has been incremented.
+    verifyCatchUpConclusionReason(initialNewPrimaryStatus.electionMetrics,
+                                  newNewPrimaryStatus.electionMetrics,
+                                  'numCatchUpsAlreadyCaughtUp');
+
     jsTest.log("Case 2: The primary needs to catch up, succeeds in time.");
+    initialNewPrimaryStatus =
+        assert.commandWorked(rst.getSecondaries()[0].adminCommand({serverStatus: 1}));
+
     var stepUpResults = stopReplicationAndEnforceNewPrimaryToCatchUp();
 
     // Disable fail point to allow replication.
     restartServerReplication(stepUpResults.oldSecondaries);
     // getPrimary() blocks until the primary finishes drain mode.
     assert.eq(stepUpResults.newPrimary, rst.getPrimary());
+
+    // Check that the 'numCatchUps' field has been incremented in serverStatus.
+    newNewPrimaryStatus =
+        assert.commandWorked(stepUpResults.newPrimary.adminCommand({serverStatus: 1}));
+    verifyServerStatusChange(initialNewPrimaryStatus.electionMetrics,
+                             newNewPrimaryStatus.electionMetrics,
+                             'numCatchUps',
+                             1);
+    // Check that the 'numCatchUpsSucceeded' field has been incremented in serverStatus, and that
+    // none of the other reasons for catchup concluding has been incremented.
+    verifyCatchUpConclusionReason(initialNewPrimaryStatus.electionMetrics,
+                                  newNewPrimaryStatus.electionMetrics,
+                                  'numCatchUpsSucceeded');
+
     // Wait for all secondaries to catch up
     rst.awaitReplication();
     // Check the latest op on old primary is preserved on the new one.
@@ -146,6 +180,9 @@
     rst.awaitReplication();
 
     jsTest.log("Case 4: The primary needs to catch up, fails due to timeout.");
+    initialNewPrimaryStatus =
+        assert.commandWorked(rst.getSecondaries()[0].adminCommand({serverStatus: 1}));
+
     // Reconfig to make the catchup timeout shorter.
     reconfigElectionAndCatchUpTimeout(conf.settings.electionTimeoutMillis, 10 * 1000);
 
@@ -154,6 +191,14 @@
     checkLog.contains(stepUpResults.newPrimary, "Catchup timed out after becoming primary");
     restartServerReplication(stepUpResults.newPrimary);
     assert.eq(stepUpResults.newPrimary, rst.getPrimary());
+
+    // Check that the 'numCatchUpsTimedOut' field has been incremented in serverStatus, and that
+    // none of the other reasons for catchup concluding has been incremented.
+    newNewPrimaryStatus =
+        assert.commandWorked(stepUpResults.newPrimary.adminCommand({serverStatus: 1}));
+    verifyCatchUpConclusionReason(initialNewPrimaryStatus.electionMetrics,
+                                  newNewPrimaryStatus.electionMetrics,
+                                  'numCatchUpsTimedOut');
 
     // Wait for the no-op "new primary" after winning an election, so that we know it has
     // finished transition to primary.
@@ -171,8 +216,20 @@
     reconfigElectionAndCatchUpTimeout(conf.settings.electionTimeoutMillis, -1);
     stepUpResults = stopReplicationAndEnforceNewPrimaryToCatchUp();
 
+    initialNewPrimaryStatus =
+        assert.commandWorked(stepUpResults.newPrimary.adminCommand({serverStatus: 1}));
+
     // Abort catchup.
     assert.commandWorked(stepUpResults.newPrimary.adminCommand({replSetAbortPrimaryCatchUp: 1}));
+
+    // Check that the 'numCatchUpsFailedWithReplSetAbortPrimaryCatchUpCmd' field has been
+    // incremented in serverStatus, and that none of the other reasons for catchup concluding has
+    // been incremented.
+    newNewPrimaryStatus =
+        assert.commandWorked(stepUpResults.newPrimary.adminCommand({serverStatus: 1}));
+    verifyCatchUpConclusionReason(initialNewPrimaryStatus.electionMetrics,
+                                  newNewPrimaryStatus.electionMetrics,
+                                  'numCatchUpsFailedWithReplSetAbortPrimaryCatchUpCmd');
 
     // Wait for the no-op "new primary" after winning an election, so that we know it has
     // finished transition to primary.
@@ -187,6 +244,9 @@
     checkOpInOplog(stepUpResults.newPrimary, stepUpResults.latestOpOnOldPrimary, 0);
 
     jsTest.log("Case 6: The primary needs to catch up with no timeout, but steps down.");
+    initialNewPrimaryStatus =
+        assert.commandWorked(rst.getSecondaries()[0].adminCommand({serverStatus: 1}));
+
     var stepUpResults = stopReplicationAndEnforceNewPrimaryToCatchUp();
 
     // Step-down command should abort catchup.
@@ -195,6 +255,15 @@
     } catch (e) {
         print(e);
     }
+
+    // Check that the 'numCatchUpsFailedWithError' field has been incremented in serverStatus, and
+    // that none of the other reasons for catchup concluding has been incremented.
+    newNewPrimaryStatus =
+        assert.commandWorked(stepUpResults.newPrimary.adminCommand({serverStatus: 1}));
+    verifyCatchUpConclusionReason(initialNewPrimaryStatus.electionMetrics,
+                                  newNewPrimaryStatus.electionMetrics,
+                                  'numCatchUpsFailedWithError');
+
     // Rename the primary.
     var steppedDownPrimary = stepUpResults.newPrimary;
     var newPrimary = rst.getPrimary();

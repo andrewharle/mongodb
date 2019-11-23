@@ -28,37 +28,32 @@
  *    it in the license file.
  */
 
-#pragma once
+#include "mongo/platform/basic.h"
 
-#include <memory>
+#include "mongo/db/commands/server_status.h"
+#include "mongo/db/jsobj.h"
+#include "mongo/db/logical_session_cache.h"
+#include "mongo/db/operation_context.h"
 
 namespace mongo {
+namespace {
 
-class ServiceContext;
-class SessionsCollection;
-class OperationContext;
-
-/**
- * TransactionReaper is responsible for scanning the transaction table, checking if sessions are
- * still alive and deleting the transaction records if their sessions have expired.
- */
-class TransactionReaper {
+class LogicalSessionServerStatusSection : public ServerStatusSection {
 public:
-    enum class Type {
-        kReplicaSet,
-        kSharded,
-    };
+    LogicalSessionServerStatusSection() : ServerStatusSection("logicalSessionRecordCache") {}
 
-    virtual ~TransactionReaper() = 0;
+    bool includeByDefault() const override {
+        return true;
+    }
 
-    virtual int reap(OperationContext* OperationContext) = 0;
+    BSONObj generateSection(OperationContext* opCtx,
+                            const BSONElement& configElement) const override {
+        const auto logicalSessionCache = LogicalSessionCache::get(opCtx);
 
-    /**
-     * The implementation of the sessions collections is different in replica sets versus sharded
-     * clusters, so we have a factory to pick the right impl.
-     */
-    static std::unique_ptr<TransactionReaper> make(Type type,
-                                                   std::shared_ptr<SessionsCollection> collection);
-};
+        return logicalSessionCache ? logicalSessionCache->getStats().toBSON() : BSONObj();
+    }
 
+} logicalSessionsServerStatusSection;
+
+}  // namespace
 }  // namespace mongo

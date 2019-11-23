@@ -64,6 +64,7 @@
 #include "mongo/db/repl/repl_set_html_summary.h"
 #include "mongo/db/repl/repl_set_request_votes_args.h"
 #include "mongo/db/repl/repl_settings.h"
+#include "mongo/db/repl/replication_metrics.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/rslog.h"
 #include "mongo/db/repl/storage_interface.h"
@@ -781,7 +782,7 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
 void ReplicationCoordinatorImpl::startup(OperationContext* opCtx) {
     if (!isReplEnabled()) {
         if (ReplSettings::shouldRecoverFromOplogAsStandalone()) {
-            if (!_storage->supportsRecoverToStableTimestamp(opCtx->getServiceContext())) {
+            if (!_storage->supportsRecoveryTimestamp(opCtx->getServiceContext())) {
                 severe() << "Cannot use 'recoverFromOplogAsStandalone' with a storage engine that "
                             "does not support recover to stable timestamp.";
                 fassertFailedNoTrace(50805);
@@ -1372,7 +1373,12 @@ Status ReplicationCoordinatorImpl::_waitUntilOpTime(OperationContext* opCtx,
             auto waitStatus =
                 opCtx->waitForConditionOrInterruptNoAssert(_currentCommittedSnapshotCond, lock);
             if (!waitStatus.isOK()) {
-                return waitStatus;
+                return waitStatus.withContext(str::stream()
+                                              << "Error waiting for snapshot not less than "
+                                              << targetOpTime.toString()
+                                              << ", current relevant optime is "
+                                              << getCurrentOpTime().toString()
+                                              << ".");
             }
             LOG(3) << "Got notified of new snapshot: " << _currentCommittedSnapshot->toString();
             continue;
@@ -1390,17 +1396,22 @@ Status ReplicationCoordinatorImpl::_waitUntilOpTime(OperationContext* opCtx,
         if (deadline) {
             auto waitUntilStatus =
                 opCtx->waitForConditionOrInterruptNoAssertUntil(condVar, lock, *deadline);
-            if (!waitUntilStatus.isOK()) {
-                waitStatus = waitUntilStatus.getStatus();
-            }
-            // If deadline is set no need to wait until the targetTime time is reached.
-            return waitStatus;
+            waitStatus = waitUntilStatus.getStatus();
         } else {
             waitStatus = opCtx->waitForConditionOrInterruptNoAssert(condVar, lock);
         }
 
         if (!waitStatus.isOK()) {
-            return waitStatus;
+            return waitStatus.withContext(str::stream() << "Error waiting for optime "
+                                                        << targetOpTime.toString()
+                                                        << ", current relevant optime is "
+                                                        << getCurrentOpTime().toString()
+                                                        << ".");
+        }
+
+        // If deadline is set no need to wait until the targetTime time is reached.
+        if (deadline) {
+            return Status::OK();
         }
     }
 
@@ -1413,6 +1424,10 @@ Status ReplicationCoordinatorImpl::_waitUntilOpTime(OperationContext* opCtx,
         // only then do we know that it will fill in all "holes" before that time.  If we do it
         // earlier, we may return when the requested optime has been reached, but other writes
         // at optimes before that time are not yet visible.
+        //
+        // Note that oplog queries by secondary nodes depend on this behavior to wait for
+        // all oplog holes to be filled in, despite providing an afterClusterTime field
+        // with Timestamp(0,1).
         _storage->waitForAllEarlierOplogWritesToBeVisible(opCtx);
     }
 
@@ -2625,7 +2640,6 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator_inlock(
         _canAcceptNonLocalWrites.store(canAcceptWrites);
     }
 
-
     const MemberState newState = _topCoord->getMemberState();
     if (newState == _memberState) {
         if (_topCoord->getRole() == TopologyCoordinator::Role::kCandidate) {
@@ -2659,7 +2673,16 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator_inlock(
     // Exit catchup mode if we're in it and enable replication producer and applier on stepdown.
     if (_memberState.primary()) {
         if (_catchupState) {
-            _catchupState->abort_inlock();
+            // _pendingTermUpdateDuringStepDown is set before stepping down due to hearing about a
+            // higher term, so that we can remember the term we heard and update our term as part of
+            // finishing stepdown. It is then unset toward the end of stepdown, after the function
+            // we are in is called. Thus we must be stepping down due to seeing a higher term if and
+            // only if _pendingTermUpdateDuringStepDown is set here.
+            if (_pendingTermUpdateDuringStepDown) {
+                _catchupState->abort_inlock(PrimaryCatchUpConclusionReason::kFailedWithNewTerm);
+            } else {
+                _catchupState->abort_inlock(PrimaryCatchUpConclusionReason::kFailedWithError);
+            }
         }
         _applierState = ApplierState::Running;
         _externalState->startProducerIfStopped();
@@ -2810,7 +2833,7 @@ void ReplicationCoordinatorImpl::CatchupState::start_inlock() {
 
     // No catchup in single node replica set.
     if (_repl->_rsConfig.getNumMembers() == 1) {
-        abort_inlock();
+        abort_inlock(PrimaryCatchUpConclusionReason::kSkipped);
         return;
     }
 
@@ -2819,7 +2842,7 @@ void ReplicationCoordinatorImpl::CatchupState::start_inlock() {
     // When catchUpTimeoutMillis is 0, we skip doing catchup entirely.
     if (catchupTimeout == ReplSetConfig::kCatchUpDisabled) {
         log() << "Skipping primary catchup since the catchup timeout is 0.";
-        abort_inlock();
+        abort_inlock(PrimaryCatchUpConclusionReason::kSkipped);
         return;
     }
 
@@ -2834,7 +2857,7 @@ void ReplicationCoordinatorImpl::CatchupState::start_inlock() {
             return;
         }
         log() << "Catchup timed out after becoming primary.";
-        abort_inlock();
+        abort_inlock(PrimaryCatchUpConclusionReason::kTimedOut);
     };
 
     // Deal with infinity and overflow - no timeout.
@@ -2847,14 +2870,17 @@ void ReplicationCoordinatorImpl::CatchupState::start_inlock() {
     auto status = _repl->_replExecutor->scheduleWorkAt(timeoutDate, timeoutCB);
     if (!status.isOK()) {
         log() << "Failed to schedule catchup timeout work.";
-        abort_inlock();
+        abort_inlock(PrimaryCatchUpConclusionReason::kFailedWithError);
         return;
     }
     _timeoutCbh = status.getValue();
 }
 
-void ReplicationCoordinatorImpl::CatchupState::abort_inlock() {
+void ReplicationCoordinatorImpl::CatchupState::abort_inlock(PrimaryCatchUpConclusionReason reason) {
     invariant(_repl->_getMemberState_inlock().primary());
+
+    ReplicationMetrics::get(getGlobalServiceContext())
+        .incrementNumCatchUpsConcludedForReason(reason);
 
     log() << "Exited primary catch-up mode.";
     // Clean up its own members.
@@ -2883,7 +2909,7 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate_inlock() {
     if (*targetOpTime <= myLastApplied) {
         log() << "Caught up to the latest optime known via heartbeats after becoming primary. "
               << "Target optime: " << *targetOpTime << ". My Last Applied: " << myLastApplied;
-        abort_inlock();
+        abort_inlock(PrimaryCatchUpConclusionReason::kAlreadyCaughtUp);
         return;
     }
 
@@ -2895,21 +2921,27 @@ void ReplicationCoordinatorImpl::CatchupState::signalHeartbeatUpdate_inlock() {
     log() << "Heartbeats updated catchup target optime to " << *targetOpTime;
     if (_waiter) {
         _repl->_opTimeWaiterList.remove_inlock(_waiter.get());
+    } else {
+        // Only increment the 'numCatchUps' election metric the first time we add a waiter, so that
+        // we only increment it once each time a primary has to catch up. If there is already an
+        // existing waiter, then the node is catching up and has already been counted.
+        ReplicationMetrics::get(getGlobalServiceContext()).incrementNumCatchUps();
     }
+
     auto targetOpTimeCB = [this, targetOpTime]() {
         // Double check the target time since stepdown may signal us too.
         const auto myLastApplied = _repl->_getMyLastAppliedOpTime_inlock();
         if (*targetOpTime <= myLastApplied) {
             log() << "Caught up to the latest known optime successfully after becoming primary. "
                   << "Target optime: " << *targetOpTime << ". My Last Applied: " << myLastApplied;
-            abort_inlock();
+            abort_inlock(PrimaryCatchUpConclusionReason::kSucceeded);
         }
     };
     _waiter = stdx::make_unique<CallbackWaiter>(*targetOpTime, targetOpTimeCB);
     _repl->_opTimeWaiterList.add_inlock(_waiter.get());
 }
 
-Status ReplicationCoordinatorImpl::abortCatchupIfNeeded() {
+Status ReplicationCoordinatorImpl::abortCatchupIfNeeded(PrimaryCatchUpConclusionReason reason) {
     if (!isV1ElectionProtocol()) {
         return Status(ErrorCodes::CommandNotSupported,
                       "Primary catch-up is only supported by Protocol Version 1");
@@ -2917,7 +2949,7 @@ Status ReplicationCoordinatorImpl::abortCatchupIfNeeded() {
 
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     if (_catchupState) {
-        _catchupState->abort_inlock();
+        _catchupState->abort_inlock(reason);
         return Status::OK();
     }
     return Status(ErrorCodes::IllegalOperation, "The node is not in catch-up mode.");
@@ -2977,7 +3009,7 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig_inlock(OperationContext* opCtx,
         log() << "**          in a future version." << startupWarningsLog;
     }
 
-    // Warn if running --nojournal and writeConcernMajorityJournalDefault = false
+    // Warn if running --nojournal and writeConcernMajorityJournalDefault = true
     StorageEngine* storageEngine = opCtx->getServiceContext()->getStorageEngine();
     if (storageEngine && !storageEngine->isDurable() &&
         (newConfig.getWriteConcernMajorityShouldJournal() &&
@@ -2992,6 +3024,23 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig_inlock(OperationContext* opCtx,
         log() << "**          option to the replica set config must be set to false "
               << startupWarningsLog;
         log() << "**          or w:majority write concerns will never complete."
+              << startupWarningsLog;
+        log() << startupWarningsLog;
+    }
+
+    // Warn if using the in-memory (ephemeral) storage engine with
+    // writeConcernMajorityJournalDefault = true
+    if (storageEngine && storageEngine->isEphemeral() &&
+        (newConfig.getWriteConcernMajorityShouldJournal() &&
+         (!oldConfig.isInitialized() || !oldConfig.getWriteConcernMajorityShouldJournal()))) {
+        log() << startupWarningsLog;
+        log() << "** WARNING: This replica set is using in-memory (ephemeral) storage with the "
+              << startupWarningsLog;
+        log() << "**          writeConcernMajorityJournalDefault option to the replica set config "
+              << startupWarningsLog;
+        log() << "**          set to true. The writeConcernMajorityJournalDefault option to the "
+              << startupWarningsLog;
+        log() << "**          replica set config is unsupported while using in-memory storage."
               << startupWarningsLog;
         log() << startupWarningsLog;
     }
@@ -3578,6 +3627,7 @@ EventHandle ReplicationCoordinatorImpl::_updateTerm_inlock(
         }
         if (_topCoord->prepareForUnconditionalStepDown()) {
             log() << "stepping down from primary, because a new term has begun: " << term;
+            ReplicationMetrics::get(getServiceContext()).incrementNumStepDownsCausedByHigherTerm();
             return _stepDownStart();
         } else {
             LOG(2) << "Updated term but not triggering stepdown because we are already in the "

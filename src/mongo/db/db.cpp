@@ -464,13 +464,21 @@ ExitCode _initAndListen(int listenPort) {
         log() << "finished checking dbs";
         exitCleanly(EXIT_CLEAN);
     }
+    auto replProcess = repl::ReplicationProcess::get(serviceContext);
+    invariant(replProcess);
+    const bool initialSyncFlag =
+        replProcess->getConsistencyMarkers()->getInitialSyncFlag(startupOpCtx.get());
 
     // Assert that the in-memory featureCompatibilityVersion parameter has been explicitly set. If
     // we are part of a replica set and are started up with no data files, we do not set the
     // featureCompatibilityVersion until a primary is chosen. For this case, we expect the in-memory
-    // featureCompatibilityVersion parameter to still be uninitialized until after startup.
+    // featureCompatibilityVersion parameter to still be uninitialized until after startup. If the
+    // initial sync flag is set and we are part of a replica set, we expect the version to be
+    // initialized as part of initial sync after startup.
+    const bool initializeFCVAtInitialSync = replSettings.usingReplSets() && initialSyncFlag;
     if (canCallFCVSetIfCleanStartup &&
-        (!replSettings.usingReplSets() || swNonLocalDatabases.getValue())) {
+        (!replSettings.usingReplSets() || swNonLocalDatabases.getValue()) &&
+        !initializeFCVAtInitialSync) {
         invariant(serverGlobalParams.featureCompatibility.isVersionInitialized());
     }
 
@@ -536,7 +544,11 @@ ExitCode _initAndListen(int listenPort) {
     auto shardingInitialized = ShardingInitializationMongoD::get(startupOpCtx.get())
                                    ->initializeShardingAwarenessIfNeeded(startupOpCtx.get());
     if (shardingInitialized) {
-        waitForShardRegistryReload(startupOpCtx.get()).transitional_ignore();
+        auto status = waitForShardRegistryReload(startupOpCtx.get());
+        if (!status.isOK()) {
+            LOG(0) << "Failed to load the shard registry as part of startup"
+                   << causedBy(redact(status));
+        }
     }
 
     auto storageEngine = serviceContext->getStorageEngine();
@@ -639,8 +651,7 @@ ExitCode _initAndListen(int listenPort) {
         kind = LogicalSessionCacheServer::kReplicaSet;
     }
 
-    auto sessionCache = makeLogicalSessionCacheD(kind);
-    LogicalSessionCache::set(serviceContext, std::move(sessionCache));
+    LogicalSessionCache::set(serviceContext, makeLogicalSessionCacheD(kind));
 
     // MessageServer::run will return when exit code closes its socket and we don't need the
     // operation context anymore
@@ -912,6 +923,11 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     if (auto balancer = Balancer::get(serviceContext)) {
         balancer->interruptBalancer();
         balancer->waitForBalancerToStop();
+    }
+
+    // Join the logical session cache before the transport layer.
+    if (auto lsc = LogicalSessionCache::get(serviceContext)) {
+        lsc->joinOnShutDown();
     }
 
     // Shutdown the TransportLayer so that new connections aren't accepted
