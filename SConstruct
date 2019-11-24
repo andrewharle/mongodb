@@ -977,6 +977,11 @@ envDict = dict(BUILD_ROOT=buildDir,
                INSTALL_DIR=installDir,
                CONFIG_HEADER_DEFINES={},
                LIBDEPS_TAG_EXPANSIONS=[],
+
+               CFLAGS=os.environ.get("CFLAGS", "-O3").split(),
+               CXXFLAGS=os.environ.get("CXXFLAGS", "-O3").split(),
+               CPPFLAGS=os.environ.get("CPPFLAGS", "").split(),
+               LINKFLAGS=os.environ.get("LDFLAGS", "").split(),
                )
 
 env = Environment(variables=env_vars, **envDict)
