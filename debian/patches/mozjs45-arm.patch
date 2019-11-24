@@ -1,10 +1,93 @@
-Author: Andrew Harle <46223597+andrewharle@users.noreply.github.com>
-Description: Added mozjs files necessary for the armhf build.
+From: Andrew Harle <46223597+andrewharle@users.noreply.github.com>
+Date: Sun, 24 Nov 2019 08:54:13 +0100
+Subject: Added mozjs files necessary for the armhf build.
+
 Forwarded: no
 Last-Update: 2019-08-18
+---
+ src/third_party/mozjs-45/gen-config.sh             |  54 +------
+ .../arm/linux/build/Unified_cpp_js_src0.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src1.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src10.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src11.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src12.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src13.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src14.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src15.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src16.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src17.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src18.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src19.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src2.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src20.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src21.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src22.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src23.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src24.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src25.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src26.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src27.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src28.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src29.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src3.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src30.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src31.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src32.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src33.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src34.cpp       |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src35.cpp       |  37 +++++
+ .../arm/linux/build/Unified_cpp_js_src4.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src5.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src6.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src7.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src8.cpp        |  55 +++++++
+ .../arm/linux/build/Unified_cpp_js_src9.cpp        |  55 +++++++
+ .../platform/arm/linux/build/js-confdefs.h         | 166 +++++++++++++++++++++
+ .../platform/arm/linux/include/js-config.h         |  59 ++++++++
+ 39 files changed, 2189 insertions(+), 52 deletions(-)
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src0.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src1.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src10.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src11.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src12.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src13.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src14.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src15.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src16.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src17.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src18.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src19.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src2.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src20.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src21.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src22.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src23.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src24.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src25.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src26.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src27.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src28.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src29.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src3.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src30.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src31.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src32.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src33.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src34.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src35.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src4.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src5.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src6.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src7.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src8.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src9.cpp
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/build/js-confdefs.h
+ create mode 100644 src/third_party/mozjs-45/platform/arm/linux/include/js-config.h
 
---- mongodb-4.0.12.orig/src/third_party/mozjs-45/gen-config.sh
-+++ mongodb-4.0.12/src/third_party/mozjs-45/gen-config.sh
+diff --git a/src/third_party/mozjs-45/gen-config.sh b/src/third_party/mozjs-45/gen-config.sh
+index c0c2eeb..a83e938 100755
+--- a/src/third_party/mozjs-45/gen-config.sh
++++ b/src/third_party/mozjs-45/gen-config.sh
 @@ -23,57 +23,6 @@ _xcode_setup() {
      export CXX=`xcrun -f clang++`" -arch $arch -isysroot $SDKROOT -m$target"
  }
@@ -73,8 +156,11 @@ Last-Update: 2019-08-18
  
  cd ../../..
  
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src0.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src0.cpp
+new file mode 100644
+index 0000000..3392352
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src0.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src0.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "asmjs/AsmJSFrameIterator.cpp"
@@ -132,8 +218,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src1.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src1.cpp
+new file mode 100644
+index 0000000..a6b717f
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src1.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src1.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "asmjs/WasmIonCompile.cpp"
@@ -191,8 +280,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src10.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src10.cpp
+new file mode 100644
+index 0000000..8790c5f
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src10.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src10.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/BaselineFrameInfo.cpp"
@@ -250,8 +342,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src11.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src11.cpp
+new file mode 100644
+index 0000000..39333e8
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src11.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src11.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/C1Spewer.cpp"
@@ -309,8 +404,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src12.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src12.cpp
+new file mode 100644
+index 0000000..c2ccff7
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src12.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src12.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/EffectiveAddressAnalysis.cpp"
@@ -368,8 +466,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src13.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src13.cpp
+new file mode 100644
+index 0000000..61225a9
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src13.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src13.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/IonCaches.cpp"
@@ -427,8 +528,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src14.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src14.cpp
+new file mode 100644
+index 0000000..69f4d54
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src14.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src14.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/JitcodeMap.cpp"
@@ -486,8 +590,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src15.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src15.cpp
+new file mode 100644
+index 0000000..5444915
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src15.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src15.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/MIR.cpp"
@@ -545,8 +652,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src16.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src16.cpp
+new file mode 100644
+index 0000000..d8c2a53
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src16.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src16.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/ProcessExecutableMemory.cpp"
@@ -604,8 +714,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src17.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src17.cpp
+new file mode 100644
+index 0000000..c0fda43
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src17.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src17.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/ScalarReplacement.cpp"
@@ -663,8 +776,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src18.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src18.cpp
+new file mode 100644
+index 0000000..0f4d952
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src18.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src18.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/TypedObjectPrediction.cpp"
@@ -722,8 +838,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src19.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src19.cpp
+new file mode 100644
+index 0000000..60669a6
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src19.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src19.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/arm/BaselineCompiler-arm.cpp"
@@ -781,8 +900,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src2.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src2.cpp
+new file mode 100644
+index 0000000..f9ee5a1
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src2.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src2.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "builtin/ModuleObject.cpp"
@@ -840,8 +962,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src20.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src20.cpp
+new file mode 100644
+index 0000000..8f53534
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src20.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src20.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/arm/SharedIC-arm.cpp"
@@ -899,8 +1024,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src21.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src21.cpp
+new file mode 100644
+index 0000000..c4d8192
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src21.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src21.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/shared/Lowering-shared.cpp"
@@ -958,8 +1086,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src22.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src22.cpp
+new file mode 100644
+index 0000000..4014315
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src22.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src22.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jsdate.cpp"
@@ -1017,8 +1148,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src23.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src23.cpp
+new file mode 100644
+index 0000000..aba9fc0
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src23.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src23.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jsiter.cpp"
@@ -1076,8 +1210,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src24.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src24.cpp
+new file mode 100644
+index 0000000..5a610ef
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src24.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src24.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jsprf.cpp"
@@ -1135,8 +1272,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src25.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src25.cpp
+new file mode 100644
+index 0000000..357fb8b
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src25.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src25.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "perf/jsperf.cpp"
@@ -1194,8 +1334,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src26.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src26.cpp
+new file mode 100644
+index 0000000..c9a4e53
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src26.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src26.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "proxy/Proxy.cpp"
@@ -1253,8 +1396,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src27.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src27.cpp
+new file mode 100644
+index 0000000..aa66b36
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src27.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src27.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/ArrayBufferObject.cpp"
@@ -1312,8 +1458,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src28.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src28.cpp
+new file mode 100644
+index 0000000..3d98b61
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src28.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src28.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/Debugger.cpp"
@@ -1371,8 +1520,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src29.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src29.cpp
+new file mode 100644
+index 0000000..86af1e7
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src29.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src29.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/HelperThreads.cpp"
@@ -1430,8 +1582,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src3.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src3.cpp
+new file mode 100644
+index 0000000..32bd1ca
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src3.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src3.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "builtin/SymbolObject.cpp"
@@ -1489,8 +1644,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src30.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src30.cpp
+new file mode 100644
+index 0000000..9e43dfb
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src30.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src30.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/NativeObject.cpp"
@@ -1548,8 +1706,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src31.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src31.cpp
+new file mode 100644
+index 0000000..e4ac196
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src31.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src31.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/ProxyObject.cpp"
@@ -1607,8 +1768,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src32.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src32.cpp
+new file mode 100644
+index 0000000..a702a11
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src32.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src32.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/SavedStacks.cpp"
@@ -1666,8 +1830,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src33.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src33.cpp
+new file mode 100644
+index 0000000..b106a07
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src33.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src33.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/Stopwatch.cpp"
@@ -1725,8 +1892,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src34.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src34.cpp
+new file mode 100644
+index 0000000..e66ddb3
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src34.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src34.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/Time.cpp"
@@ -1784,8 +1954,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src35.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src35.cpp
+new file mode 100644
+index 0000000..bcf3f00
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src35.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src35.cpp
 @@ -0,0 +1,37 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "vm/Unicode.cpp"
@@ -1825,8 +1998,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src4.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src4.cpp
+new file mode 100644
+index 0000000..4416357
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src4.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src4.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "ds/LifoAlloc.cpp"
@@ -1884,8 +2060,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src5.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src5.cpp
+new file mode 100644
+index 0000000..4a056d0
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src5.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src5.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "frontend/ParseNode.cpp"
@@ -1943,8 +2122,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src6.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src6.cpp
+new file mode 100644
+index 0000000..2c0af2b
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src6.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src6.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "gc/Marking.cpp"
@@ -2002,8 +2184,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src7.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src7.cpp
+new file mode 100644
+index 0000000..edc5d0d
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src7.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src7.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "gc/Tracer.cpp"
@@ -2061,8 +2246,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src8.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src8.cpp
+new file mode 100644
+index 0000000..4150698
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src8.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src8.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "irregexp/RegExpInterpreter.cpp"
@@ -2120,8 +2308,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src9.cpp b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src9.cpp
+new file mode 100644
+index 0000000..a02b358
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src9.cpp
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/Unified_cpp_js_src9.cpp
 @@ -0,0 +1,55 @@
 +#define MOZ_UNIFIED_BUILD
 +#include "jit/BacktrackingAllocator.cpp"
@@ -2179,8 +2370,11 @@ Last-Update: 2019-08-18
 +#undef INITGUID
 +#endif
 \ No newline at end of file
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/build/js-confdefs.h b/src/third_party/mozjs-45/platform/arm/linux/build/js-confdefs.h
+new file mode 100644
+index 0000000..32faac2
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/build/js-confdefs.h
++++ b/src/third_party/mozjs-45/platform/arm/linux/build/js-confdefs.h
 @@ -0,0 +1,166 @@
 +/* List of defines generated by configure. Included with preprocessor flag,
 + * -include, to avoid long list of -D defines on the compile command-line.
@@ -2348,8 +2542,11 @@ Last-Update: 2019-08-18
 +#include "js/RequiredDefines.h"
 +
 +#endif /* js_confdefs_h */
+diff --git a/src/third_party/mozjs-45/platform/arm/linux/include/js-config.h b/src/third_party/mozjs-45/platform/arm/linux/include/js-config.h
+new file mode 100644
+index 0000000..8626065
 --- /dev/null
-+++ mongodb-4.0.12/src/third_party/mozjs-45/platform/arm/linux/include/js-config.h
++++ b/src/third_party/mozjs-45/platform/arm/linux/include/js-config.h
 @@ -0,0 +1,59 @@
 +/* -*- Mode: C; tab-width: 8; indent-tabs-mode: nil; c-basic-offset: 4 -*-
 + * vim: set ts=8 sw=4 et tw=78:
