@@ -16,7 +16,7 @@ pydocstyle == 2.1.1
 -r resmokelib/requirements.txt
 # generate_error_codes.py
 cheetah3 == 3.0.0; python_version < "3"
-jinja2 == 2.10
+jinja2 >= 2.10.1
 mock == 2.0.0
 click ~= 7.0
 evergreen.py == 0.3.9
