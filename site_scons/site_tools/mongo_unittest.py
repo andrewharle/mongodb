@@ -23,7 +23,14 @@ def build_cpp_unit_test(env, target, source, **kwargs):
     libdeps = kwargs.get('LIBDEPS', [])
     libdeps.append( '$BUILD_DIR/mongo/unittest/unittest_main' )
 
+    linkflags = []
+    linkflags.extend(env.get('LINKFLAGS', []))
+    linkflags.extend(kwargs.get('LINKFLAGS', []))
+    linkflags.append('-Wl,--strip-debug')
+
     kwargs['LIBDEPS'] = libdeps
+    kwargs['LINKFLAGS'] = linkflags
+
     kwargs['INSTALL_ALIAS'] = ['tests']
 
     result = env.Program(target, source, **kwargs)
