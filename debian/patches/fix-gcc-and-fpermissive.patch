@@ -1,10 +1,19 @@
-Author: Fabrice Fontaine <https://github.com/ffontaine>, Andrew Harle <46223597+andrewharle@users.noreply.github.com>
-Description: Cherry pick patch from https://github.com/mongodb/mongo/pull/1296/commits/362be06fc16a5ad0f9e9aa90cc763c5242e8e35c to allow build with 32-bit SSL on armhf.
+From: "Fabrice Fontaine https://github.com/ffontaine,
+ Andrew Harle" <46223597+andrewharle@users.noreply.github.com>
+Date: Sun, 24 Nov 2019 08:54:13 +0100
+Subject: Cherry pick patch from
+ https://github.com/mongodb/mongo/pull/1296/commits/362be06fc16a5ad0f9e9aa90cc763c5242e8e35c
+ to allow build with 32-bit SSL on armhf.
 
 Last-Update: 2019-08-18
+---
+ src/mongo/util/net/ssl_manager.cpp | 6 +++---
+ 1 file changed, 3 insertions(+), 3 deletions(-)
 
---- mongodb-4.0.12.orig/src/mongo/util/net/ssl_manager.cpp
-+++ mongodb-4.0.12/src/mongo/util/net/ssl_manager.cpp
+diff --git a/src/mongo/util/net/ssl_manager.cpp b/src/mongo/util/net/ssl_manager.cpp
+index 2667f13..5c44a4f 100644
+--- a/src/mongo/util/net/ssl_manager.cpp
++++ b/src/mongo/util/net/ssl_manager.cpp
 @@ -410,7 +410,7 @@ public:
       *
       * Returns a DERToken which consists of the (tag, length, value) tuple.
@@ -23,7 +32,7 @@ Last-Update: 2019-08-18
  
          auto swPair = DERToken::parse(ConstDataRange(ptr, length), &outLength);
  
-@@ -472,7 +472,7 @@ StatusWith<std::string> readDERString(Co
+@@ -472,7 +472,7 @@ StatusWith<std::string> readDERString(ConstDataRangeCursor& cdc) {
  }
  
  
