@@ -105,7 +105,12 @@ private:
 
 class AccumulatorAddToSet final : public Accumulator {
 public:
-    explicit AccumulatorAddToSet(const boost::intrusive_ptr<ExpressionContext>& expCtx);
+    /**
+     * Creates a new $addToSet accumulator. If no memory limit is given, defaults to the value of
+     * the server parameter 'internalQueryMaxAddToSetBytes'.
+     */
+    AccumulatorAddToSet(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                        boost::optional<int> maxMemoryUsageBytes = boost::none);
 
     void processInternal(const Value& input, bool merging) final;
     Value getValue(bool toBeMerged) final;
@@ -125,6 +130,7 @@ public:
 
 private:
     ValueUnorderedSet _set;
+    int _maxMemUsageBytes;
 };
 
 
@@ -236,7 +242,12 @@ public:
 
 class AccumulatorPush final : public Accumulator {
 public:
-    explicit AccumulatorPush(const boost::intrusive_ptr<ExpressionContext>& expCtx);
+    /**
+     * Creates a new $push accumulator. If no memory limit is given, defaults to the value of the
+     * server parameter 'internalQueryMaxPushBytes'.
+     */
+    AccumulatorPush(const boost::intrusive_ptr<ExpressionContext>& expCtx,
+                    boost::optional<int> maxMemoryUsageBytes = boost::none);
 
     void processInternal(const Value& input, bool merging) final;
     Value getValue(bool toBeMerged) final;
@@ -247,7 +258,8 @@ public:
         const boost::intrusive_ptr<ExpressionContext>& expCtx);
 
 private:
-    std::vector<Value> vpValue;
+    std::vector<Value> _array;
+    int _maxMemUsageBytes;
 };
 
 

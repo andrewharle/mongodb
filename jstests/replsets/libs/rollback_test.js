@@ -61,6 +61,8 @@ function RollbackTest(name = "RollbackTest", replSet) {
     const SIGTERM = 15;
     const kNumDataBearingNodes = 2;
 
+    let awaitSecondaryNodesForRollbackTimeout;
+
     let rst;
     let curPrimary;
     let curSecondary;
@@ -184,7 +186,6 @@ function RollbackTest(name = "RollbackTest", replSet) {
      * be replicated to all nodes and should not be rolled back.
      */
     this.transitionToSteadyStateOperations = function() {
-
         // Ensure the secondary is connected. It may already have been connected from a previous
         // stage.
         log(`Ensuring the secondary ${curSecondary.host} is connected to the other nodes`);
@@ -208,14 +209,31 @@ function RollbackTest(name = "RollbackTest", replSet) {
                            `RBID is too large. current RBID: ${rbid}, last RBID: ${lastRBID}`);
 
                 return rbid === lastRBID + 1;
-
             }, "Timed out waiting for RBID to increment on " + curSecondary.host);
         } else {
             log(`Skipping RBID check on ${curSecondary.host} because shutdowns ` +
                 `may prevent a rollback here.`);
         }
 
-        rst.awaitSecondaryNodes();
+        // If the rollback node has {enableMajorityReadConcern:false} set, it will use the
+        // rollbackViaRefetch algorithm. That can lead to unrecoverable rollbacks, particularly
+        // in unclean shutdown suites, as it it is possible in rare cases for the sync source to
+        // lose the entry corresponding to the optime the rollback node chose as its minValid.
+        try {
+            rst.awaitSecondaryNodesForRollbackTest(
+                awaitSecondaryNodesForRollbackTimeout,
+                curSecondary /* connToCheckForUnrecoverableRollback */);
+        } catch (e) {
+            if (e.unrecoverableRollbackDetected) {
+                log(`Detected unrecoverable rollback on ${curSecondary.host}. Ending test.`,
+                    true /* important */);
+                TestData.skipCheckDBHashes = true;
+                rst.stopSet();
+                quit();
+            }
+            // Re-throw the original exception in all other cases.
+            throw e;
+        }
         rst.awaitReplication();
 
         log(`Rollback on ${curSecondary.host} (if needed) and awaitReplication completed`, true);
@@ -370,6 +388,11 @@ function RollbackTest(name = "RollbackTest", replSet) {
             opts = {allowedExitCode: MongoRunner.EXIT_SIGKILL};
         }
 
+        // We may attempt to restart a node while it is in rollback or recovery, in which case
+        // the validation checks will fail. We will still validate collections during the
+        // RollbackTest's full consistency checks, so we do not lose much validation coverage.
+        opts.skipValidation = true;
+
         log(`Stopping node ${hostName} with signal ${signal}`);
         rst.stop(nodeId, signal, opts, {forRestart: true});
         log(`Restarting node ${hostName}`);
@@ -387,5 +410,14 @@ function RollbackTest(name = "RollbackTest", replSet) {
      */
     this.getTestFixture = function() {
         return rst;
+    };
+
+    /**
+     * Use this to control the timeout being used in the awaitSecondaryNodesForRollbackTest call
+     * in transitionToSteadyStateOperations.
+     * For use only in tests that expect unrecoverable rollbacks.
+     */
+    this.setAwaitSecondaryNodesForRollbackTimeout = function(timeoutMillis) {
+        awaitSecondaryNodesForRollbackTimeout = timeoutMillis;
     };
 }

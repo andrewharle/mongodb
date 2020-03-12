@@ -359,6 +359,7 @@ std::pair<Status, int> CursorManager::killCursorsWithMatchingSessions(
     OperationContext* opCtx, const SessionKiller::Matcher& matcher) {
     auto eraser = [&](CursorManager& mgr, CursorId id) {
         uassertStatusOK(mgr.killCursor(opCtx, id, true));
+        log() << "killing cursor: " << id << " as part of killing session(s)";
     };
 
     auto visitor = makeKillSessionsCursorManagerVisitor(opCtx, matcher, std::move(eraser));
@@ -543,6 +544,8 @@ std::size_t CursorManager::timeoutCursors(OperationContext* opCtx, Date_t now) {
 
     // Be careful not to dispose of cursors while holding the partition lock.
     for (auto&& cursor : toDisposeWithoutMutex) {
+        log() << "Cursor id " << cursor->cursorid() << " timed out, idle since "
+              << cursor->getLastUseDate();
         cursor->dispose(opCtx);
     }
     return toDisposeWithoutMutex.size();

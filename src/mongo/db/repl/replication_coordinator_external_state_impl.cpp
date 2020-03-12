@@ -68,6 +68,7 @@
 #include "mongo/db/repl/oplog_buffer_blocking_queue.h"
 #include "mongo/db/repl/repl_settings.h"
 #include "mongo/db/repl/replication_coordinator.h"
+#include "mongo/db/repl/replication_metrics.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_tail.h"
@@ -325,6 +326,11 @@ void ReplicationCoordinatorExternalStateImpl::startThreads(const ReplSettings& s
         return;
     }
 
+    if (_inShutdown) {
+        log() << "Not starting replication storage threads because replication is shutting down.";
+        return;
+    }
+
     log() << "Starting replication storage threads";
     _service->getStorageEngine()->setJournalListener(this);
 
@@ -468,6 +474,10 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
 void ReplicationCoordinatorExternalStateImpl::onDrainComplete(OperationContext* opCtx) {
     invariant(!opCtx->lockState()->isLocked());
 
+    if (_oplogBuffer) {
+        _oplogBuffer->exitDrainMode();
+    }
+
     // If this is a config server node becoming a primary, ensure the balancer is ready to start.
     if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
         // We must ensure the balancer has stopped because it may still be in the process of
@@ -502,6 +512,12 @@ OpTime ReplicationCoordinatorExternalStateImpl::onTransitionToPrimary(OperationC
         });
     }
     const auto opTimeToReturn = fassert(28665, loadLastOpTime(opCtx));
+    const auto newTermStartDate = fassert(31302, loadLastWallTime(opCtx));
+
+    ReplicationMetrics::get(opCtx).setCandidateNewTermStartDate(newTermStartDate);
+
+    auto replCoord = ReplicationCoordinator::get(opCtx);
+    replCoord->createWMajorityWriteAvailabilityDateWaiter(opTimeToReturn);
 
     _shardingOnTransitionToPrimaryHook(opCtx);
     _dropAllTempCollections(opCtx);
@@ -664,47 +680,70 @@ bool ReplicationCoordinatorExternalStateImpl::oplogExists(OperationContext* opCt
     return oplog.getCollection() != nullptr;
 }
 
-StatusWith<OpTime> ReplicationCoordinatorExternalStateImpl::loadLastOpTime(
-    OperationContext* opCtx) {
-    // TODO: handle WriteConflictExceptions below
+Status ReplicationCoordinatorExternalStateImpl::_loadLastOplogEntry(OperationContext* opCtx,
+                                                                    BSONObj* result) {
     try {
         // If we are doing an initial sync do not read from the oplog.
         if (_replicationProcess->getConsistencyMarkers()->getInitialSyncFlag(opCtx)) {
             return {ErrorCodes::InitialSyncFailure, "In the middle of an initial sync."};
         }
 
-        BSONObj oplogEntry;
-
         if (!writeConflictRetry(
-                opCtx, "Load last opTime", NamespaceString::kRsOplogNamespace.ns().c_str(), [&] {
+                opCtx,
+                "Load last oplog entry",
+                NamespaceString::kRsOplogNamespace.ns().c_str(),
+                [&] {
                     return Helpers::getLast(
-                        opCtx, NamespaceString::kRsOplogNamespace.ns().c_str(), oplogEntry);
+                        opCtx, NamespaceString::kRsOplogNamespace.ns().c_str(), *result);
                 })) {
-            return StatusWith<OpTime>(ErrorCodes::NoMatchingDocument,
-                                      str::stream() << "Did not find any entries in "
-                                                    << NamespaceString::kRsOplogNamespace.ns());
+            return {ErrorCodes::NoMatchingDocument,
+                    str::stream() << "Did not find any entries in "
+                                  << NamespaceString::kRsOplogNamespace.ns()};
         }
-        BSONElement tsElement = oplogEntry[tsFieldName];
-        if (tsElement.eoo()) {
-            return StatusWith<OpTime>(ErrorCodes::NoSuchKey,
-                                      str::stream() << "Most recent entry in "
-                                                    << NamespaceString::kRsOplogNamespace.ns()
-                                                    << " missing \""
-                                                    << tsFieldName
-                                                    << "\" field");
-        }
-        if (tsElement.type() != bsonTimestamp) {
-            return StatusWith<OpTime>(ErrorCodes::TypeMismatch,
-                                      str::stream() << "Expected type of \"" << tsFieldName
-                                                    << "\" in most recent "
-                                                    << NamespaceString::kRsOplogNamespace.ns()
-                                                    << " entry to have type Timestamp, but found "
-                                                    << typeName(tsElement.type()));
-        }
-        return OpTime::parseFromOplogEntry(oplogEntry);
+
+        return Status::OK();
     } catch (const DBException& ex) {
-        return StatusWith<OpTime>(ex.toStatus());
+        return ex.toStatus();
     }
+}
+
+StatusWith<OpTime> ReplicationCoordinatorExternalStateImpl::loadLastOpTime(
+    OperationContext* opCtx) {
+    BSONObj oplogEntry;
+    auto status = _loadLastOplogEntry(opCtx, &oplogEntry);
+    if (!status.isOK()) {
+        return StatusWith<OpTime>(status);
+    }
+
+    BSONElement tsElement = oplogEntry[tsFieldName];
+    if (tsElement.eoo()) {
+        return StatusWith<OpTime>(ErrorCodes::NoSuchKey,
+                                  str::stream() << "Most recent entry in "
+                                                << NamespaceString::kRsOplogNamespace.ns()
+                                                << " missing \""
+                                                << tsFieldName
+                                                << "\" field");
+    }
+    if (tsElement.type() != bsonTimestamp) {
+        return StatusWith<OpTime>(ErrorCodes::TypeMismatch,
+                                  str::stream() << "Expected type of \"" << tsFieldName
+                                                << "\" in most recent "
+                                                << NamespaceString::kRsOplogNamespace.ns()
+                                                << " entry to have type Timestamp, but found "
+                                                << typeName(tsElement.type()));
+    }
+    return OpTime::parseFromOplogEntry(oplogEntry);
+}
+
+StatusWith<Date_t> ReplicationCoordinatorExternalStateImpl::loadLastWallTime(
+    OperationContext* opCtx) {
+    BSONObj oplogEntry;
+    auto status = _loadLastOplogEntry(opCtx, &oplogEntry);
+    if (!status.isOK()) {
+        return StatusWith<Date_t>(status);
+    }
+
+    return OpTime::parseWallTimeFromOplogEntry(oplogEntry);
 }
 
 bool ReplicationCoordinatorExternalStateImpl::isSelf(const HostAndPort& host, ServiceContext* ctx) {
@@ -842,10 +881,16 @@ void ReplicationCoordinatorExternalStateImpl::stopProducer() {
     if (_bgSync) {
         _bgSync->stop(false);
     }
+    if (_oplogBuffer) {
+        _oplogBuffer->enterDrainMode();
+    }
 }
 
 void ReplicationCoordinatorExternalStateImpl::startProducerIfStopped() {
     LockGuard lk(_threadMutex);
+    if (_oplogBuffer) {
+        _oplogBuffer->exitDrainMode();
+    }
     if (_bgSync) {
         _bgSync->startProducerIfStopped();
     }

@@ -242,7 +242,6 @@ selector:
   - jstests/core/kill_cursors.js
   - jstests/core/list_collections1.js
   - jstests/core/list_indexes.js
-  - jstests/core/max_time_ms.js
   - jstests/core/oro.js
 
   # Expects certain number of operations in the system.profile collection.
@@ -263,7 +262,6 @@ selector:
   - jstests/core/killop_drop_collection.js
   - jstests/core/loadserverscripts.js
   - jstests/core/mr_killop.js
-  - jstests/core/queryoptimizer3.js
   - jstests/core/remove9.js
   - jstests/core/removeb.js
   - jstests/core/removec.js

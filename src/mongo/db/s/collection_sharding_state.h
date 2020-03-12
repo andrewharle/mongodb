@@ -31,6 +31,7 @@
 #pragma once
 
 #include "mongo/base/disallow_copying.h"
+#include "mongo/db/logical_time.h"
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/s/scoped_collection_metadata.h"
 #include "mongo/db/s/sharding_migration_critical_section.h"
@@ -72,14 +73,38 @@ public:
     static void report(OperationContext* opCtx, BSONObjBuilder* builder);
 
     /**
-     * Returns the chunk filtering metadata for the collection. The returned object is safe to
-     * access outside of collection lock.
+     * Returns the orphan chunk filtering metadata that the current operation should be using for
+     * the collection.
      *
-     * If the operation context contains an 'atClusterTime' property, the returned filtering
-     * metadata will be tied to a specific point in time. Otherwise it will reference the latest
-     * time available.
+     * If the operation context contains an 'atClusterTime', the returned filtering metadata will be
+     * tied to a specific point in time. Otherwise, it will reference the latest time available. If
+     * the operation is not associated with a shard version (refer to
+     * OperationShardingState::isOperationVersioned for more info on that), returns an UNSHARDED
+     * metadata object.
+     *
+     * The intended users of this method are callers which need to perform orphan filtering. Use
+     * 'getCurrentMetadata' for all other cases, where just sharding-related properties of the
+     * collection are necessary (e.g., isSharded or the shard key).
+     *
+     * The returned object is safe to access even after the collection lock has been dropped.
      */
-    ScopedCollectionMetadata getMetadata(OperationContext* opCtx);
+    ScopedCollectionMetadata getOrphansFilter(OperationContext* opCtx);
+
+    /**
+     * See the comments for 'getOrphansFilter' above for more information on this method.
+     */
+    ScopedCollectionMetadata getCurrentMetadata();
+
+    /**
+     * Returns boost::none if the filtering metadata for the collection is not known yet. Otherwise
+     * returns the most recently refreshed from the config server metadata or shard version.
+     *
+     * These methods do not check for the shard version that the operation requires and should only
+     * be used for cases such as checking whether a particular config server update has taken
+     * effect.
+     */
+    boost::optional<ScopedCollectionMetadata> getCurrentMetadataIfKnown();
+    boost::optional<ChunkVersion> getCurrentShardVersionIfKnown();
 
     /**
      * Checks whether the shard version in the operation context is compatible with the shard
@@ -114,8 +139,12 @@ private:
     // Tracks the migration critical section state for this collection.
     ShardingMigrationCriticalSection _critSec;
 
-    // Obtains the current metadata for the collection
-    virtual ScopedCollectionMetadata _getMetadata(OperationContext* opCtx) = 0;
+    /**
+     * Obtains the current metadata for the collection or boost::none if the metadata is not yet
+     * known
+     */
+    virtual boost::optional<ScopedCollectionMetadata> _getMetadata(
+        const boost::optional<mongo::LogicalTime>& atClusterTime) = 0;
 };
 
 /**

@@ -46,9 +46,9 @@ using namespace mongo;
 
 namespace {
 
-using std::unique_ptr;
 using std::numeric_limits;
 using std::string;
+using std::unique_ptr;
 using std::vector;
 
 double numberMin = -numeric_limits<double>::max();
@@ -587,6 +587,28 @@ TEST(IndexBoundsBuilderTest, TranslateGtMinKey) {
     ASSERT_TRUE(oil.intervals[0].startInclusive);
     ASSERT_TRUE(oil.intervals[0].endInclusive);
     ASSERT_EQUALS(tightness, IndexBoundsBuilder::EXACT);
+}
+
+TEST(IndexBoundsBuilderTest, DontCrashOnNegationOfArrayInequality) {
+    BSONObj keyPattern = BSON("a" << 1);
+    auto testIndex = IndexEntry(keyPattern,
+                                true,  // mk
+                                false,
+                                false,
+                                "test_foo",
+                                nullptr,
+                                BSONObj());
+
+    BSONObj obj = fromjson("{a: {$not: {$lt: [\"here\", {}, false]}}}");
+    auto expr =
+        MatchExpression::optimize(std::unique_ptr<MatchExpression>(parseMatchExpression(obj)));
+    BSONElement elt = obj.firstElement();
+    OrderedIntervalList oil;
+    IndexBoundsBuilder::BoundsTightness tightness;
+    // TODO: SERVER-45233 This should succeed rather than throwing code.
+    ASSERT_THROWS_CODE(IndexBoundsBuilder::translate(expr.get(), elt, testIndex, &oil, &tightness),
+                       DBException,
+                       ErrorCodes::InternalError);
 }
 
 // Nothing can be greater than MaxKey so the resulting index bounds would be a useless empty range.

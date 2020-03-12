@@ -4,7 +4,7 @@ Conflicts: mongo-10gen, mongo-10gen-enterprise, mongo-10gen-enterprise-server, m
 Version: %{dynamic_version}
 Release: %{dynamic_release}%{?dist}
 Summary: MongoDB open source document-oriented database system (metapackage)
-License: AGPL 3.0
+License: SSPL
 URL: http://www.mongodb.org
 Group: Applications/Databases
 Requires: mongodb-org-unstable-server = %{version}, mongodb-org-unstable-shell = %{version}, mongodb-org-unstable-mongos = %{version}, mongodb-org-unstable-tools = %{version}
@@ -256,6 +256,8 @@ fi
 %{_mandir}/man1/mongoexport.1*
 %{_mandir}/man1/mongofiles.1*
 %{_mandir}/man1/mongoimport.1*
+%{_mandir}/man1/mongoldap.1*
+%{_mandir}/man1/mongoreplay.1*
 %{_mandir}/man1/mongorestore.1*
 %{_mandir}/man1/mongotop.1*
 %{_mandir}/man1/mongostat.1*

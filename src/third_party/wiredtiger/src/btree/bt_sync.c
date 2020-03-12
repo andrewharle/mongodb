@@ -300,12 +300,11 @@ __sync_file(WT_SESSION_IMPL *session, WT_CACHE_OP syncop)
              * discarded), that is not wasted effort because
              * checkpoint doesn't need to write the page again.
              *
-             * Once the transaction has given up it's snapshot it
-             * is no longer safe to reconcile pages. That happens
-             * prior to the final metadata checkpoint.
+             * Once the transaction has given up it's snapshot it is no longer safe to reconcile
+             * pages. That happens prior to the final metadata checkpoint.
              */
             if (!WT_PAGE_IS_INTERNAL(page) && page->read_gen == WT_READGEN_WONT_NEED &&
-              F_ISSET(&session->txn, WT_TXN_HAS_SNAPSHOT) && !tried_eviction) {
+              !tried_eviction && F_ISSET(&session->txn, WT_TXN_HAS_SNAPSHOT)) {
                 WT_ERR_BUSY_OK(__wt_page_release_evict(session, walk, 0));
                 walk = prev;
                 prev = NULL;

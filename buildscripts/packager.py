@@ -331,7 +331,7 @@ class Distro(object):
         if re.search("(suse)", self.dname):
             return ["suse11", "suse12"]
         elif re.search("(redhat|fedora|centos)", self.dname):
-            return ["rhel70", "rhel71", "rhel72", "rhel62", "rhel55", "rhel67"]
+            return ["rhel80", "rhel70", "rhel71", "rhel72", "rhel62", "rhel55", "rhel67"]
         elif self.dname in ['amazon', 'amazon2']:
             return [self.dname]
         elif self.dname == 'ubuntu':
@@ -837,6 +837,16 @@ def make_rpm(distro, build_os, arch, spec, srcdir):  # pylint: disable=too-many-
         "-D", "dynamic_version " + spec.pversion(distro), "-D",
         "dynamic_release " + spec.prelease(), "-D", "_topdir " + topdir
     ])
+
+    # Versions of RPM after 4.4 ignore our BuildRoot tag so we need to
+    # specify it on the command line args to rpmbuild
+    if ((distro.name() == "suse" and distro.repo_os_version(build_os) == "15")
+            or (distro.name() == "redhat" and distro.repo_os_version(build_os) == "8")):
+        flags.extend([
+            "--buildroot",
+            os.path.join(topdir, "BUILDROOT"),
+        ])
+
     sysassert(["rpmbuild", "-ba", "--target", distro_arch] + flags +
               ["%s/SPECS/mongodb%s.spec" % (topdir, suffix)])
     repo_dir = distro.repodir(arch, build_os, spec)

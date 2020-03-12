@@ -55,10 +55,8 @@
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/idempotency_test_fixture.h"
 #include "mongo/db/repl/oplog.h"
-#include "mongo/db/repl/oplog_buffer_blocking_queue.h"
 #include "mongo/db/repl/oplog_interface_local.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/repl/replication_coordinator_mock.h"
 #include "mongo/db/repl/replication_process.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_tail.h"
@@ -223,31 +221,6 @@ auto parseFromOplogEntryArray(const BSONObj& obj, int elem) {
 
     return OpTime(tsArray.Array()[elem].timestamp(), termArray.Array()[elem].Long());
 };
-
-TEST_F(SyncTailTest, SyncApplyNoNamespaceBadOp) {
-    const BSONObj op = BSON("op"
-                            << "x");
-    ASSERT_THROWS(
-        SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync).ignore(),
-        ExceptionFor<ErrorCodes::BadValue>);
-}
-
-TEST_F(SyncTailTest, SyncApplyNoNamespaceNoOp) {
-    ASSERT_OK(SyncTail::syncApply(_opCtx.get(),
-                                  BSON("op"
-                                       << "n"),
-                                  OplogApplication::Mode::kInitialSync));
-}
-
-TEST_F(SyncTailTest, SyncApplyBadOp) {
-    const BSONObj op = BSON("op"
-                            << "x"
-                            << "ns"
-                            << "test.t");
-    ASSERT_THROWS(
-        SyncTail::syncApply(_opCtx.get(), op, OplogApplication::Mode::kInitialSync).ignore(),
-        ExceptionFor<ErrorCodes::BadValue>);
-}
 
 TEST_F(SyncTailTest, SyncApplyInsertDocumentDatabaseMissing) {
     NamespaceString nss("test.t");
@@ -1109,51 +1082,6 @@ TEST_F(SyncTailTest,
     auto iter = collectionReader.makeIterator();
     ASSERT_BSONOBJ_EQ(updatedDocument, unittest::assertGet(iter->next()).first);
     ASSERT_EQUALS(ErrorCodes::CollectionIsEmpty, iter->next().getStatus());
-}
-
-namespace {
-
-class ReplicationCoordinatorSignalDrainCompleteThrows : public ReplicationCoordinatorMock {
-public:
-    ReplicationCoordinatorSignalDrainCompleteThrows(ServiceContext* service,
-                                                    const ReplSettings& settings)
-        : ReplicationCoordinatorMock(service, settings) {}
-    void signalDrainComplete(OperationContext*, long long) final {
-        uasserted(ErrorCodes::OperationFailed, "failed to signal drain complete");
-    }
-};
-
-}  // namespace
-
-DEATH_TEST_F(SyncTailTest,
-             OplogApplicationLogsExceptionFromSignalDrainCompleteBeforeAborting,
-             "OperationFailed: failed to signal drain complete") {
-    // Leave oplog buffer empty so that SyncTail calls
-    // ReplicationCoordinator::signalDrainComplete() during oplog application.
-    auto oplogBuffer = std::make_unique<OplogBufferBlockingQueue>();
-
-    auto applyOperationFn =
-        [](OperationContext*, MultiApplier::OperationPtrs*, SyncTail*, WorkerMultikeyPathInfo*) {
-            return Status::OK();
-        };
-    auto writerPool = SyncTail::makeWriterPool();
-    OplogApplier::Options options;
-    SyncTail syncTail(nullptr,  // observer. not required by oplogApplication().
-                      _consistencyMarkers.get(),
-                      _storageInterface.get(),
-                      applyOperationFn,
-                      writerPool.get(),
-                      options);
-
-    auto service = getServiceContext();
-    auto currentReplCoord = ReplicationCoordinator::get(_opCtx.get());
-    ReplicationCoordinatorSignalDrainCompleteThrows replCoord(service,
-                                                              currentReplCoord->getSettings());
-    ASSERT_OK(replCoord.setFollowerMode(MemberState::RS_PRIMARY));
-
-    // SyncTail::oplogApplication() creates its own OperationContext in the current thread context.
-    _opCtx = {};
-    syncTail.oplogApplication(oplogBuffer.get(), &replCoord);
 }
 
 TEST_F(IdempotencyTest, Geo2dsphereIndexFailedOnUpdate) {

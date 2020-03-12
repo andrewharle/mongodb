@@ -76,9 +76,8 @@
 #include "mongo/db/query/stage_builder.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_metadata.h"
 #include "mongo/db/s/collection_sharding_state.h"
-#include "mongo/db/s/sharding_state.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
@@ -179,7 +178,7 @@ void fillOutPlannerParams(OperationContext* opCtx,
     // If the caller wants a shard filter, make sure we're actually sharded.
     if (plannerParams->options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
         auto collMetadata =
-            CollectionShardingState::get(opCtx, canonicalQuery->nss())->getMetadata(opCtx);
+            CollectionShardingState::get(opCtx, canonicalQuery->nss())->getCurrentMetadata();
         if (collMetadata->isSharded()) {
             plannerParams->shardKey = collMetadata->getKeyPattern();
         } else {
@@ -313,7 +312,7 @@ StatusWith<PrepareExecutionResult> prepareExecution(OperationContext* opCtx,
         if (plannerParams.options & QueryPlannerParams::INCLUDE_SHARD_FILTER) {
             root = make_unique<ShardFilterStage>(
                 opCtx,
-                CollectionShardingState::get(opCtx, canonicalQuery->nss())->getMetadata(opCtx),
+                CollectionShardingState::get(opCtx, canonicalQuery->nss())->getOrphansFilter(opCtx),
                 ws,
                 root.release());
         }
@@ -674,7 +673,6 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getOplogStartHack(
 StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> _getExecutorFind(
     OperationContext* opCtx,
     Collection* collection,
-    const NamespaceString& nss,
     unique_ptr<CanonicalQuery> canonicalQuery,
     PlanExecutor::YieldPolicy yieldPolicy,
     size_t plannerOptions) {
@@ -687,7 +685,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> _getExecutorFind(
         return getOplogStartHack(opCtx, collection, std::move(canonicalQuery), plannerOptions);
     }
 
-    if (ShardingState::get(opCtx)->needCollectionMetadata(opCtx, nss.ns())) {
+    if (OperationShardingState::isOperationVersioned(opCtx)) {
         plannerOptions |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
     }
     return getExecutor(opCtx, collection, std::move(canonicalQuery), yieldPolicy, plannerOptions);
@@ -698,25 +696,22 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> _getExecutorFind(
 StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorFind(
     OperationContext* opCtx,
     Collection* collection,
-    const NamespaceString& nss,
     unique_ptr<CanonicalQuery> canonicalQuery,
     size_t plannerOptions) {
-    auto readConcernArgs = repl::ReadConcernArgs::get(opCtx);
+    const auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
     auto yieldPolicy = readConcernArgs.getLevel() == repl::ReadConcernLevel::kSnapshotReadConcern
         ? PlanExecutor::INTERRUPT_ONLY
         : PlanExecutor::YIELD_AUTO;
     return _getExecutorFind(
-        opCtx, collection, nss, std::move(canonicalQuery), yieldPolicy, plannerOptions);
+        opCtx, collection, std::move(canonicalQuery), yieldPolicy, plannerOptions);
 }
 
 StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorLegacyFind(
     OperationContext* opCtx,
     Collection* collection,
-    const NamespaceString& nss,
     std::unique_ptr<CanonicalQuery> canonicalQuery) {
     return _getExecutorFind(opCtx,
                             collection,
-                            nss,
                             std::move(canonicalQuery),
                             PlanExecutor::YIELD_AUTO,
                             QueryPlannerParams::DEFAULT);
@@ -1368,7 +1363,7 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> getExecutorCount(
     }
 
     size_t plannerOptions = QueryPlannerParams::IS_COUNT;
-    if (ShardingState::get(opCtx)->needCollectionMetadata(opCtx, request.getNs().ns())) {
+    if (OperationShardingState::isOperationVersioned(opCtx)) {
         plannerOptions |= QueryPlannerParams::INCLUDE_SHARD_FILTER;
     }
 

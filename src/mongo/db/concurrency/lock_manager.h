@@ -48,6 +48,8 @@
 
 namespace mongo {
 
+class ServiceContext;
+
 /**
  * Entry point for the lock manager scheduling functionality. Don't use it directly, but
  * instead go through the Locker interface.
@@ -56,6 +58,12 @@ class LockManager {
     MONGO_DISALLOW_COPYING(LockManager);
 
 public:
+    /**
+     * Gets a mapping of lock to client info.
+     * Used by dump() and the lockInfo command.
+     */
+    static std::map<LockerId, BSONObj> getLockToClientMap(ServiceContext* serviceContext);
+
     LockManager();
     ~LockManager();
 
@@ -175,7 +183,8 @@ private:
     /**
      * Prints the contents of a bucket to the log.
      */
-    void _dumpBucket(const LockBucket* bucket) const;
+    void _dumpBucket(const std::map<LockerId, BSONObj>& lockToClientMap,
+                     const LockBucket* bucket) const;
 
     /**
      * Dump the contents of a bucket to the BSON.

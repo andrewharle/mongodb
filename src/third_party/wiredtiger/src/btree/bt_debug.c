@@ -700,6 +700,28 @@ __wt_debug_cursor_page(void *cursor_arg, const char *ofile)
 }
 
 /*
+ * __wt_debug_cursor_las --
+ *     Dump the LAS tree given a user cursor.
+ */
+int
+__wt_debug_cursor_las(void *cursor_arg, const char *ofile)
+  WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
+{
+    WT_CONNECTION_IMPL *conn;
+    WT_CURSOR *cursor;
+    WT_CURSOR_BTREE *cbt;
+    WT_SESSION_IMPL *las_session;
+
+    cursor = cursor_arg;
+    conn = S2C((WT_SESSION_IMPL *)cursor->session);
+    las_session = conn->cache->las_session[0];
+    if (las_session == NULL)
+        return (0);
+    cbt = (WT_CURSOR_BTREE *)las_session->las_cursor;
+    return (__wt_debug_tree_all(las_session, cbt->btree, NULL, ofile));
+}
+
+/*
  * __debug_tree --
  *     Dump the in-memory information for a tree.
  */
@@ -1141,6 +1163,7 @@ static int
 __debug_update(WT_DBG *ds, WT_UPDATE *upd, bool hexbyte)
 {
     char hex_timestamp[WT_TS_HEX_SIZE];
+    const char *prepare_state;
 
     for (; upd != NULL; upd = upd->next) {
         switch (upd->type) {
@@ -1170,6 +1193,7 @@ __debug_update(WT_DBG *ds, WT_UPDATE *upd, bool hexbyte)
             WT_RET(ds->f(ds, "\tvalue {tombstone}\n"));
             break;
         }
+
         if (upd->txnid == WT_TXN_ABORTED)
             WT_RET(ds->f(ds,
               "\t"
@@ -1184,6 +1208,24 @@ __debug_update(WT_DBG *ds, WT_UPDATE *upd, bool hexbyte)
             __wt_timestamp_to_hex_string(hex_timestamp, upd->timestamp);
             WT_RET(ds->f(ds, ", stamp %s", hex_timestamp));
         }
+
+        prepare_state = NULL;
+        switch (upd->prepare_state) {
+        case WT_PREPARE_INIT:
+            break;
+        case WT_PREPARE_INPROGRESS:
+            prepare_state = "in-progress";
+            break;
+        case WT_PREPARE_LOCKED:
+            prepare_state = "locked";
+            break;
+        case WT_PREPARE_RESOLVED:
+            prepare_state = "resolved";
+            break;
+        }
+        if (prepare_state != NULL)
+            WT_RET(ds->f(ds, ", prepare %s", prepare_state));
+
         WT_RET(ds->f(ds, "\n"));
     }
     return (0);
