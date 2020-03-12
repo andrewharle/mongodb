@@ -40,6 +40,7 @@ post:
           if [ -d "${scons_cache_path}" ]; then
               ${python|/opt/mongodbtoolchain/v2/bin/python2} buildscripts/scons_cache_prune.py --cache-dir ${scons_cache_path} --cache-size ${scons_cache_size|200} --prune-ratio ${scons_prune_ratio|0.8}
           fi
+    - func: "upload pip requirements"
 
 
 modules:
@@ -129,39 +130,18 @@ functions:
     - command: shell.exec
       params:
         working_dir: src
-        script: |
-          cat > bootstrap.yml <<EOF
-          infrastructure_provisioning: ${cluster}
-          platform: ${platform}
-          mongodb_setup: ${setup}
-          storageEngine: ${storageEngine}
-          test_control: ${test}
-          production: true
-          EOF
-
-          cat > runtime.yml <<EOF
-          # evergreen default expansions
-          is_patch: ${is_patch}
-          task_id: ${task_id}
-          EOF
-
-          cp ./dsi/configurations/analysis/analysis.common.yml  analysis.yml
-    - command: shell.exec
-      params:
-        working_dir: src
         silent: true
         script: |
-          cat > runtime_secret.yml <<EOF
-          dsi_analysis_atlas_user: "${dsi_analysis_atlas_user}"
-          dsi_analysis_atlas_pw: "${dsi_analysis_atlas_pw}"
-          EOF
-          chmod 400 runtime_secret.yml
-    - command: shell.exec
-      params:
-        working_dir: src
-        script: |
-          set -v
-          ./dsi/run-dsi detect-changes
+          is_patch=${is_patch}
+          task_id=${task_id}
+          perf_jira_user=${perf_jira_user}
+          perf_jira_pw=${perf_jira_pw}
+          dsi_analysis_atlas_user=${dsi_analysis_atlas_user}
+          dsi_analysis_atlas_pw=${dsi_analysis_atlas_pw}
+          evergreen_api_key=${evergreen_api_key}
+          evergreen_api_user=${evergreen_api_user}
+          source ./buildscripts/signal_processing_setup.sh
+          detect-changes --evergreen-api-config .evergreen.yml
     - command: json.get_history
       params:
         task: ${task_name}
@@ -174,22 +154,44 @@ functions:
         file: "src/tags.json"
         name: "perf"
     - command: shell.exec
-      type : test
       params:
         working_dir: src
         script: |
           set -o errexit
           set -o verbose
-          source ./dsi/dsi_venv/bin/activate
+          cat > overrides.yml <<EOF
+          bootstrap:
+            production: true
+          test_control:
+            reports_dir_basename: ..
+          runtime:
+            # evergreen default expansions
+            is_patch: ${is_patch}
+            task_id: ${task_id}
+          EOF
 
-          # Any tasks that want the analysis scripts to analyze mongod.log files should pass in
-          # `reports_analysis: true` as a var to this function. The following line will select the
-          # appropriate flags if it's `true`.
-          reports_analysis_flags="--reports-analysis . --perf-file perf/perf.json"
-          cmd_flags=$([ "${reports_analysis}" = "true" ] && echo "$reports_analysis_flags" || echo "")
-          REFTAG="3.6.5-Baseline"
-          OVERRIDE="./dsi/analysis/${branch_name}/perf_override.json"
-          python ./dsi/analysis/perf_regression_check.py $cmd_flags -f history.json --rev ${revision} -t tags.json --refTag $REFTAG --overrideFile $OVERRIDE --variant ${build_variant} --task ${task_name} --threshold 0.075 --threadThreshold 0.12
+          cp ./dsi/configurations/analysis/analysis.microbenchmarks.yml  analysis.yml
+    - command: shell.exec
+      params:
+        working_dir: src
+        silent: true
+        script: |
+          cat > runtime_secret.yml <<EOF
+          dsi_analysis_atlas_user: "${dsi_analysis_atlas_user}"
+          dsi_analysis_atlas_pw: "${dsi_analysis_atlas_pw}"
+          EOF
+          chmod 400 runtime_secret.yml
+    - command: shell.exec
+      type: test
+      params:
+        working_dir: src
+        script: |
+          set -o errexit
+          set -o verbose
+          ./dsi/run-dsi setup
+          source ./dsi/dsi_venv/bin/activate
+          ./dsi/bin/analysis.py
+
   "run perf tests":
     - command: shell.exec
       params:
@@ -219,6 +221,18 @@ functions:
       params:
         name: "perf"
         file: "src/perf/perf.json"
+
+  "upload pip requirements":
+    command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: pip-requirements.txt
+      remote_file: ${project}/${build_variant}/${revision}/pip-requirements-${task_id}-${execution}.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: atext-plain
+      display_name: Pip Requirements
 
 tasks:
 - name: compile

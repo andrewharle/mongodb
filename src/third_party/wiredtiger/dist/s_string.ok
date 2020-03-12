@@ -154,6 +154,7 @@ Fsync
 Fuerst
 GCC
 GIDs
+GLIBC
 Gcc
 Geoff
 GetEnvironmentVariableA
@@ -224,8 +225,6 @@ LZO
 LeafGreen
 LevelDB
 Levyx
-Llqr
-Llqrt
 LmT
 LoadLoad
 LockFile
@@ -935,6 +934,8 @@ lookaside
 lookup
 lookups
 lossy
+lqr
+lqrt
 lr
 lrt
 lru
@@ -1044,6 +1045,7 @@ online
 onpage
 oo
 opcode
+openat
 opendir
 openfile
 oplist
@@ -1060,6 +1062,7 @@ ownp
 pR
 pS
 packv
+pagedump
 pagesize
 parens
 pareto
@@ -1205,6 +1208,7 @@ stdin
 stdout
 stepp
 str
+strace
 strcmp
 strdup
 strerror

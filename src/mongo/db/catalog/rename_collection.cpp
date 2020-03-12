@@ -144,7 +144,8 @@ Status renameCollectionCommon(OperationContext* opCtx,
 
     // We stay in source context the whole time. This is mostly to set the CurOp namespace.
     boost::optional<OldClientContext> ctx;
-    ctx.emplace(opCtx, source.ns());
+    const bool shardVersionCheck = true;
+    ctx.emplace(opCtx, source.ns(), shardVersionCheck);
 
     auto replCoord = repl::ReplicationCoordinator::get(opCtx);
     bool userInitiatedWritesAndNotPrimary =
@@ -171,10 +172,10 @@ Status renameCollectionCommon(OperationContext* opCtx,
 
     // Make sure the source collection is not sharded.
     {
-        auto const css = CollectionShardingState::get(opCtx, source);
-        if (css->getMetadata(opCtx)->isSharded()) {
+        auto* const css = CollectionShardingState::get(opCtx, source);
+        const auto metadata = css->getCurrentMetadata();
+        if (metadata->isSharded())
             return {ErrorCodes::IllegalOperation, "source namespace cannot be sharded"};
-        }
     }
 
     // Disallow renaming from a replicated to an unreplicated collection or vice versa.
@@ -211,10 +212,10 @@ Status renameCollectionCommon(OperationContext* opCtx,
         }
 
         {
-            auto const css = CollectionShardingState::get(opCtx, target);
-            if (css->getMetadata(opCtx)->isSharded()) {
+            auto* const css = CollectionShardingState::get(opCtx, target);
+            const auto metadata = css->getCurrentMetadata();
+            if (metadata->isSharded())
                 return {ErrorCodes::IllegalOperation, "cannot rename to a sharded collection"};
-            }
         }
 
         // RenameCollectionForCommand cannot drop target by renaming.

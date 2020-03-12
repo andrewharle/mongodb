@@ -555,6 +555,8 @@ __evict_review(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t evict_flags, bool
      */
     if (WT_PAGE_IS_INTERNAL(page)) {
         WT_WITH_PAGE_INDEX(session, ret = __evict_child_check(session, ref));
+        if (ret != 0)
+            WT_STAT_CONN_INCR(session, cache_eviction_fail_active_children_on_an_internal_page);
         WT_RET(ret);
     }
 
@@ -678,15 +680,8 @@ __evict_review(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t evict_flags, bool
 
     /* Reconcile the page. */
     ret = __wt_reconcile(session, ref, NULL, flags, lookaside_retryp);
-
-    /*
-     * If attempting eviction during a checkpoint, we may successfully reconcile but then find that
-     * there are updates on the page too new to evict. Give up evicting in that case: checkpoint
-     * will include the reconciled page when it visits the parent.
-     */
-    if (WT_SESSION_BTREE_SYNC(session) && !__wt_page_is_modified(page) &&
-      !__wt_txn_visible_all(session, page->modify->rec_max_txn, page->modify->rec_max_timestamp))
-        return (__wt_set_return(session, EBUSY));
+    WT_ASSERT(session, __wt_page_is_modified(page) ||
+        __wt_txn_visible_all(session, page->modify->rec_max_txn, page->modify->rec_max_timestamp));
 
     /*
      * If reconciliation fails but reports it might succeed if we use the lookaside table, try again
@@ -698,6 +693,9 @@ __evict_review(WT_SESSION_IMPL *session, WT_REF *ref, uint32_t evict_flags, bool
         LF_SET(WT_REC_LOOKASIDE);
         ret = __wt_reconcile(session, ref, NULL, flags, NULL);
     }
+
+    if (ret != 0)
+        WT_STAT_CONN_INCR(session, cache_eviction_fail_in_reconciliation);
 
     WT_RET(ret);
 

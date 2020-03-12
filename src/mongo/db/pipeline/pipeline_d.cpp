@@ -72,6 +72,7 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/operation_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session_catalog.h"
@@ -154,10 +155,10 @@ StatusWith<unique_ptr<PlanExecutor, PlanExecutor::Deleter>> createRandomCursorEx
     }
 
     // If we're in a sharded environment, we need to filter out documents we don't own.
-    if (ShardingState::get(opCtx)->needCollectionMetadata(opCtx, collection->ns().ns())) {
+    if (OperationShardingState::isOperationVersioned(opCtx)) {
         auto shardFilterStage = stdx::make_unique<ShardFilterStage>(
             opCtx,
-            CollectionShardingState::get(opCtx, collection->ns())->getMetadata(opCtx),
+            CollectionShardingState::get(opCtx, collection->ns())->getOrphansFilter(opCtx),
             ws.get(),
             stage.release());
         return PlanExecutor::make(opCtx,
@@ -217,7 +218,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> attemptToGetExe
         return {cq.getStatus()};
     }
 
-    return getExecutorFind(opCtx, collection, nss, std::move(cq.getValue()), plannerOpts);
+    return getExecutorFind(opCtx, collection, std::move(cq.getValue()), plannerOpts);
 }
 
 BSONObj removeSortKeyMetaProjection(BSONObj projectionObj) {
@@ -323,6 +324,16 @@ void PipelineD::prepareCursorSource(Collection* collection,
                                                 aggRequest,
                                                 &sortObj,
                                                 &projForQuery));
+
+    // There may be fewer dependencies now if the sort was covered.
+    if (!sortObj.isEmpty()) {
+        LOG(5) << "Agg: recomputing dependencies due to a covered sort: " << redact(sortObj)
+               << ". Current projection: " << redact(projForQuery)
+               << ". Current dependencies: " << redact(deps.toProjection());
+        deps = pipeline->getDependencies(DocumentSourceMatch::isTextQuery(queryObj)
+                                             ? DepsTracker::MetadataAvailable::kTextScore
+                                             : DepsTracker::MetadataAvailable::kNoMetadata);
+    }
 
 
     if (!projForQuery.isEmpty() && !sources.empty()) {
@@ -430,6 +441,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::prep
             std::unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
             if (swExecutorSortAndProj.isOK()) {
                 // Success! We have a non-blocking sort and a covered projection.
+                LOG(5) << "Agg: Have a non-blocking sort and covered projection";
                 exec = std::move(swExecutorSortAndProj.getValue());
             } else if (swExecutorSortAndProj == ErrorCodes::QueryPlanKilled) {
                 return {ErrorCodes::OperationFailed,
@@ -438,6 +450,8 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::prep
                                       << swExecutorSortAndProj.getStatus().toString()};
             } else {
                 // The query system couldn't cover the projection.
+                LOG(5) << "Agg: The query system found a non-blocking sort but couldn't cover the "
+                          "projection";
                 *projectionObj = BSONObj();
                 exec = std::move(swExecutorSort.getValue());
             }
@@ -460,6 +474,7 @@ StatusWith<std::unique_ptr<PlanExecutor, PlanExecutor::Deleter>> PipelineD::prep
         // The query system can't provide a non-blocking sort.
         *sortObj = BSONObj();
     }
+    LOG(5) << "Agg: The query system couldn't cover the sort";
 
     // Either there was no $sort stage, or the query system could not provide a non-blocking
     // sort.
@@ -540,14 +555,9 @@ void PipelineD::addCursorSource(Collection* collection,
 
     if (!projectionObj.isEmpty()) {
         pSource->setProjection(projectionObj, boost::none);
+        LOG(5) << "Agg: Setting projection with no dependencies: " << redact(projectionObj);
     } else {
-        // There may be fewer dependencies now if the sort was covered.
-        if (!sortObj.isEmpty()) {
-            deps = pipeline->getDependencies(DocumentSourceMatch::isTextQuery(queryObj)
-                                                 ? DepsTracker::MetadataAvailable::kTextScore
-                                                 : DepsTracker::MetadataAvailable::kNoMetadata);
-        }
-
+        LOG(5) << "Agg: Setting projection with dependencies: " << redact(deps.toProjection());
         pSource->setProjection(deps.toProjection(), deps.toParsedDeps());
     }
 }
@@ -601,7 +611,7 @@ DBClientBase* PipelineD::MongoDInterface::directClient() {
 bool PipelineD::MongoDInterface::isSharded(OperationContext* opCtx, const NamespaceString& nss) {
     AutoGetCollectionForReadCommand autoColl(opCtx, nss);
     auto const css = CollectionShardingState::get(opCtx, nss);
-    return css->getMetadata(opCtx)->isSharded();
+    return css->getCurrentMetadata()->isSharded();
 }
 
 BSONObj PipelineD::MongoDInterface::insert(const boost::intrusive_ptr<ExpressionContext>& expCtx,
@@ -743,7 +753,7 @@ Status PipelineD::MongoDInterface::attachCursorSourceToPipeline(
     auto css = CollectionShardingState::get(expCtx->opCtx, expCtx->ns);
     uassert(4567,
             str::stream() << "from collection (" << expCtx->ns.ns() << ") cannot be sharded",
-            !css->getMetadata(expCtx->opCtx)->isSharded());
+            !css->getCurrentMetadata()->isSharded());
 
     PipelineD::prepareCursorSource(autoColl->getCollection(), expCtx->ns, nullptr, pipeline);
 
@@ -791,7 +801,7 @@ std::pair<std::vector<FieldPath>, bool> PipelineD::MongoDInterface::collectDocum
 
     auto scm = [opCtx, &nss]() -> ScopedCollectionMetadata {
         AutoGetCollection autoColl(opCtx, nss, MODE_IS);
-        return CollectionShardingState::get(opCtx, nss)->getMetadata(opCtx);
+        return CollectionShardingState::get(opCtx, nss)->getCurrentMetadata();
     }();
 
     // Collection is not sharded or UUID mismatch implies collection has been dropped and recreated
@@ -842,7 +852,7 @@ boost::optional<Document> PipelineD::MongoDInterface::lookupSingleDocument(
 
     auto lookedUpDocument = pipeline->getNext();
     if (auto next = pipeline->getNext()) {
-        uasserted(ErrorCodes::TooManyMatchingDocuments,
+        uasserted(ErrorCodes::ChangeStreamFatalError,
                   str::stream() << "found more than one document with document key "
                                 << documentKey.toString()
                                 << " ["

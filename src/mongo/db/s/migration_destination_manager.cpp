@@ -374,16 +374,22 @@ Status MigrationDestinationManager::start(OperationContext* opCtx,
     return Status::OK();
 }
 
-void MigrationDestinationManager::cloneDocumentsFromDonor(
+repl::OpTime MigrationDestinationManager::cloneDocumentsFromDonor(
     OperationContext* opCtx,
     stdx::function<void(OperationContext*, BSONObj)> insertBatchFn,
     stdx::function<BSONObj(OperationContext*)> fetchBatchFn) {
 
     ProducerConsumerQueue<BSONObj> batches(1);
+    repl::OpTime lastOpApplied;
+
     stdx::thread inserterThread{[&] {
         Client::initThreadIfNotAlready("chunkInserter");
         auto inserterOpCtx = Client::getCurrent()->makeOperationContext();
-        auto consumerGuard = MakeGuard([&] { batches.closeConsumerEnd(); });
+        auto consumerGuard = MakeGuard([&] {
+            batches.closeConsumerEnd();
+            lastOpApplied = repl::ReplClientInfo::forClient(inserterOpCtx->getClient()).getLastOp();
+        });
+
         try {
             while (true) {
                 auto nextBatch = batches.pop(inserterOpCtx.get());
@@ -419,6 +425,8 @@ void MigrationDestinationManager::cloneDocumentsFromDonor(
             break;
         }
     }
+
+    return lastOpApplied;
 }
 
 Status MigrationDestinationManager::abort(const MigrationSessionId& sessionId) {
@@ -739,7 +747,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* opCtx) {
           << " at epoch " << _epoch.toString() << " with session id " << *_sessionId;
 
     MoveTimingHelper timing(
-        opCtx, "to", _nss.ns(), _min, _max, 6 /* steps */, &_errmsg, ShardId(), ShardId());
+        opCtx, "to", _nss.ns(), _min, _max, 6 /* steps */, &_errmsg, _toShard, _fromShard);
 
     const auto initialState = getState();
 
@@ -783,6 +791,7 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* opCtx) {
         MONGO_FAIL_POINT_PAUSE_WHILE_SET(migrateThreadHangAtStep2);
     }
 
+    repl::OpTime lastOpApplied;
     {
         // 3. Initial bulk clone
         setState(CLONE);
@@ -869,7 +878,9 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* opCtx) {
             return res.response;
         };
 
-        cloneDocumentsFromDonor(opCtx, insertBatchFn, fetchBatchFn);
+        // If running on a replicated system, we'll need to flush the docs we cloned to the
+        // secondaries
+        lastOpApplied = cloneDocumentsFromDonor(opCtx, insertBatchFn, fetchBatchFn);
 
         timing.done(3);
         MONGO_FAIL_POINT_PAUSE_WHILE_SET(migrateThreadHangAtStep3);
@@ -880,10 +891,6 @@ void MigrationDestinationManager::_migrateDriver(OperationContext* opCtx) {
             return;
         }
     }
-
-    // If running on a replicated system, we'll need to flush the docs we cloned to the
-    // secondaries
-    repl::OpTime lastOpApplied = repl::ReplClientInfo::forClient(opCtx->getClient()).getLastOp();
 
     const BSONObj xferModsRequest = createTransferModsRequest(_nss, *_sessionId);
 
@@ -1154,14 +1161,14 @@ CollectionShardingRuntime::CleanupNotification MigrationDestinationManager::_not
 
     AutoGetCollection autoColl(opCtx, _nss, MODE_IX, MODE_X);
     auto* const css = CollectionShardingRuntime::get(opCtx, _nss);
-
-    auto metadata = css->getMetadata(opCtx);
+    const auto optMetadata = css->getCurrentMetadataIfKnown();
 
     // This can currently happen because drops aren't synchronized with in-migrations. The idea for
     // checking this here is that in the future we shouldn't have this problem.
-    if (!metadata->isSharded() || metadata->getCollVersion().epoch() != _epoch) {
+    if (!optMetadata || !(*optMetadata)->isSharded() ||
+        (*optMetadata)->getCollVersion().epoch() != _epoch) {
         return Status{ErrorCodes::StaleShardVersion,
-                      str::stream() << "not noting chunk " << redact(range.toString())
+                      str::stream() << "Not marking chunk " << redact(range.toString())
                                     << " as pending because the epoch of "
                                     << _nss.ns()
                                     << " changed"};
@@ -1185,14 +1192,14 @@ void MigrationDestinationManager::_forgetPending(OperationContext* opCtx, ChunkR
     UninterruptibleLockGuard noInterrupt(opCtx->lockState());
     AutoGetCollection autoColl(opCtx, _nss, MODE_IX, MODE_X);
     auto* const css = CollectionShardingRuntime::get(opCtx, _nss);
-
-    auto metadata = css->getMetadata(opCtx);
+    const auto optMetadata = css->getCurrentMetadataIfKnown();
 
     // This can currently happen because drops aren't synchronized with in-migrations. The idea for
     // checking this here is that in the future we shouldn't have this problem.
-    if (!metadata->isSharded() || metadata->getCollVersion().epoch() != _epoch) {
-        log() << "no need to forget pending chunk " << redact(range.toString())
-              << " because the epoch for " << _nss.ns() << " changed";
+    if (!optMetadata || !(*optMetadata)->isSharded() ||
+        (*optMetadata)->getCollVersion().epoch() != _epoch) {
+        LOG(0) << "No need to forget pending chunk " << redact(range.toString())
+               << " because the epoch for " << _nss.ns() << " changed";
         return;
     }
 

@@ -449,7 +449,7 @@ std::size_t ClusterCursorManager::killMortalCursorsInactiveSince(OperationContex
             !entry.getOperationUsingCursor() && entry.getLastActive() <= cutoff;
 
         if (res) {
-            log() << "Marking cursor id " << cursorId << " for deletion, idle since "
+            log() << "Cursor id " << cursorId << " timed out, idle since "
                   << entry.getLastActive().toString();
         }
 
@@ -603,6 +603,7 @@ std::pair<Status, int> ClusterCursorManager::killCursorsWithMatchingSessions(
     OperationContext* opCtx, const SessionKiller::Matcher& matcher) {
     auto eraser = [&](ClusterCursorManager& mgr, CursorId id) {
         uassertStatusOK(mgr.killCursor(opCtx, getNamespaceForCursorId(id).get(), id));
+        log() << "killing cursor: " << id << " as part of killing session(s)";
     };
 
     auto visitor = makeKillSessionsCursorManagerVisitor(opCtx, matcher, std::move(eraser));

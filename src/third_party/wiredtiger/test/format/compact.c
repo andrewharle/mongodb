@@ -42,10 +42,6 @@ compact(void *arg)
 
     (void)(arg);
 
-    /* Compaction isn't supported for all data sources. */
-    if (DATASOURCE("helium") || DATASOURCE("kvsbdb"))
-        return (WT_THREAD_RET_VALUE);
-
     /* Open a session. */
     conn = g.wts_conn;
     testutil_check(conn->open_session(conn, NULL, NULL, &session));
@@ -64,12 +60,11 @@ compact(void *arg)
             break;
 
         /*
-         * Compact can return EBUSY if concurrent with alter or if there
-         * is eviction pressure, or we collide with checkpoints.
+         * Compact can return EBUSY if concurrent with alter or if there is eviction pressure, or we
+         * collide with checkpoints.
          *
-         * Compact returns ETIMEDOUT if the compaction doesn't finish in
-         * in some number of seconds. We don't configure a timeout and
-         * occasionally exceed the default of 1200 seconds.
+         * Compact returns ETIMEDOUT if the compaction doesn't finish in in some number of seconds.
+         * We don't configure a timeout and occasionally exceed the default of 1200 seconds.
          */
         ret = session->compact(session, g.uri, NULL);
         if (ret != 0 && ret != EBUSY && ret != ETIMEDOUT && ret != WT_ROLLBACK)

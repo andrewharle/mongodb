@@ -303,10 +303,10 @@ __wt_cursor_dhandle_decr_use(WT_SESSION_IMPL *session)
  *     Return a page referenced key/value pair to the application.
  */
 static inline int
-__cursor_kv_return(WT_SESSION_IMPL *session, WT_CURSOR_BTREE *cbt, WT_UPDATE *upd)
+__cursor_kv_return(WT_CURSOR_BTREE *cbt, WT_UPDATE *upd)
 {
-    WT_RET(__wt_key_return(session, cbt));
-    WT_RET(__wt_value_return(session, cbt, upd));
+    WT_RET(__wt_key_return(cbt));
+    WT_RET(__wt_value_return(cbt, upd));
 
     return (0);
 }
@@ -445,7 +445,7 @@ value:
      * (if any) is visible.
      */
     if (upd != NULL)
-        return (__wt_value_return(session, cbt, upd));
+        return (__wt_value_return(cbt, upd));
 
     /* Else, simple values have their location encoded in the WT_ROW. */
     if (__wt_row_leaf_value(page, rip, vb))
@@ -454,30 +454,4 @@ value:
     /* Else, take the value from the original page cell. */
     __wt_row_leaf_value_cell(page, rip, kpack, vpack);
     return (__wt_page_cell_data_ref(session, cbt->ref->page, vpack, vb));
-}
-/*
- * __cursor_check_prepared_update --
- *     Return whether prepared update at current position is visible or not.
- */
-static inline int
-__cursor_check_prepared_update(WT_CURSOR_BTREE *cbt, bool *visiblep)
-{
-    WT_SESSION_IMPL *session;
-    WT_UPDATE *upd;
-
-    session = (WT_SESSION_IMPL *)cbt->iface.session;
-    /*
-     * When retrying an operation due to a prepared conflict, the cursor is at an update list which
-     * resulted in conflict. So, when retrying we should examine the same update again instead of
-     * iterating to the next object. We'll eventually find a valid update, else return
-     * prepare-conflict until resolved.
-     */
-    WT_RET(__wt_cursor_valid(cbt, &upd, visiblep));
-
-    /* The update that returned prepared conflict is now visible. */
-    F_CLR(cbt, WT_CBT_ITERATE_RETRY_NEXT | WT_CBT_ITERATE_RETRY_PREV);
-    if (*visiblep)
-        WT_RET(__cursor_kv_return(session, cbt, upd));
-
-    return (0);
 }

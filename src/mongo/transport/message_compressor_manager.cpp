@@ -163,7 +163,14 @@ StatusWith<Message> MessageCompressorManager::decompressMessage(const Message& m
 
     LOG(3) << "Decompressing message with " << compressor->getName();
 
-    size_t bufferSize = compressionHeader.uncompressedSize + MsgData::MsgDataHeaderSize;
+    if (compressionHeader.uncompressedSize < 0) {
+        return {ErrorCodes::BadValue, "Decompressed message would be negative in size"};
+    }
+
+    // Explicitly promote `uncompressedSize` to a 64-bit integer before addition in order to
+    // avoid potential overflow.
+    size_t bufferSize =
+        static_cast<size_t>(compressionHeader.uncompressedSize) + MsgData::MsgDataHeaderSize;
     if (bufferSize > MaxMessageSizeBytes) {
         return {ErrorCodes::BadValue,
                 "Decompressed message would be larger than maximum message size"};

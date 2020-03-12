@@ -630,6 +630,9 @@ Session::TxnResources::TxnResources(OperationContext* opCtx, bool keepTicket) {
         _locker->releaseTicket();
     }
     _locker->unsetThreadId();
+    if (opCtx->getLogicalSessionId()) {
+        _locker->setDebugInfo("lsid: " + opCtx->getLogicalSessionId()->toBSON().toString());
+    }
 
     // This thread must still respect the transaction lock timeout, since it can prevent the
     // transaction from making progress.
@@ -898,11 +901,6 @@ void Session::abortActiveTransaction(OperationContext* opCtx) {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
 
     invariant(!_txnResourceStash);
-    if (_txnState != MultiDocumentTransactionState::kInProgress) {
-        return;
-    }
-
-    _abortTransaction(lock);
     {
         stdx::lock_guard<Client> clientLock(*opCtx->getClient());
         // Abort the WUOW. We should be able to abort empty transactions that don't have WUOW.
@@ -915,6 +913,11 @@ void Session::abortActiveTransaction(OperationContext* opCtx) {
                                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
         opCtx->lockState()->unsetMaxLockTimeout();
     }
+    if (_txnState != MultiDocumentTransactionState::kInProgress) {
+        return;
+    }
+
+    _abortTransaction(lock);
     {
         stdx::lock_guard<stdx::mutex> ls(_statsMutex);
         // Add the latest operation stats to the aggregate OpDebug object stored in the

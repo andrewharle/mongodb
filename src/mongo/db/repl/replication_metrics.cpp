@@ -51,32 +51,31 @@ ReplicationMetrics::ReplicationMetrics() : _electionMetrics() {}
 
 ReplicationMetrics::~ReplicationMetrics() {}
 
-void ReplicationMetrics::incrementNumElectionsCalledForReason(
-    TopologyCoordinator::StartElectionReason reason) {
+void ReplicationMetrics::incrementNumElectionsCalledForReason(StartElectionReasonEnum reason) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     switch (reason) {
-        case TopologyCoordinator::StartElectionReason::kStepUpRequest:
-        case TopologyCoordinator::StartElectionReason::kStepUpRequestSkipDryRun: {
+        case StartElectionReasonEnum::kStepUpRequest:
+        case StartElectionReasonEnum::kStepUpRequestSkipDryRun: {
             ElectionReasonCounter& stepUpCmd = _electionMetrics.getStepUpCmd();
             stepUpCmd.incrementCalled();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kPriorityTakeover: {
+        case StartElectionReasonEnum::kPriorityTakeover: {
             ElectionReasonCounter& priorityTakeover = _electionMetrics.getPriorityTakeover();
             priorityTakeover.incrementCalled();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kCatchupTakeover: {
+        case StartElectionReasonEnum::kCatchupTakeover: {
             ElectionReasonCounter& catchUpTakeover = _electionMetrics.getCatchUpTakeover();
             catchUpTakeover.incrementCalled();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kElectionTimeout: {
+        case StartElectionReasonEnum::kElectionTimeout: {
             ElectionReasonCounter& electionTimeout = _electionMetrics.getElectionTimeout();
             electionTimeout.incrementCalled();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kSingleNodePromptElection: {
+        case StartElectionReasonEnum::kSingleNodePromptElection: {
             ElectionReasonCounter& freezeTimeout = _electionMetrics.getFreezeTimeout();
             freezeTimeout.incrementCalled();
             break;
@@ -84,32 +83,31 @@ void ReplicationMetrics::incrementNumElectionsCalledForReason(
     }
 }
 
-void ReplicationMetrics::incrementNumElectionsSuccessfulForReason(
-    TopologyCoordinator::StartElectionReason reason) {
+void ReplicationMetrics::incrementNumElectionsSuccessfulForReason(StartElectionReasonEnum reason) {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     switch (reason) {
-        case TopologyCoordinator::StartElectionReason::kStepUpRequest:
-        case TopologyCoordinator::StartElectionReason::kStepUpRequestSkipDryRun: {
+        case StartElectionReasonEnum::kStepUpRequest:
+        case StartElectionReasonEnum::kStepUpRequestSkipDryRun: {
             ElectionReasonCounter& stepUpCmd = _electionMetrics.getStepUpCmd();
             stepUpCmd.incrementSuccessful();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kPriorityTakeover: {
+        case StartElectionReasonEnum::kPriorityTakeover: {
             ElectionReasonCounter& priorityTakeover = _electionMetrics.getPriorityTakeover();
             priorityTakeover.incrementSuccessful();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kCatchupTakeover: {
+        case StartElectionReasonEnum::kCatchupTakeover: {
             ElectionReasonCounter& catchUpTakeover = _electionMetrics.getCatchUpTakeover();
             catchUpTakeover.incrementSuccessful();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kElectionTimeout: {
+        case StartElectionReasonEnum::kElectionTimeout: {
             ElectionReasonCounter& electionTimeout = _electionMetrics.getElectionTimeout();
             electionTimeout.incrementSuccessful();
             break;
         }
-        case TopologyCoordinator::StartElectionReason::kSingleNodePromptElection: {
+        case StartElectionReasonEnum::kSingleNodePromptElection: {
             ElectionReasonCounter& freezeTimeout = _electionMetrics.getFreezeTimeout();
             freezeTimeout.incrementSuccessful();
             break;
@@ -126,6 +124,7 @@ void ReplicationMetrics::incrementNumStepDownsCausedByHigherTerm() {
 void ReplicationMetrics::incrementNumCatchUps() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     _electionMetrics.setNumCatchUps(_electionMetrics.getNumCatchUps() + 1);
+    _updateAverageCatchUpOps(lk);
 }
 
 void ReplicationMetrics::incrementNumCatchUpsConcludedForReason(
@@ -162,104 +161,224 @@ void ReplicationMetrics::incrementNumCatchUpsConcludedForReason(
     }
 }
 
-int ReplicationMetrics::getNumStepUpCmdsCalled_forTesting() {
+long ReplicationMetrics::getNumStepUpCmdsCalled_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getStepUpCmd().getCalled();
 }
 
-int ReplicationMetrics::getNumPriorityTakeoversCalled_forTesting() {
+long ReplicationMetrics::getNumPriorityTakeoversCalled_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getPriorityTakeover().getCalled();
 }
 
-int ReplicationMetrics::getNumCatchUpTakeoversCalled_forTesting() {
+long ReplicationMetrics::getNumCatchUpTakeoversCalled_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getCatchUpTakeover().getCalled();
 }
 
-int ReplicationMetrics::getNumElectionTimeoutsCalled_forTesting() {
+long ReplicationMetrics::getNumElectionTimeoutsCalled_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getElectionTimeout().getCalled();
 }
 
-int ReplicationMetrics::getNumFreezeTimeoutsCalled_forTesting() {
+long ReplicationMetrics::getNumFreezeTimeoutsCalled_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getFreezeTimeout().getCalled();
 }
 
-int ReplicationMetrics::getNumStepDownsCausedByHigherTerm_forTesting() {
-    stdx::lock_guard<stdx::mutex> lk(_mutex);
-    return _electionMetrics.getNumStepDownsCausedByHigherTerm();
-}
-
-int ReplicationMetrics::getNumStepUpCmdsSuccessful_forTesting() {
+long ReplicationMetrics::getNumStepUpCmdsSuccessful_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getStepUpCmd().getSuccessful();
 }
 
-int ReplicationMetrics::getNumPriorityTakeoversSuccessful_forTesting() {
+long ReplicationMetrics::getNumPriorityTakeoversSuccessful_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getPriorityTakeover().getSuccessful();
 }
 
-int ReplicationMetrics::getNumCatchUpTakeoversSuccessful_forTesting() {
+long ReplicationMetrics::getNumCatchUpTakeoversSuccessful_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getCatchUpTakeover().getSuccessful();
 }
 
-int ReplicationMetrics::getNumElectionTimeoutsSuccessful_forTesting() {
+long ReplicationMetrics::getNumElectionTimeoutsSuccessful_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getElectionTimeout().getSuccessful();
 }
 
-int ReplicationMetrics::getNumFreezeTimeoutsSuccessful_forTesting() {
+long ReplicationMetrics::getNumFreezeTimeoutsSuccessful_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getFreezeTimeout().getSuccessful();
 }
 
-int ReplicationMetrics::getNumCatchUps_forTesting() {
+long ReplicationMetrics::getNumStepDownsCausedByHigherTerm_forTesting() {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _electionMetrics.getNumStepDownsCausedByHigherTerm();
+}
+
+long ReplicationMetrics::getNumCatchUps_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUps();
 }
 
-int ReplicationMetrics::getNumCatchUpsSucceeded_forTesting() {
+long ReplicationMetrics::getNumCatchUpsSucceeded_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUpsSucceeded();
 }
 
-int ReplicationMetrics::getNumCatchUpsAlreadyCaughtUp_forTesting() {
+long ReplicationMetrics::getNumCatchUpsAlreadyCaughtUp_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUpsAlreadyCaughtUp();
 }
 
-int ReplicationMetrics::getNumCatchUpsSkipped_forTesting() {
+long ReplicationMetrics::getNumCatchUpsSkipped_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUpsSkipped();
 }
 
-int ReplicationMetrics::getNumCatchUpsTimedOut_forTesting() {
+long ReplicationMetrics::getNumCatchUpsTimedOut_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUpsTimedOut();
 }
 
-int ReplicationMetrics::getNumCatchUpsFailedWithError_forTesting() {
+long ReplicationMetrics::getNumCatchUpsFailedWithError_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUpsFailedWithError();
 }
 
-int ReplicationMetrics::getNumCatchUpsFailedWithNewTerm_forTesting() {
+long ReplicationMetrics::getNumCatchUpsFailedWithNewTerm_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUpsFailedWithNewTerm();
 }
 
-int ReplicationMetrics::getNumCatchUpsFailedWithReplSetAbortPrimaryCatchUpCmd_forTesting() {
+long ReplicationMetrics::getNumCatchUpsFailedWithReplSetAbortPrimaryCatchUpCmd_forTesting() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.getNumCatchUpsFailedWithReplSetAbortPrimaryCatchUpCmd();
+}
+
+void ReplicationMetrics::setElectionCandidateMetrics(
+    const StartElectionReasonEnum reason,
+    const Date_t lastElectionDate,
+    const long long electionTerm,
+    const OpTime lastCommittedOpTime,
+    const OpTime lastSeenOpTime,
+    const int numVotesNeeded,
+    const double priorityAtElection,
+    const Milliseconds electionTimeout,
+    const boost::optional<int> priorPrimaryMemberId) {
+
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+
+    _nodeIsCandidateOrPrimary = true;
+    _electionCandidateMetrics.setLastElectionReason(reason);
+    _electionCandidateMetrics.setLastElectionDate(lastElectionDate);
+    _electionCandidateMetrics.setElectionTerm(electionTerm);
+    _electionCandidateMetrics.setLastCommittedOpTimeAtElection(lastCommittedOpTime);
+    _electionCandidateMetrics.setLastSeenOpTimeAtElection(lastSeenOpTime);
+    _electionCandidateMetrics.setNumVotesNeeded(numVotesNeeded);
+    _electionCandidateMetrics.setPriorityAtElection(priorityAtElection);
+    long long electionTimeoutMillis = durationCount<Milliseconds>(electionTimeout);
+    _electionCandidateMetrics.setElectionTimeoutMillis(electionTimeoutMillis);
+    _electionCandidateMetrics.setPriorPrimaryMemberId(priorPrimaryMemberId);
+}
+
+void ReplicationMetrics::setTargetCatchupOpTime(OpTime opTime) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _electionCandidateMetrics.setTargetCatchupOpTime(opTime);
+}
+
+void ReplicationMetrics::setNumCatchUpOps(long numCatchUpOps) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    invariant(numCatchUpOps >= 0);
+    _electionCandidateMetrics.setNumCatchUpOps(numCatchUpOps);
+    _totalNumCatchUpOps += numCatchUpOps;
+    _updateAverageCatchUpOps(lk);
+}
+
+void ReplicationMetrics::setCandidateNewTermStartDate(Date_t newTermStartDate) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _electionCandidateMetrics.setNewTermStartDate(newTermStartDate);
+}
+
+void ReplicationMetrics::setWMajorityWriteAvailabilityDate(Date_t wMajorityWriteAvailabilityDate) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _electionCandidateMetrics.setWMajorityWriteAvailabilityDate(wMajorityWriteAvailabilityDate);
+}
+
+boost::optional<OpTime> ReplicationMetrics::getTargetCatchupOpTime_forTesting() {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    return _electionCandidateMetrics.getTargetCatchupOpTime();
 }
 
 BSONObj ReplicationMetrics::getElectionMetricsBSON() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
     return _electionMetrics.toBSON();
+}
+
+BSONObj ReplicationMetrics::getElectionCandidateMetricsBSON() {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    if (_nodeIsCandidateOrPrimary) {
+        return _electionCandidateMetrics.toBSON();
+    }
+    return BSONObj();
+}
+
+void ReplicationMetrics::clearElectionCandidateMetrics() {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _electionCandidateMetrics.setTargetCatchupOpTime(boost::none);
+    _electionCandidateMetrics.setNumCatchUpOps(boost::none);
+    _electionCandidateMetrics.setNewTermStartDate(boost::none);
+    _electionCandidateMetrics.setWMajorityWriteAvailabilityDate(boost::none);
+    _nodeIsCandidateOrPrimary = false;
+}
+
+void ReplicationMetrics::setElectionParticipantMetrics(const bool votedForCandidate,
+                                                       const long long electionTerm,
+                                                       const Date_t lastVoteDate,
+                                                       const int electionCandidateMemberId,
+                                                       const std::string voteReason,
+                                                       const OpTime lastAppliedOpTime,
+                                                       const OpTime maxAppliedOpTimeInSet,
+                                                       const double priorityAtElection) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+
+    _nodeHasVotedInElection = true;
+    _electionParticipantMetrics.setVotedForCandidate(votedForCandidate);
+    _electionParticipantMetrics.setElectionTerm(electionTerm);
+    _electionParticipantMetrics.setLastVoteDate(lastVoteDate);
+    _electionParticipantMetrics.setElectionCandidateMemberId(electionCandidateMemberId);
+    _electionParticipantMetrics.setVoteReason(voteReason);
+    _electionParticipantMetrics.setLastAppliedOpTimeAtElection(lastAppliedOpTime);
+    _electionParticipantMetrics.setMaxAppliedOpTimeInSet(maxAppliedOpTimeInSet);
+    _electionParticipantMetrics.setPriorityAtElection(priorityAtElection);
+}
+
+BSONObj ReplicationMetrics::getElectionParticipantMetricsBSON() {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    if (_nodeHasVotedInElection) {
+        return _electionParticipantMetrics.toBSON();
+    }
+    return BSONObj();
+}
+
+void ReplicationMetrics::setParticipantNewTermDates(Date_t newTermStartDate,
+                                                    Date_t newTermAppliedDate) {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _electionParticipantMetrics.setNewTermStartDate(newTermStartDate);
+    _electionParticipantMetrics.setNewTermAppliedDate(newTermAppliedDate);
+}
+
+void ReplicationMetrics::clearParticipantNewTermDates() {
+    stdx::lock_guard<stdx::mutex> lk(_mutex);
+    _electionParticipantMetrics.setNewTermStartDate(boost::none);
+    _electionParticipantMetrics.setNewTermAppliedDate(boost::none);
+}
+
+void ReplicationMetrics::_updateAverageCatchUpOps(WithLock lk) {
+    long numCatchUps = _electionMetrics.getNumCatchUps();
+    if (numCatchUps > 0) {
+        _electionMetrics.setAverageCatchUpOps(_totalNumCatchUpOps / numCatchUps);
+    }
 }
 
 class ReplicationMetrics::ElectionMetricsSSS : public ServerStatusSection {
