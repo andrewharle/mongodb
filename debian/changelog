@@ -1,3 +1,15 @@
+mongodb (1:4.0.17~rc0-2) experimental; urgency=medium
+
+  * New upstream version 4.0.17~rc0
+
+ -- Andrew Harle <46223597+andrewharle@users.noreply.github.com>  Thu, 12 Mar 2020 20:23:53 +0100
+
+mongodb (1:4.0.17~rc0-1) experimental; urgency=medium
+
+  * New upstream version 4.0.17~rc0
+
+ -- Andrew Harle <46223597+andrewharle@users.noreply.github.com>  Thu, 12 Mar 2020 20:23:33 +0100
+
 mongodb (1:4.0.13-1) experimental; urgency=medium
 
   * New upstream version 4.0.13
