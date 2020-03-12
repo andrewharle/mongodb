@@ -45,6 +45,30 @@ namespace {
 // How long to wait before starting cleanup of an emigrated chunk range
 MONGO_EXPORT_SERVER_PARAMETER(orphanCleanupDelaySecs, int, 900);  // 900s = 15m
 
+/**
+ * Returns whether the specified namespace is used for sharding-internal purposes only and can never
+ * be marked as anything other than UNSHARDED, because the call sites which reference these
+ * collections are not prepared to handle StaleConfig errors.
+ */
+bool isNamespaceAlwaysUnsharded(const NamespaceString& nss) {
+    // There should never be a case to mark as sharded collections which are on the config server
+    if (serverGlobalParams.clusterRole != ClusterRole::ShardServer)
+        return true;
+
+    // Local and admin never have sharded collections
+    if (nss.db() == NamespaceString::kLocalDb || nss.db() == NamespaceString::kAdminDb)
+        return true;
+
+    // Certain config collections can never be sharded
+    if (nss == NamespaceString::kSessionTransactionsTableNamespace)
+        return true;
+
+    if (nss.isSystemDotProfile())
+        return true;
+
+    return false;
+}
+
 }  // namespace
 
 CollectionShardingRuntime::CollectionShardingRuntime(ServiceContext* sc,
@@ -52,7 +76,11 @@ CollectionShardingRuntime::CollectionShardingRuntime(ServiceContext* sc,
                                                      executor::TaskExecutor* rangeDeleterExecutor)
     : CollectionShardingState(nss),
       _nss(std::move(nss)),
-      _metadataManager(std::make_shared<MetadataManager>(sc, _nss, rangeDeleterExecutor)) {}
+      _metadataManager(std::make_shared<MetadataManager>(sc, _nss, rangeDeleterExecutor)) {
+    if (isNamespaceAlwaysUnsharded(_nss)) {
+        _metadataManager->setFilteringMetadata(CollectionMetadata());
+    }
+}
 
 CollectionShardingRuntime* CollectionShardingRuntime::get(OperationContext* opCtx,
                                                           const NamespaceString& nss) {
@@ -60,15 +88,19 @@ CollectionShardingRuntime* CollectionShardingRuntime::get(OperationContext* opCt
     return checked_cast<CollectionShardingRuntime*>(css);
 }
 
-void CollectionShardingRuntime::refreshMetadata(OperationContext* opCtx,
-                                                std::unique_ptr<CollectionMetadata> newMetadata) {
+void CollectionShardingRuntime::setFilteringMetadata(OperationContext* opCtx,
+                                                     CollectionMetadata newMetadata) {
+    invariant(!newMetadata.isSharded() || !isNamespaceAlwaysUnsharded(_nss),
+              str::stream() << "Namespace " << _nss.ns() << " must never be sharded.");
     invariant(opCtx->lockState()->isCollectionLockedForMode(_nss.ns(), MODE_X));
 
-    _metadataManager->refreshActiveMetadata(std::move(newMetadata));
+    _metadataManager->setFilteringMetadata(std::move(newMetadata));
 }
 
-void CollectionShardingRuntime::markNotShardedAtStepdown() {
-    _metadataManager->refreshActiveMetadata(nullptr);
+void CollectionShardingRuntime::clearFilteringMetadata() {
+    if (!isNamespaceAlwaysUnsharded(_nss)) {
+        _metadataManager->clearFilteringMetadata();
+    }
 }
 
 auto CollectionShardingRuntime::beginReceive(ChunkRange const& range) -> CleanupNotification {
@@ -100,9 +132,13 @@ Status CollectionShardingRuntime::waitForClean(OperationContext* opCtx,
             {
                 // First, see if collection was dropped, but do it in a separate scope in order to
                 // not hold reference on it, which would make it appear in use
-                auto metadata =
+                const auto optMetadata =
                     self->_metadataManager->getActiveMetadata(self->_metadataManager, boost::none);
+                if (!optMetadata)
+                    return {ErrorCodes::ConflictingOperationInProgress,
+                            "Collection being migrated had its metadata reset"};
 
+                const auto& metadata = *optMetadata;
                 if (!metadata->isSharded() || metadata->getCollVersion().epoch() != epoch) {
                     return {ErrorCodes::ConflictingOperationInProgress,
                             "Collection being migrated was dropped"};
@@ -139,8 +175,8 @@ boost::optional<ChunkRange> CollectionShardingRuntime::getNextOrphanRange(BSONOb
     return _metadataManager->getNextOrphanRange(from);
 }
 
-ScopedCollectionMetadata CollectionShardingRuntime::_getMetadata(OperationContext* opCtx) {
-    auto atClusterTime = repl::ReadConcernArgs::get(opCtx).getArgsAtClusterTime();
+boost::optional<ScopedCollectionMetadata> CollectionShardingRuntime::_getMetadata(
+    const boost::optional<mongo::LogicalTime>& atClusterTime) {
     return _metadataManager->getActiveMetadata(_metadataManager, atClusterTime);
 }
 

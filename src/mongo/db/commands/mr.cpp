@@ -62,8 +62,7 @@
 #include "mongo/db/query/plan_summary_stats.h"
 #include "mongo/db/query/query_planner.h"
 #include "mongo/db/repl/replication_coordinator.h"
-#include "mongo/db/s/collection_metadata.h"
-#include "mongo/db/s/collection_sharding_state.h"
+#include "mongo/db/s/collection_sharding_runtime.h"
 #include "mongo/db/s/sharding_state.h"
 #include "mongo/db/server_options.h"
 #include "mongo/db/service_context.h"
@@ -454,6 +453,9 @@ void State::prepTempCollection() {
                                         << status.code());
             }
             wuow.commit();
+
+            CollectionShardingRuntime::get(_opCtx, _config.incLong)
+                ->setFilteringMetadata(_opCtx, CollectionMetadata());
         });
     }
 
@@ -503,6 +505,7 @@ void State::prepTempCollection() {
 
         CollectionOptions options = finalOptions;
         options.temp = true;
+
         // If a UUID for the final output collection was sent by mongos (i.e., the final output
         // collection is sharded), use the UUID mongos sent when creating the temp collection.
         // When the temp collection is renamed to the final output collection, the UUID will be
@@ -534,6 +537,9 @@ void State::prepTempCollection() {
                 _opCtx, _config.tempNamespace, uuid, *it, false);
         }
         wuow.commit();
+
+        CollectionShardingRuntime::get(_opCtx, _config.tempNamespace)
+            ->setFilteringMetadata(_opCtx, CollectionMetadata());
     });
 }
 
@@ -664,11 +670,16 @@ long long State::postProcessCollectionNonAtomic(OperationContext* opCtx,
                                                 CurOp* curOp,
                                                 ProgressMeterHolder& pm,
                                                 bool callerHoldsGlobalLock) {
-    if (_config.outputOptions.finalNamespace == _config.tempNamespace)
-        return _collectionCount(opCtx, _config.outputOptions.finalNamespace, callerHoldsGlobalLock);
+    auto outputCount =
+        _collectionCount(opCtx, _config.outputOptions.finalNamespace, callerHoldsGlobalLock);
 
-    if (_config.outputOptions.outType == Config::REPLACE ||
-        _collectionCount(opCtx, _config.outputOptions.finalNamespace, callerHoldsGlobalLock) == 0) {
+    // Determine whether the temp collection should be renamed to the final output collection and
+    // thus preserve the UUID. This is possible in the following cases:
+    //  * Output mode "replace"
+    //  * If this mapReduce is creating a new sharded output collection, which can be determined by
+    //  whether mongos sent the UUID that the final output collection should have (that is, whether
+    //  _config.finalOutputCollUUID is set).
+    if (_config.outputOptions.outType == Config::REPLACE || _config.finalOutputCollUUID) {
         // This must be global because we may write across different databases.
         Lock::GlobalWrite lock(opCtx);
         // replace: just rename from temp to final collection name, dropping previous collection
@@ -687,12 +698,11 @@ long long State::postProcessCollectionNonAtomic(OperationContext* opCtx,
         _db.dropCollection(_config.tempNamespace.ns());
     } else if (_config.outputOptions.outType == Config::MERGE) {
         // merge: upsert new docs into old collection
+
         {
-            const auto count =
-                _collectionCount(opCtx, _config.tempNamespace, callerHoldsGlobalLock);
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
             curOp->setMessage_inlock(
-                "m/r: merge post processing", "M/R Merge Post Processing Progress", count);
+                "m/r: merge post processing", "M/R Merge Post Processing Progress", outputCount);
         }
         unique_ptr<DBClientCursor> cursor = _db.query(_config.tempNamespace.ns(), BSONObj());
         while (cursor->more()) {
@@ -708,12 +718,11 @@ long long State::postProcessCollectionNonAtomic(OperationContext* opCtx,
         BSONList values;
 
         {
-            const auto count =
-                _collectionCount(opCtx, _config.tempNamespace, callerHoldsGlobalLock);
-            stdx::lock_guard<Client> lk(*opCtx->getClient());
+            stdx::unique_lock<Client> lk(*opCtx->getClient());
             curOp->setMessage_inlock(
-                "m/r: reduce post processing", "M/R Reduce Post Processing Progress", count);
+                "m/r: reduce post processing", "M/R Reduce Post Processing Progress", outputCount);
         }
+
         unique_ptr<DBClientCursor> cursor = _db.query(_config.tempNamespace.ns(), BSONObj());
         while (cursor->more()) {
             // This must be global because we may write across different databases.
@@ -721,14 +730,11 @@ long long State::postProcessCollectionNonAtomic(OperationContext* opCtx,
             BSONObj temp = cursor->nextSafe();
             BSONObj old;
 
-            bool found;
-            {
-                OldClientContext tx(opCtx, _config.outputOptions.finalNamespace.ns());
-                Collection* coll =
-                    getCollectionOrUassert(opCtx, tx.db(), _config.outputOptions.finalNamespace);
-                found = Helpers::findOne(opCtx, coll, temp["_id"].wrap(), old, true);
-            }
-
+            const bool found = [&] {
+                AutoGetCollection autoColl(opCtx, _config.outputOptions.finalNamespace, MODE_IS);
+                return Helpers::findOne(
+                    opCtx, autoColl.getCollection(), temp["_id"].wrap(), old, true);
+            }();
             if (found) {
                 // need to reduce
                 values.clear();
@@ -1426,12 +1432,9 @@ public:
 
         uassert(16149, "cannot run map reduce without the js engine", getGlobalScriptEngine());
 
-        // Prevent sharding state from changing during the MR.
-        const auto collMetadata = [&] {
-            // Get metadata before we check our version, to make sure it doesn't increment in the
-            // meantime
+        const auto metadata = [&] {
             AutoGetCollectionForReadCommand autoColl(opCtx, config.nss);
-            return CollectionShardingState::get(opCtx, config.nss)->getMetadata(opCtx);
+            return CollectionShardingState::get(opCtx, config.nss)->getCurrentMetadata();
         }();
 
         bool shouldHaveData = false;
@@ -1499,17 +1502,13 @@ public:
                 const ExtensionsCallbackReal extensionsCallback(opCtx, &config.nss);
 
                 const boost::intrusive_ptr<ExpressionContext> expCtx;
-                auto statusWithCQ =
+                auto cq = uassertStatusOKWithContext(
                     CanonicalQuery::canonicalize(opCtx,
                                                  std::move(qr),
                                                  expCtx,
                                                  extensionsCallback,
-                                                 MatchExpressionParser::kAllowAllSpecialFeatures);
-                if (!statusWithCQ.isOK()) {
-                    uasserted(17238, "Can't canonicalize query " + config.filter.toString());
-                    return 0;
-                }
-                std::unique_ptr<CanonicalQuery> cq = std::move(statusWithCQ.getValue());
+                                                 MatchExpressionParser::kAllowAllSpecialFeatures),
+                    str::stream() << "Can't canonicalize query " << config.filter);
 
                 unique_ptr<PlanExecutor, PlanExecutor::Deleter> exec;
                 {
@@ -1536,38 +1535,37 @@ public:
 
                 Timer mt;
 
-                // go through each doc
                 BSONObj o;
                 PlanExecutor::ExecState execState;
                 while (PlanExecutor::ADVANCED == (execState = exec->getNext(&o, NULL))) {
-                    o = o.getOwned();  // we will be accessing outside of the lock
-                    // check to see if this is a new object we don't own yet
-                    // because of a chunk migration
-                    if (collMetadata->isSharded()) {
-                        ShardKeyPattern kp(collMetadata->getKeyPattern());
-                        if (!collMetadata->keyBelongsToMe(kp.extractShardKeyFromDoc(o))) {
+                    o = o.getOwned();  // The object will be accessed outside of collection lock
+
+                    // Check to see if this is a new object we don't own yet because of a chunk
+                    // migration
+                    if (metadata->isSharded()) {
+                        ShardKeyPattern kp(metadata->getKeyPattern());
+                        if (!metadata->keyBelongsToMe(kp.extractShardKeyFromDoc(o))) {
                             continue;
                         }
                     }
 
-                    // do map
                     if (config.verbose)
                         mt.reset();
+
                     config.mapper->map(o);
+
                     if (config.verbose)
                         mapTime += mt.micros();
 
-                    // Check if the state accumulated so far needs to be written to a
-                    // collection. This may yield the DB lock temporarily and then
-                    // acquire it again.
-                    //
+                    // Check if the state accumulated so far needs to be written to a collection.
+                    // This may yield the DB lock temporarily and then acquire it again.
                     numInputs++;
                     if (numInputs % 100 == 0) {
                         Timer t;
 
-                        // TODO: As an optimization, we might want to do the save/restore
-                        // state and yield inside the reduceAndSpillInMemoryState method, so
-                        // it only happens if necessary.
+                        // TODO: As an optimization, we might want to do the save/restore state and
+                        // yield inside the reduceAndSpillInMemoryState method, so it only happens
+                        // if necessary.
                         exec->saveState();
 
                         scopedAutoDb.reset();

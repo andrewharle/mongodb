@@ -51,6 +51,7 @@
 
 namespace mongo {
 namespace {
+
 /**
  * Shared part of the implementation of the createCollection versions for replicated and regular
  * collection creation.
@@ -89,20 +90,24 @@ Status createCollection(OperationContext* opCtx,
             !options["capped"].trueValue() || options["size"].isNumber() ||
                 options.hasField("$nExtents"));
 
+    CollectionOptions collectionOptions;
+    {
+        Status status = collectionOptions.parse(options, kind);
+        if (!status.isOK()) {
+            return status;
+        }
+    }
+
     return writeConflictRetry(opCtx, "create", nss.ns(), [&] {
         Lock::DBLock dbXLock(opCtx, nss.db(), MODE_X);
+
         const bool shardVersionCheck = true;
         OldClientContext ctx(opCtx, nss.ns(), shardVersionCheck);
+
         if (opCtx->writesAreReplicated() &&
             !repl::ReplicationCoordinator::get(opCtx)->canAcceptWritesFor(opCtx, nss)) {
             return Status(ErrorCodes::NotMaster,
                           str::stream() << "Not primary while creating collection " << nss.ns());
-        }
-
-        CollectionOptions collectionOptions;
-        Status status = collectionOptions.parse(options, kind);
-        if (!status.isOK()) {
-            return status;
         }
 
         if (collectionOptions.isView()) {
@@ -117,9 +122,8 @@ Status createCollection(OperationContext* opCtx,
 
         // Create collection.
         const bool createDefaultIndexes = true;
-        status = Database::userCreateNS(
-            opCtx, ctx.db(), nss.ns(), std::move(collectionOptions), createDefaultIndexes, idIndex);
-
+        Status status = Database::userCreateNS(
+            opCtx, ctx.db(), nss.ns(), collectionOptions, createDefaultIndexes, idIndex);
         if (!status.isOK()) {
             return status;
         }

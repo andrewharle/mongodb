@@ -35,6 +35,7 @@
             bulk.insert({j: j, i: i});
         }
     }
+
     assert.writeOK(bulk.execute());
 
     function map() {
@@ -47,14 +48,14 @@
     // sharded src sharded dst
     var suffix = "InShardedOutSharded";
 
-    // Check that merge to an existing empty sharded collection works and creates a new UUID after
+    // Check that merge to an existing empty sharded collection works and preserves the UUID after
     // M/R
     st.adminCommand({shardcollection: "mrShard.outSharded", key: {"_id": 1}});
     var origUUID = getUUIDFromConfigCollections(st.s, "mrShard.outSharded");
     var out = db.srcSharded.mapReduce(map, reduce, {out: {merge: "outSharded", sharded: true}});
     verifyOutput(out, 512);
     var newUUID = getUUIDFromConfigCollections(st.s, "mrShard.outSharded");
-    assert.neq(origUUID, newUUID);
+    assert.eq(origUUID, newUUID);
 
     // Shard1 is the primary shard and only one chunk should have been written, so the chunk with
     // the new UUID should have been written to it.
@@ -81,6 +82,25 @@
     assert.eq(origUUID, newUUID);
     assert.eq(newUUID, getUUIDFromListCollections(st.shard0.getDB("mrShard"), "outSharded"));
     assert.eq(newUUID, getUUIDFromListCollections(st.shard1.getDB("mrShard"), "outSharded"));
+
+    // Check that merge to an existing sharding collection that has data only on the primary shard
+    // works and that the collection uses the same UUID after M/R.
+    assert.commandWorked(st.s.getCollection("mrShard.outSharded").remove({_id: 2001}));
+    out = db.srcSharded.mapReduce(map, reduce, {out: {merge: "outSharded", sharded: true}});
+    verifyOutput(out, 513);
+    newUUID = getUUIDFromConfigCollections(st.s, "mrShard.outSharded");
+    assert.eq(origUUID, newUUID);
+    assert.eq(newUUID, getUUIDFromListCollections(st.shard0.getDB(db.getName()), "outSharded"));
+    assert.eq(newUUID, getUUIDFromListCollections(st.shard1.getDB(db.getName()), "outSharded"));
+
+    // Similarly, check that reduce to an existing sharding collection that has data only on the
+    // primary shard works and that the collection uses the same UUID after M/R.
+    out = db.srcSharded.mapReduce(map, reduce, {out: {reduce: "outSharded", sharded: true}});
+    verifyOutput(out, 513);
+    newUUID = getUUIDFromConfigCollections(st.s, "mrShard.outSharded");
+    assert.eq(origUUID, newUUID);
+    assert.eq(newUUID, getUUIDFromListCollections(st.shard0.getDB(db.getName()), "outSharded"));
+    assert.eq(newUUID, getUUIDFromListCollections(st.shard1.getDB(db.getName()), "outSharded"));
 
     // Check that replace to an existing sharded collection has data on all shards works and that
     // the collection creates a new UUID after M/R.
@@ -147,5 +167,4 @@
     assert.eq(newUUID, getUUIDFromListCollections(st.shard1.getDB("mrShard"), "replaceUnsharded"));
 
     st.stop();
-
 })();

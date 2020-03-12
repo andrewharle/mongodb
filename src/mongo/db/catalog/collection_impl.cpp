@@ -430,7 +430,7 @@ Status CollectionImpl::insertDocument(OperationContext* opCtx,
 
 Status CollectionImpl::insertDocument(OperationContext* opCtx,
                                       const BSONObj& doc,
-                                      const std::vector<MultiIndexBlock*>& indexBlocks,
+                                      const OnRecordInsertedFn& onRecordInserted,
                                       bool enforceQuota) {
 
     MONGO_FAIL_POINT_BLOCK(failCollectionInserts, extraData) {
@@ -462,11 +462,9 @@ Status CollectionImpl::insertDocument(OperationContext* opCtx,
     if (!loc.isOK())
         return loc.getStatus();
 
-    for (auto&& indexBlock : indexBlocks) {
-        Status status = indexBlock->insert(doc, loc.getValue());
-        if (!status.isOK()) {
-            return status;
-        }
+    auto status = onRecordInserted(loc.getValue());
+    if (!status.isOK()) {
+        return status;
     }
 
     vector<InsertStatement> inserts;
@@ -1406,6 +1404,13 @@ Status CollectionImpl::validate(OperationContext* opCtx,
                                 ValidateResults* results,
                                 BSONObjBuilder* output) {
     dassert(opCtx->lockState()->isCollectionLockedForMode(ns().toString(), MODE_IS));
+
+    const auto nss = NamespaceString(ns());
+    const auto replCoord = repl::ReplicationCoordinator::get(opCtx);
+    // Check whether we are allowed to read from this node after acquiring our locks. If we are
+    // in a state where we cannot read, we should not run validate.
+    uassertStatusOK(replCoord->checkCanServeReadsFor(
+        opCtx, nss, ReadPreferenceSetting::get(opCtx).canRunOnSecondary()));
 
     try {
         ValidateResultsMap indexNsResultsMap;

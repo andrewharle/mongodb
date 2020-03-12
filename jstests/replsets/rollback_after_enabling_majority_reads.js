@@ -48,11 +48,25 @@
 
     jsTest.log(
         "Restart the rollback node with enableMajorityReadConcern=false. Now the rollback can succeed.");
-    const allowedExitCode = 14;
-    rollbackTest.restartNode(0, 15, {enableMajorityReadConcern: "false"}, allowedExitCode);
+
+    let allowedExitCode = 14;
+
+    try {
+        rollbackTest.restartNode(0, 15, {enableMajorityReadConcern: "false"}, allowedExitCode);
+    } catch (e) {
+        if ((e.name === "StopError") && (e.returnCode === -6)) {
+            // Retry once if we get error -6 instead of 14. This can happen if we get an fassert
+            // while already in the middle of crashing from the expected fassert above.
+            allowedExitCode = 0;
+            rollbackTest.restartNode(0, 15, {enableMajorityReadConcern: "false"}, allowedExitCode);
+        } else {
+            throw e;
+        }
+    }
 
     // Fix counts for "local.startup_log", since they are corrupted by this rollback.
     // transitionToSteadyStateOperations() checks collection counts.
+    replTest.waitForState(rollbackNode, ReplSetTest.State.SECONDARY);
     assert.commandWorked(rollbackNode.getDB("local").runCommand({validate: "startup_log"}));
     rollbackTest.transitionToSteadyStateOperations();
 
@@ -70,6 +84,8 @@
     let node = replTest.nodes[0];
     jsTestLog("Waiting for node " + node.host + " to become primary.");
     replTest.awaitNodesAgreeOnPrimary();
+    // Wait until the node has finished starting up before running replSetStepUp.
+    replTest.awaitSecondaryNodes(ReplSetTest.kDefaultTimeoutMS, [node]);
     assert.commandWorked(node.adminCommand({replSetStepUp: 1}));
     replTest.waitForState(node, ReplSetTest.State.PRIMARY);
     assert.eq(replTest.getPrimary(), node, node.host + " was not primary after step up.");

@@ -570,6 +570,51 @@ var ReplSetTest = function(opts) {
     };
 
     /**
+     * A special version of awaitSecondaryNodes() used exclusively by rollback_test.js.
+     * Wraps around awaitSecondaryNodes() itself and checks for an unrecoverable rollback
+     * if it throws.
+     */
+    this.awaitSecondaryNodesForRollbackTest = function(timeout,
+                                                       connToCheckForUnrecoverableRollback) {
+        try {
+            this.awaitSecondaryNodes(timeout);
+        } catch (originalEx) {
+            // There is a special case where we expect the (rare) possibility of unrecoverable
+            // rollbacks with EMRC:false in rollback suites with unclean shutdowns.
+            jsTestLog("Exception in 'awaitSecondaryNodes', checking for unrecoverable rollback");
+            if (connToCheckForUnrecoverableRollback) {
+                const conn = connToCheckForUnrecoverableRollback;
+
+                const statusRes = assert.commandWorked(conn.adminCommand({replSetGetStatus: 1}));
+                const isRecovering = (statusRes.myState === ReplSetTest.State.RECOVERING);
+                const hasNoSyncSource = (statusRes.syncSourceId === -1);
+
+                const cmdLineOptsRes = assert.commandWorked(conn.adminCommand("getCmdLineOpts"));
+                const hasEMRCFalse =
+                    (cmdLineOptsRes.parsed.replication.enableMajorityReadConcern === false);
+
+                if (isRecovering && hasNoSyncSource && hasEMRCFalse) {
+                    try {
+                        const n = this.getNodeId(conn);
+                        const connToCheck = _useBridge ? _unbridgedNodes[n] : this.nodes[n];
+                        // Confirm that the node is unable to recover after rolling back.
+                        checkLog.contains(
+                            connToCheck,
+                            "remote oplog does not contain entry with optime matching our required optime ",
+                            60 * 1000);
+                    } catch (checkLogEx) {
+                        throw originalEx;
+                    }
+                    // Add this info to the original exception.
+                    originalEx.unrecoverableRollbackDetected = true;
+                }
+            }
+            // Re-throw the original exception in all cases.
+            throw originalEx;
+        }
+    };
+
+    /**
      * Blocks until the specified node says it's syncing from the given upstream node.
      */
     this.awaitSyncSource = function(node, upstreamNode, timeout) {
@@ -1119,6 +1164,16 @@ var ReplSetTest = function(opts) {
     };
 
     /**
+     * Modifies the election timeout to be 24 hours so that no unplanned elections happen. Then
+     * runs replSetInitiate on the replica set with the new config.
+     */
+    this.initiateWithHighElectionTimeout = function(opts = {}) {
+        let cfg = this.getReplSetConfig();
+        cfg.settings = Object.assign(opts, {"electionTimeoutMillis": 24 * 60 * 60 * 1000});
+        this.initiate(cfg);
+    };
+
+    /**
      * Steps up 'node' as primary.
      * Waits for all nodes to reach the same optime before sending the replSetStepUp command
      * to 'node'.
@@ -1132,9 +1187,28 @@ var ReplSetTest = function(opts) {
             return;
         }
 
+        jsTest.log("Stepping up: " + node.host + " in stepUp");
         assert.commandWorked(node.adminCommand({replSetStepUp: 1}));
         this.awaitNodesAgreeOnPrimary();
-        assert.eq(this.getPrimary(), node, node.host + " was not primary after stepUp");
+        assert.eq(this.getPrimary(), node, 'failed to step up node ' + node.host + ' in stepUp');
+    };
+
+    /**
+     * Steps up 'node' as primary.
+     */
+    this.stepUpNoAwaitReplication = function(node) {
+        jsTest.log("Stepping up: " + node.host + " in stepUpNoAwaitReplication");
+        assert.soonNoExcept(
+            function() {
+                assert.commandWorked(node.adminCommand({replSetStepUp: 1}));
+                self.awaitNodesAgreeOnPrimary(
+                    self.kDefaultTimeoutMS, self.nodes, self.getNodeId(node));
+                return node.adminCommand('replSetGetStatus').myState === ReplSetTest.State.PRIMARY;
+            },
+            'failed to step up node ' + node.host + ' in stepUpNoAwaitReplication',
+            self.kDefaultTimeoutMS);
+
+        return node;
     };
 
     /**
@@ -1621,9 +1695,9 @@ var ReplSetTest = function(opts) {
     this.getHashes = function(dbName, slaves) {
         assert.neq(dbName, 'local', 'Cannot run getHashes() on the "local" database');
 
-        // getPrimary() repopulates 'self._slaves'.
-        this.getPrimary();
-        slaves = slaves || this._slaves;
+        // _determineLiveSlaves() repopulates both 'self._slaves' and 'self._master'. If we're
+        // passed an explicit set of slaves we don't want to do that.
+        slaves = slaves || _determineLiveSlaves();
 
         const sessions = [
             this._master,
@@ -2562,6 +2636,10 @@ var ReplSetTest = function(opts) {
 
     /**
      * Wait for a state indicator to go to a particular state or states.
+     *
+     * Note that this waits for the state as indicated by the primary node. If you want to wait for
+     * a node to actually reach SECONDARY state, as reported by itself, use awaitSecondaryNodes
+     * instead.
      *
      * @param node is a single node or list of nodes, by id or conn
      * @param state is a single state or list of states

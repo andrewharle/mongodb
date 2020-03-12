@@ -633,6 +633,22 @@ TEST_F(TopoCoordTest, ChooseOnlyPrimaryAsSyncSourceWhenChainingIsDisallowed) {
                         Milliseconds(300));
     ASSERT_EQUALS(2, getCurrentPrimaryIndex());
 
+    // h3 is primary, but its last applied isn't as up-to-date as ours, so it cannot be chosen
+    // as the sync source.
+    ASSERT_EQUALS(HostAndPort(),
+                  getTopoCoord().chooseNewSyncSource(
+                      now()++,
+                      OpTime(Timestamp(10, 0), 0),
+                      TopologyCoordinator::ChainingPreference::kUseConfiguration));
+    ASSERT_EQUALS(HostAndPort(), getTopoCoord().getSyncSourceAddress());
+
+    // Update the primary's position.
+    heartbeatFromMember(HostAndPort("h3"),
+                        "rs0",
+                        MemberState::RS_PRIMARY,
+                        OpTime(Timestamp(10, 0), 0),
+                        Milliseconds(300));
+
     // h3 is primary and should be chosen as the sync source when we are not in catch-up mode,
     // despite being further away than h2 and the primary (h3) being behind our most recently
     // applied optime.
@@ -1589,6 +1605,8 @@ TEST_F(TopoCoordTest, ReplSetGetStatus) {
     OpTime readConcernMajorityOpTime(Timestamp(4, 1), 20);
     Timestamp lastStableCheckpointTimestamp(2, 2);
     BSONObj initialSyncStatus = BSON("failedInitialSyncAttempts" << 1);
+    BSONObj electionCandidateMetrics = BSON("DummyElectionCandidateMetrics" << 1);
+    BSONObj electionParticipantMetrics = BSON("DummyElectionParticipantMetrics" << 1);
     std::string setName = "mySet";
 
     ReplSetHeartbeatResponse hb;
@@ -1645,6 +1663,8 @@ TEST_F(TopoCoordTest, ReplSetGetStatus) {
             static_cast<unsigned>(durationCount<Seconds>(uptimeSecs)),
             readConcernMajorityOpTime,
             initialSyncStatus,
+            electionCandidateMetrics,
+            electionParticipantMetrics,
             lastStableCheckpointTimestamp},
         &statusBuilder,
         &resultStatus);
@@ -1745,6 +1765,8 @@ TEST_F(TopoCoordTest, ReplSetGetStatus) {
 
     ASSERT_EQUALS(2000, rsStatus["heartbeatIntervalMillis"].numberInt());
     ASSERT_BSONOBJ_EQ(initialSyncStatus, rsStatus["initialSyncStatus"].Obj());
+    ASSERT_BSONOBJ_EQ(electionCandidateMetrics, rsStatus["electionCandidateMetrics"].Obj());
+    ASSERT_BSONOBJ_EQ(electionParticipantMetrics, rsStatus["electionParticipantMetrics"].Obj());
 
     // Test no lastStableCheckpointTimestamp field.
     BSONObjBuilder statusBuilder2;
@@ -1753,7 +1775,8 @@ TEST_F(TopoCoordTest, ReplSetGetStatus) {
             curTime,
             static_cast<unsigned>(durationCount<Seconds>(uptimeSecs)),
             readConcernMajorityOpTime,
-            initialSyncStatus},
+            initialSyncStatus,
+            BSONObj()},
         &statusBuilder2,
         &resultStatus);
     ASSERT_OK(resultStatus);
@@ -1761,6 +1784,8 @@ TEST_F(TopoCoordTest, ReplSetGetStatus) {
     unittest::log() << rsStatus;
     ASSERT_EQUALS(setName, rsStatus["set"].String());
     ASSERT_FALSE(rsStatus.hasField("lastStableCheckpointTimestamp"));
+    ASSERT_FALSE(rsStatus.hasField("electionCandidateMetrics"));
+    ASSERT_FALSE(rsStatus.hasField("electionParticipantMetrics"));
 }
 
 TEST_F(TopoCoordTest, NodeReturnsInvalidReplicaSetConfigInResponseToGetStatusWhenAbsentFromConfig) {
@@ -3959,8 +3984,8 @@ TEST_F(TopoCoordTest, FreshestNodeDoesCatchupTakeover) {
                                             StatusWith<ReplSetHeartbeatResponse>(hbResp));
     getTopoCoord().updateTerm(1, Date_t());
 
-    ASSERT_OK(getTopoCoord().becomeCandidateIfElectable(
-        Date_t(), TopologyCoordinator::StartElectionReason::kCatchupTakeover));
+    ASSERT_OK(getTopoCoord().becomeCandidateIfElectable(Date_t(),
+                                                        StartElectionReasonEnum::kCatchupTakeover));
 }
 
 TEST_F(TopoCoordTest, StaleNodeDoesntDoCatchupTakeover) {
@@ -4013,7 +4038,7 @@ TEST_F(TopoCoordTest, StaleNodeDoesntDoCatchupTakeover) {
     getTopoCoord().updateTerm(1, Date_t());
 
     Status result = getTopoCoord().becomeCandidateIfElectable(
-        Date_t(), TopologyCoordinator::StartElectionReason::kCatchupTakeover);
+        Date_t(), StartElectionReasonEnum::kCatchupTakeover);
     ASSERT_NOT_OK(result);
     ASSERT_STRING_CONTAINS(result.reason(),
                            "member is either not the most up-to-date member or not ahead of the "
@@ -4068,7 +4093,7 @@ TEST_F(TopoCoordTest, NodeDoesntDoCatchupTakeoverHeartbeatSaysPrimaryCaughtUp) {
     getTopoCoord().updateTerm(1, Date_t());
 
     Status result = getTopoCoord().becomeCandidateIfElectable(
-        Date_t(), TopologyCoordinator::StartElectionReason::kCatchupTakeover);
+        Date_t(), StartElectionReasonEnum::kCatchupTakeover);
     ASSERT_NOT_OK(result);
     ASSERT_STRING_CONTAINS(result.reason(),
                            "member is either not the most up-to-date member or not ahead of the "
@@ -4127,7 +4152,7 @@ TEST_F(TopoCoordTest, NodeDoesntDoCatchupTakeoverIfTermNumbersSayPrimaryCaughtUp
     getTopoCoord().updateTerm(1, Date_t());
 
     Status result = getTopoCoord().becomeCandidateIfElectable(
-        Date_t(), TopologyCoordinator::StartElectionReason::kCatchupTakeover);
+        Date_t(), StartElectionReasonEnum::kCatchupTakeover);
     ASSERT_NOT_OK(result);
     ASSERT_STRING_CONTAINS(result.reason(),
                            "member is either not the most up-to-date member or not ahead of the "
@@ -5194,8 +5219,8 @@ TEST_F(HeartbeatResponseTestV1,
     ASSERT_NO_ACTION(nextAction.getAction());
     ASSERT_TRUE(TopologyCoordinator::Role::kFollower == getTopoCoord().getRole());
     // We are electable now.
-    ASSERT_OK(getTopoCoord().becomeCandidateIfElectable(
-        now(), TopologyCoordinator::StartElectionReason::kElectionTimeout));
+    ASSERT_OK(getTopoCoord().becomeCandidateIfElectable(now(),
+                                                        StartElectionReasonEnum::kElectionTimeout));
     ASSERT_TRUE(TopologyCoordinator::Role::kCandidate == getTopoCoord().getRole());
 }
 
@@ -5220,8 +5245,8 @@ TEST_F(HeartbeatResponseTestV1, ScheduleElectionWhenPrimaryIsMarkedDownAndWeAreE
     ASSERT_EQUALS(-1, getCurrentPrimaryIndex());
     ASSERT_TRUE(TopologyCoordinator::Role::kFollower == getTopoCoord().getRole());
     // We are electable now.
-    ASSERT_OK(getTopoCoord().becomeCandidateIfElectable(
-        now(), TopologyCoordinator::StartElectionReason::kElectionTimeout));
+    ASSERT_OK(getTopoCoord().becomeCandidateIfElectable(now(),
+                                                        StartElectionReasonEnum::kElectionTimeout));
     ASSERT_TRUE(TopologyCoordinator::Role::kCandidate == getTopoCoord().getRole());
 }
 

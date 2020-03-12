@@ -46,6 +46,7 @@ post:
             mark_idle.sh
           fi
 
+    - func: "upload pip requirements"
     - command: shell.exec
       params:
         working_dir: src
@@ -89,7 +90,7 @@ functions:
           fi
           # If this is a patch build, we add the patch version id to the version string so we know
           # this build was a patch, and which evergreen task it came from
-          if [ "${is_patch|}" = "true" ]; then
+          if [ "${is_patch|false}" = "true" ]; then
             MONGO_VERSION="$MONGO_VERSION-patch-${version_id}"
           fi
 
@@ -200,6 +201,10 @@ functions:
           production: true
           authentication: ${authentication}
           overrides:
+            infrastructure_provisioning:
+              tfvars:
+                # This is currently only used by initialsync-logkeeper. It is empty and not used for other tests.
+                mongod_seeded_ebs_snapshot_id: ${snapshotId}
             workload_setup:
               local_repos:
                 workloads: ../src/workloads/workloads
@@ -252,6 +257,9 @@ functions:
           dsi_analysis_atlas_pw: "${dsi_analysis_atlas_pw}"
           EOF
           chmod 400 runtime_secret.yml
+    - command: expansions.write
+      params:
+        file: work/expansions.yml
     - command: shell.exec
       params:
         working_dir: work
@@ -298,20 +306,47 @@ functions:
 
   "analyze":
     - command: shell.exec
+      type: test
       params:
         working_dir: work
         script: |
-          ../src/dsi/dsi/run-dsi detect-changes
-    - command: shell.exec
-      type : test
-      params:
-        working_dir: work
-        script: |
-          set -o errexit
           set -o verbose
-          TAG="4.0.2-Baseline"
-          OVERRIDEFILE="../src/dsi/dsi/analysis/${branch_name}/system_perf_override.json"
-          python -u ../src/dsi/dsi/analysis/post_run_check.py ${script_flags} --reports-analysis reports --perf-file perf.json --rev ${revision} --refTag $TAG --overrideFile $OVERRIDEFILE --project_id sys-perf --variant ${build_variant} --task ${task_name}
+          source ./dsienv.sh
+          ../src/dsi/dsi/run-dsi analysis.py
+          # detect outliers needs to run, so defer the post_run_check exit status to later
+          echo $? > post_run_check.status
+    - command: shell.exec
+      params:
+        working_dir: work
+        script: |
+          is_patch=${is_patch|false}
+          task_id=${task_id}
+          perf_jira_user=${perf_jira_user}
+          perf_jira_pw=${perf_jira_pw}
+          dsi_analysis_atlas_user=${dsi_analysis_atlas_user}
+          dsi_analysis_atlas_pw=${dsi_analysis_atlas_pw}
+          evergreen_api_key=${evergreen_api_key}
+          evergreen_api_user=${evergreen_api_user}
+          source ../src/buildscripts/signal_processing_setup.sh
+          detect-changes --evergreen-api-config .evergreen.yml
+    - command: shell.exec
+      params:
+        working_dir: work
+        script: |
+          source ../src/buildscripts/signal_processing_setup.sh
+          detect-outliers --evergreen-api-config .evergreen.yml
+
+  "upload pip requirements":
+    command: s3.put
+    params:
+      aws_key: ${aws_key}
+      aws_secret: ${aws_secret}
+      local_file: pip-requirements.txt
+      remote_file: ${project}/${build_variant}/${revision}/pip-requirements-${task_id}-${execution}.txt
+      bucket: mciuploads
+      permissions: public-read
+      content_type: atext-plain
+      display_name: Pip Requirements
 
 #######################################
 #               Tasks                 #
@@ -908,6 +943,8 @@ buildvariants:
   expansions:
     setup: initialsync-logkeeper
     cluster: initialsync-logkeeper
+    # EBS logkeeper snapshot with FCV set to 4.0
+    snapshotId: snap-041c3c57a1a4f5bba
     platform: linux
     storageEngine: wiredTiger
     project_dir: *project_dir

@@ -76,10 +76,9 @@ public:
 
         CatalogCacheLoader::get(_opCtx).notifyOfCollectionVersionUpdate(_nss);
 
-        // This is a hack to get around CollectionShardingState::refreshMetadata() requiring the X
-        // lock: markNotShardedAtStepdown() doesn't have a lock check. Temporary measure until
-        // SERVER-31595 removes the X lock requirement.
-        CollectionShardingRuntime::get(_opCtx, _nss)->markNotShardedAtStepdown();
+        // Force subsequent uses of the namespace to refresh the filtering metadata so they can
+        // synchronize with any work happening on the primary (e.g., migration critical section).
+        CollectionShardingRuntime::get(_opCtx, _nss)->clearFilteringMetadata();
     }
 
     void rollback() override {}
@@ -207,8 +206,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
                                       std::vector<InsertStatement>::const_iterator begin,
                                       std::vector<InsertStatement>::const_iterator end,
                                       bool fromMigrate) {
-    auto const css = CollectionShardingState::get(opCtx, nss);
-    const auto metadata = css->getMetadata(opCtx);
+    auto* const css = CollectionShardingState::get(opCtx, nss);
+    const auto metadata = css->getCurrentMetadata();
 
     for (auto it = begin; it != end; ++it) {
         const auto& insertedDoc = it->doc;
@@ -233,8 +232,8 @@ void ShardServerOpObserver::onInserts(OperationContext* opCtx,
 }
 
 void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateEntryArgs& args) {
-    auto const css = CollectionShardingState::get(opCtx, args.nss);
-    const auto metadata = css->getMetadata(opCtx);
+    auto* const css = CollectionShardingState::get(opCtx, args.nss);
+    const auto metadata = css->getCurrentMetadata();
 
     if (args.nss == NamespaceString::kShardConfigCollectionsNamespace) {
         // Notification of routing table changes are only needed on secondaries
@@ -281,10 +280,10 @@ void ShardServerOpObserver::onUpdate(OperationContext* opCtx, const OplogUpdateE
             }
 
             if (setField.hasField(ShardCollectionType::enterCriticalSectionCounter.name())) {
-                // This is a hack to get around CollectionShardingState::refreshMetadata() requiring
-                // the X lock: markNotShardedAtStepdown() doesn't have a lock check. Temporary
-                // measure until SERVER-31595 removes the X lock requirement.
-                CollectionShardingRuntime::get(opCtx, updatedNss)->markNotShardedAtStepdown();
+                // Force subsequent uses of the namespace to refresh the filtering metadata so they
+                // can synchronize with any work happening on the primary (e.g., migration critical
+                // section).
+                CollectionShardingRuntime::get(opCtx, updatedNss)->clearFilteringMetadata();
             }
         }
     }

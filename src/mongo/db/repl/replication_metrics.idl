@@ -34,9 +34,23 @@ global:
     cpp_namespace: "mongo::repl"
     cpp_includes:
         - "mongo/db/repl/election_reason_counter_parser.h"
+        - "mongo/db/repl/optime.h"
 
 imports:
     - "mongo/idl/basic_types.idl"
+    - "mongo/db/repl/replication_types.idl"
+
+enums:
+    StartElectionReason:
+        description: "Reason why a node called for an election"
+        type: string
+        values:
+            kElectionTimeout: "electionTimeout"
+            kPriorityTakeover: "priorityTakeover"
+            kStepUpRequest: "stepUpRequest"
+            kStepUpRequestSkipDryRun: "stepUpRequestSkipDryRun"
+            kCatchupTakeover: "catchupTakeover"
+            kSingleNodePromptElection: "singleNodePromptElection"
 
 types:
     ElectionReasonCounter:
@@ -119,20 +133,97 @@ structs:
                               replSetAbortPrimaryCatchUp command"
                 type: long
                 default: 0
+            averageCatchUpOps:
+                description: "Average number of ops applied during catchup"
+                type: double
+                default: 0.0
 
     ElectionCandidateMetrics:
         description: "Stores metrics that are specific to the last election in which the node was a
                       candidate"
         strict: true
         fields:
+            lastElectionReason:
+                description: "Reason why the node called for the election"
+                type: StartElectionReason
+            lastElectionDate:
+                description: "Time the node called for the election"
+                type: date
+            electionTerm:
+                description: "Proposed new term for this election"
+                type: long
+            lastCommittedOpTimeAtElection:
+                description: "Last OpTime the node committed before calling the election"
+                type: optime
+            lastSeenOpTimeAtElection:
+                description: "Last OpTime the node saw before calling the election"
+                type: optime
+            numVotesNeeded:
+                description: "Number of votes the node needed to win the election"
+                type: int
             priorityAtElection:
-                description: "The node's priority at the time of the election"
+                description: "Priority of the node at the time of the election"
                 type: double
+            electionTimeoutMillis:
+                description: "Timeout duration before a node initiates a new election"
+                type: long
+            priorPrimaryMemberId:
+                description: "MemberId of the prior primary, according to the node. Not set if
+                              there was no prior primary"
+                type: int
+                optional: true
+            targetCatchupOpTime:
+                description: "The node's target opTime for catchup"
+                type: optime
+                optional: true
+            numCatchUpOps:
+                description: "Number of ops applied during catchup when the primary successfully
+                              catches up"
+                type: long
+                optional: true
+            newTermStartDate:
+                description: "Time the new term oplog entry was written"
+                type: date
+                optional: true
+            wMajorityWriteAvailabilityDate:
+                description: "Time w:majority write concern is satisfied for new term oplog entry"
+                type: date
+                optional: true
 
     ElectionParticipantMetrics:
         description: "Stores metrics that are specific to the last election in which the node voted"
         strict: true
         fields:
+            votedForCandidate:
+                description: "States if the node has voted yes or no for the candidate in this election"
+                type: bool
+            electionTerm:
+                description: "The term of the candidate that is running for election"
+                type: long
+            lastVoteDate:
+                description: "Time the node voted"
+                type: date
+            electionCandidateMemberId:
+                description: "MemberId of the node requesting a vote"
+                type: int
+            voteReason:
+                description: "Reason why the node voted the way it did"
+                type: string
+            lastAppliedOpTimeAtElection:
+                description: "Latest applied OpTime at the time of voting"
+                type: optime
+            maxAppliedOpTimeInSet:
+                description: "Highest applied time of any node in this replica set, as currently
+                              known by this node"
+                type: optime
             priorityAtElection:
                 description: "The node's priority at the time of the election"
                 type: double
+            newTermStartDate:
+                description: "Time the new term oplog entry was written by the primary"
+                type: date
+                optional: true
+            newTermAppliedDate:
+                description: "Time this node applied the new term oplog entry"
+                type: date
+                optional: true
