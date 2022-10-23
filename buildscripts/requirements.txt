@@ -3,7 +3,7 @@ cryptography >= 2.0.0
 jira == 1.0.10
 pyjwt == 1.5.3
 # Other
-pyyaml == 5.1
+pyyaml == 5.4
 unittest-xml-reporting == 2.1.0
 # Linters
 yapf == 0.21.0
