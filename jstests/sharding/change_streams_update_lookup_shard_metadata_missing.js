@@ -7,6 +7,8 @@
 (function() {
     "use strict";
 
+    load("jstests/multiVersion/libs/multi_cluster.js");  // For ShardingTest.waitUntilStable.
+
     // The UUID consistency check can hit NotMasterNoSlaveOk when it attempts to obtain a list of
     // collections from the shard Primaries through mongoS at the end of this test.
     TestData.skipCheckingUUIDsConsistentAcrossCluster = true;
@@ -15,12 +17,12 @@
     const st = new ShardingTest({
         shards: 2,
         mongos: 1,
-        rs: {nodes: 3, setParameter: {writePeriodicNoops: true, periodicNoopIntervalSecs: 1}}
+        rs: {nodes: 3, setParameter: {writePeriodicNoops: true, periodicNoopIntervalSecs: 5}}
     });
 
-    const mongosDB = st.s.getDB(jsTestName());
-    const mongosColl = mongosDB.test;
-    const shard0 = st.rs0;
+    let mongosDB = st.s.getDB(jsTestName());
+    let mongosColl = mongosDB.test;
+    let shard0 = st.rs0;
 
     // Enable sharding on the the test database and ensure that the primary is shard0.
     assert.commandWorked(mongosDB.adminCommand({enableSharding: mongosDB.getName()}));
@@ -30,7 +32,7 @@
     st.shardColl(mongosColl, {a: 1}, {a: 0}, {a: 1});
 
     // Open a change stream on the collection.
-    const csCursor = mongosColl.watch();
+    let csCursor = mongosColl.watch();
 
     // Write one document onto shard0 and obtain its resume token.
     assert.commandWorked(mongosColl.insert({_id: 0, a: -100}));
@@ -38,40 +40,37 @@
 
     const resumeToken = csCursor.next()._id;
 
-    // get any secondary
-    const newPrimary = st.rs0.getSecondary();
-    let shards = st.s.getDB('config').shards.find().toArray();
+    // Obtain a reference to any secondary.
+    const newPrimary = shard0.getSecondary();
 
     // Step up one of the Secondaries, which will not have any sharding metadata loaded.
-    st.rs0.stepUpNoAwaitReplication(newPrimary);
+    shard0.stepUp(newPrimary);
 
-    // make sure the mongos refreshes it's connections to the shard
-    let primary = {};
-    do {
-        let connPoolStats = st.s0.adminCommand({connPoolStats: 1});
-        primary = connPoolStats.replicaSets[shards[0]._id].hosts.find((host) => {
-            return host.ismaster;
-        }) ||
-            {};
-    } while (newPrimary.host !== primary.addr);
+    // Make sure the mongoS and both shards sees shard0's new primary.
+    st.waitUntilStable();
+
+    // Refresh our reference to the test collection.
+    mongosColl = st.s.getDB(mongosDB.getName())[mongosColl.getName()];
 
     // Do a {multi:true} update. This will scatter to all shards and update the document on shard0.
-    // Because no metadata is loaded, the shard will return a StaleShardVersion and fetch it,
-    // the operation will be retried
+    // Because no metadata is loaded, the shard will return a StaleShardVersion and fetch it, and
+    // the operation will be retried until it completes successfully.
     assert.soonNoExcept(() => assert.commandWorked(
                             mongosColl.update({_id: 0}, {$set: {updated: true}}, false, true)));
 
-    // Resume the change stream with {fullDocument: 'updateLookup'}.
-    const cmdRes = assert.commandWorked(mongosColl.runCommand("aggregate", {
-        pipeline: [{$changeStream: {resumeAfter: resumeToken, fullDocument: "updateLookup"}}],
-        cursor: {}
-    }));
-
+    // Resume the change stream with {fullDocument: 'updateLookup'}. Update lookup can successfully
+    // identify the document based on its _id alone so long as the _id is unique in the collection,
+    // so this alone does not prove that the multi-update wrote its shard key into the oplog.
+    csCursor = mongosColl.watch([], {resumeAfter: resumeToken, fullDocument: "updateLookup"});
     assert.soon(() => csCursor.hasNext());
+    assert.docEq(csCursor.next().fullDocument, {_id: 0, a: -100, updated: true});
 
-    const updateObj = csCursor.next();
-
-    assert.eq(true, updateObj.updateDescription.updatedFields.updated);
+    // Now insert a new document with the same _id on the other shard. Update lookup will be able to
+    // distinguish between the two, proving that they both have full shard keys available.
+    assert.commandWorked(mongosColl.insert({_id: 0, a: 100}));
+    csCursor = mongosColl.watch([], {resumeAfter: resumeToken, fullDocument: "updateLookup"});
+    assert.soon(() => csCursor.hasNext());
+    assert.docEq(csCursor.next().fullDocument, {_id: 0, a: -100, updated: true});
 
     st.stop();
 })();

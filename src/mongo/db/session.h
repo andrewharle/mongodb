@@ -111,6 +111,8 @@ public:
             return _readConcernArgs;
         }
 
+        void setNoEvictionAfterRollback();
+
     private:
         bool _released = false;
         std::unique_ptr<Locker> _locker;
@@ -270,13 +272,13 @@ public:
     /**
      * Aborts the transaction outside the transaction, releasing transaction resources.
      */
-    void abortArbitraryTransaction();
+    void abortArbitraryTransaction(OperationContext* opCtx);
 
     /**
      * Same as abortArbitraryTransaction, except only executes if _transactionExpireDate indicates
      * that the transaction has expired.
      */
-    void abortArbitraryTransactionIfExpired();
+    void abortArbitraryTransactionIfExpired(OperationContext* opCtx);
 
     /*
      * Aborts the transaction inside the transaction, releasing transaction resources.
@@ -412,20 +414,22 @@ private:
     static CursorExistsFunction _cursorExistsFunction;
 
     void _beginOrContinueTxn(WithLock,
+                             OperationContext* opCtx,
                              TxnNumber txnNumber,
                              boost::optional<bool> autocommit,
                              boost::optional<bool> startTransaction);
 
-    void _beginOrContinueTxnOnMigration(WithLock, TxnNumber txnNumber);
+    void _beginOrContinueTxnOnMigration(WithLock, OperationContext* opCtx, TxnNumber txnNumber);
 
     // Checks if there is a conflicting operation on the current Session
     void _checkValid(WithLock) const;
 
-    // Checks that a new txnNumber is higher than the activeTxnNumber so
-    // we don't start a txn that is too old.
-    void _checkTxnValid(WithLock, TxnNumber txnNumber) const;
+    // Checks that a new txnNumber is higher than the activeTxnNumber so we don't start a
+    // transaction or retryable write that is older
+    // than the current one.
+    void _checkTxnValid(WithLock, TxnNumber txnNumber, boost::optional<bool> autocommit) const;
 
-    void _setActiveTxn(WithLock, TxnNumber txnNumber);
+    void _setActiveTxn(WithLock, OperationContext* opCtx, TxnNumber txnNumber);
 
     void _checkIsActiveTransaction(WithLock, TxnNumber txnNumber, bool checkAbort) const;
 
@@ -456,7 +460,7 @@ private:
 
 
     // Releases stashed transaction resources to abort the transaction.
-    void _abortTransaction(WithLock);
+    void _abortTransaction(WithLock, OperationContext* opCtx);
 
     // Committing a transaction first changes its state to "Committing" and writes to the oplog,
     // then it changes the state to "Committed".

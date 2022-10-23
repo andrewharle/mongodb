@@ -43,6 +43,7 @@
 #include "mongo/db/namespace_string.h"
 #include "mongo/db/operation_context.h"
 #include "mongo/db/repl/optime.h"
+#include "mongo/db/repl/read_concern_level.h"
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/s/collection_sharding_state.h"
 #include "mongo/db/s/sharding_state.h"
@@ -63,6 +64,10 @@ namespace mongo {
 using repl::UnreplicatedWritesBlock;
 
 Lock::ResourceMutex FeatureCompatibilityVersion::fcvLock("featureCompatibilityVersionLock");
+// lastFCVUpdateTimestamp contains the latest oplog entry timestamp which updated the FCV.
+// It is reset on rollback.
+Timestamp lastFCVUpdateTimestamp;
+SimpleMutex lastFCVUpdateTimestampMutex;
 
 void FeatureCompatibilityVersion::setTargetUpgrade(OperationContext* opCtx) {
     // Sets both 'version' and 'targetVersion' fields.
@@ -161,36 +166,8 @@ void FeatureCompatibilityVersion::onInsertOrUpdate(OperationContext* opCtx, cons
               << FeatureCompatibilityVersionParser::toString(newVersion);
     }
 
-    opCtx->recoveryUnit()->onCommit([opCtx, newVersion](boost::optional<Timestamp>) {
-        serverGlobalParams.featureCompatibility.setVersion(newVersion);
-        updateMinWireVersion();
-
-        if (ShardingState::get(opCtx)->enabled() &&
-            (newVersion ==
-                 ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo36 ||
-             newVersion == ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40)) {
-            Grid::get(opCtx)->catalogCache()->purgeAllDatabases();
-        }
-
-        if (newVersion != ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo36) {
-            // Close all incoming connections from internal clients with binary versions lower than
-            // ours.
-            opCtx->getServiceContext()->getServiceEntryPoint()->endAllSessions(
-                transport::Session::kLatestVersionInternalClientKeepOpen |
-                transport::Session::kExternalClientKeepOpen);
-            // Close all outgoing connections to servers with binary versions lower than ours.
-            executor::EgressTagCloserManager::get(opCtx->getServiceContext())
-                .dropConnections(transport::Session::kKeepOpen);
-        }
-
-        if (newVersion != ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40) {
-            // Transactions are only allowed when the featureCompatibilityVersion is 4.0, so abort
-            // any open transactions when downgrading featureCompatibilityVersion.
-            SessionKiller::Matcher matcherAllSessions(
-                KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
-            killSessionsLocalKillTransactions(opCtx, matcherAllSessions);
-        }
-    });
+    opCtx->recoveryUnit()->onCommit(
+        [opCtx, newVersion](boost::optional<Timestamp> ts) { _setVersion(opCtx, newVersion, ts); });
 }
 
 void FeatureCompatibilityVersion::updateMinWireVersion() {
@@ -210,6 +187,69 @@ void FeatureCompatibilityVersion::updateMinWireVersion() {
         case ServerGlobalParams::FeatureCompatibility::Version::kUnsetDefault36Behavior:
             // getVersion() does not return this value.
             MONGO_UNREACHABLE;
+    }
+}
+
+void FeatureCompatibilityVersion::_setVersion(
+    OperationContext* opCtx,
+    ServerGlobalParams::FeatureCompatibility::Version newVersion,
+    boost::optional<Timestamp> commitTs) {
+    // We set the last FCV update timestamp before setting the new FCV, to make sure we never
+    // read an FCV that is not stable.  We might still read a stale one.
+    {
+        stdx::lock_guard<SimpleMutex> lk(lastFCVUpdateTimestampMutex);
+        if (commitTs && *commitTs > lastFCVUpdateTimestamp) {
+            lastFCVUpdateTimestamp = *commitTs;
+        }
+    }
+    serverGlobalParams.featureCompatibility.setVersion(newVersion);
+    updateMinWireVersion();
+
+    if (ShardingState::get(opCtx)->enabled() &&
+        (newVersion == ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo36 ||
+         newVersion == ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40)) {
+        Grid::get(opCtx)->catalogCache()->purgeAllDatabases();
+    }
+
+    if (newVersion != ServerGlobalParams::FeatureCompatibility::Version::kFullyDowngradedTo36) {
+        // Close all incoming connections from internal clients with binary versions lower than
+        // ours.
+        opCtx->getServiceContext()->getServiceEntryPoint()->endAllSessions(
+            transport::Session::kLatestVersionInternalClientKeepOpen |
+            transport::Session::kExternalClientKeepOpen);
+        // Close all outgoing connections to servers with binary versions lower than ours.
+        executor::EgressTagCloserManager::get(opCtx->getServiceContext())
+            .dropConnections(transport::Session::kKeepOpen);
+    }
+
+    if (newVersion != ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40) {
+        // Transactions are only allowed when the featureCompatibilityVersion is 4.0, so abort
+        // any open transactions when downgrading featureCompatibilityVersion.
+        SessionKiller::Matcher matcherAllSessions(
+            KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
+        killSessionsLocalKillTransactions(opCtx, matcherAllSessions);
+    }
+}
+
+void FeatureCompatibilityVersion::onReplicationRollback(OperationContext* opCtx) {
+    const auto query = BSON("_id" << FeatureCompatibilityVersionParser::kParameterName);
+    const auto swFcv = repl::StorageInterface::get(opCtx)->findById(
+        opCtx, NamespaceString::kServerConfigurationNamespace, query["_id"]);
+    if (swFcv.isOK()) {
+        const auto featureCompatibilityVersion = swFcv.getValue();
+        auto swVersion = FeatureCompatibilityVersionParser::parse(featureCompatibilityVersion);
+        const auto memoryFcv = serverGlobalParams.featureCompatibility.getVersion();
+        if (swVersion.isOK() && (swVersion.getValue() != memoryFcv)) {
+            auto diskFcv = swVersion.getValue();
+            log() << "Setting featureCompatibilityVersion from '"
+                  << FeatureCompatibilityVersionParser::toString(memoryFcv) << "' to '"
+                  << FeatureCompatibilityVersionParser::toString(diskFcv)
+                  << "' as part of rollback.";
+            _setVersion(opCtx, diskFcv, boost::none);
+            // The rollback FCV is already in the stable snapshot.
+            stdx::lock_guard<SimpleMutex> lk(lastFCVUpdateTimestampMutex);
+            lastFCVUpdateTimestamp = Timestamp();
+        }
     }
 }
 
@@ -280,7 +320,7 @@ public:
                 featureCompatibilityVersionBuilder.append(
                     FeatureCompatibilityVersionParser::kVersionField,
                     FeatureCompatibilityVersionParser::kVersion40);
-                return;
+                break;
             case ServerGlobalParams::FeatureCompatibility::Version::kUpgradingTo40:
                 featureCompatibilityVersionBuilder.append(
                     FeatureCompatibilityVersionParser::kVersionField,
@@ -301,11 +341,39 @@ public:
                 featureCompatibilityVersionBuilder.append(
                     FeatureCompatibilityVersionParser::kVersionField,
                     FeatureCompatibilityVersionParser::kVersion36);
-                return;
+                break;
             case ServerGlobalParams::FeatureCompatibility::Version::kUnsetDefault36Behavior:
                 // getVersion() does not return this value.
                 MONGO_UNREACHABLE;
         }
+        // If the FCV has been recently set to the fully upgraded FCV but is not part of the
+        // majority snapshot, then if we do a binary upgrade, we may see the old FCV at startup.
+        // It is not safe to do oplog application on the new binary at that point.  So we make sure
+        // that when we report the FCV, it is in the majority snapshot.
+        // (The same consideration applies at downgrade, where if a recently-set fully downgraded
+        // FCV is not part of the majority snapshot, the downgraded binary will see the upgrade FCV
+        // and fail.)
+        const auto replCoordinator = repl::ReplicationCoordinator::get(opCtx);
+        const bool isReplSet = replCoordinator &&
+            replCoordinator->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
+        auto neededMajorityTimestamp = [] {
+            stdx::lock_guard<SimpleMutex> lk(lastFCVUpdateTimestampMutex);
+            return lastFCVUpdateTimestamp;
+        }();
+        if (isReplSet && !neededMajorityTimestamp.isNull()) {
+            auto status = replCoordinator->waitUntilOpTimeForRead(
+                opCtx,
+                repl::ReadConcernArgs(
+                    repl::OpTime(neededMajorityTimestamp, repl::OpTime::kUninitializedTerm),
+                    repl::ReadConcernLevel::kMajorityReadConcern));
+            // If majority reads are not supported, we will take a full snapshot on clean shutdown
+            // and the new FCV will be included, so upgrade is possible.
+            if (status.code() != ErrorCodes::ReadConcernMajorityNotEnabled)
+                uassertStatusOK(
+                    status.withContext("Most recent 'featureCompatibilityVersion' was not in the "
+                                       "majority snapshot on this node"));
+        }
+        return;
     }
 
     virtual Status set(const BSONElement& newValueElement) {

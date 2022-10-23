@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -66,6 +66,20 @@ __wt_seconds(WT_SESSION_IMPL *session, time_t *timep)
     __wt_epoch(session, &t);
 
     *timep = t.tv_sec;
+}
+
+/*
+ * __wt_seconds64 --
+ *     Return the seconds since the Epoch.
+ */
+void
+__wt_seconds64(WT_SESSION_IMPL *session, uint64_t *secondsp)
+{
+    struct timespec t;
+
+    __wt_epoch(session, &t);
+
+    *secondsp = (uint64_t)(t.tv_sec + t.tv_nsec / WT_BILLION);
 }
 
 /*

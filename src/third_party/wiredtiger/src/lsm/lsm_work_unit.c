@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -698,7 +698,7 @@ __wt_lsm_free_chunks(WT_SESSION_IMPL *session, WT_LSM_TREE *lsm_tree)
          * prevents us from removing a file that hot backup already
          * knows about.
          */
-        if (S2C(session)->hot_backup)
+        if (S2C(session)->hot_backup_start != 0)
             break;
 
         /*

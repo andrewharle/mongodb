@@ -59,6 +59,13 @@ std::vector<HostAndPort> basicSeedsBuilder() {
 const std::vector<HostAndPort> basicSeeds = basicSeedsBuilder();
 const std::set<HostAndPort> basicSeedsSet(basicSeeds.begin(), basicSeeds.end());
 
+struct StatsForTest {
+    std::shared_ptr<ReplicaSetMonitorManagerStats> managerStats =
+        std::make_shared<ReplicaSetMonitorManagerStats>();
+    std::shared_ptr<ReplicaSetMonitorStats> stats =
+        std::make_shared<ReplicaSetMonitorStats>(managerStats);
+};
+
 // NOTE: Unless stated otherwise, all tests assume exclusive access to state belongs to the
 // current (only) thread, so they do not lock SetState::mutex before examining state. This is
 // NOT something that non-test code should do.
@@ -347,7 +354,8 @@ TEST(ReplicaSetMonitor, IsMasterSecondaryWithTags) {
 
 TEST(ReplicaSetMonitor, CheckAllSeedsSerial) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -373,7 +381,8 @@ TEST(ReplicaSetMonitor, CheckAllSeedsSerial) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
     }
 
     NextStep ns = refresher.getNextStep();
@@ -394,7 +403,8 @@ TEST(ReplicaSetMonitor, CheckAllSeedsSerial) {
 
 TEST(ReplicaSetMonitor, CheckAllSeedsParallel) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -429,7 +439,8 @@ TEST(ReplicaSetMonitor, CheckAllSeedsParallel) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
     }
 
     // Now all hosts have returned data
@@ -451,7 +462,8 @@ TEST(ReplicaSetMonitor, CheckAllSeedsParallel) {
 
 TEST(ReplicaSetMonitor, NoMasterInitAllUp) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -476,7 +488,8 @@ TEST(ReplicaSetMonitor, NoMasterInitAllUp) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
     }
 
     NextStep ns = refresher.getNextStep();
@@ -497,7 +510,8 @@ TEST(ReplicaSetMonitor, NoMasterInitAllUp) {
 
 TEST(ReplicaSetMonitor, MasterNotInSeeds_NoPrimaryInIsMaster) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -523,7 +537,8 @@ TEST(ReplicaSetMonitor, MasterNotInSeeds_NoPrimaryInIsMaster) {
                                                       << "c"
                                                       << "d")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
     }
 
     // Only look at "d" after exhausting all other hosts
@@ -544,7 +559,8 @@ TEST(ReplicaSetMonitor, MasterNotInSeeds_NoPrimaryInIsMaster) {
                                                   << "c"
                                                   << "d")
                                     << "ok"
-                                    << true));
+                                    << true),
+                               false);
 
 
     ns = refresher.getNextStep();
@@ -572,7 +588,8 @@ TEST(ReplicaSetMonitor, MasterNotInSeeds_NoPrimaryInIsMaster) {
 
 TEST(ReplicaSetMonitor, MasterNotInSeeds_PrimaryInIsMaster) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -606,7 +623,8 @@ TEST(ReplicaSetMonitor, MasterNotInSeeds_PrimaryInIsMaster) {
                                                       << "c"
                                                       << "d")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
     }
 
     NextStep ns = refresher.getNextStep();
@@ -637,7 +655,8 @@ TEST(ReplicaSetMonitor, SlavesUsableEvenIfNoMaster) {
     std::set<HostAndPort> seeds;
     seeds.insert(HostAndPort("a"));
     SetStatePtr state = std::make_shared<SetState>("name", seeds);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet());
 
@@ -659,7 +678,8 @@ TEST(ReplicaSetMonitor, SlavesUsableEvenIfNoMaster) {
                                     << "hosts"
                                     << BSON_ARRAY("a")
                                     << "ok"
-                                    << true));
+                                    << true),
+                               false);
 
     // Check intended conditions for entry to refreshUntilMatches.
     ASSERT(state->currentScan->hostsToScan.empty());
@@ -678,7 +698,8 @@ TEST(ReplicaSetMonitor, SlavesUsableEvenIfNoMaster) {
 // Test multiple nodes that claim to be master (we use a last-wins policy)
 TEST(ReplicaSetMonitor, MultipleMasterLastNodeWins) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -713,7 +734,8 @@ TEST(ReplicaSetMonitor, MultipleMasterLastNodeWins) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         // Ensure the set primary is the host we just got a reply from
         HostAndPort currentPrimary = state->getMatchingHost(primaryOnly);
@@ -740,7 +762,8 @@ TEST(ReplicaSetMonitor, MultipleMasterLastNodeWins) {
 // Test nodes disagree about who is in the set, master is source of truth
 TEST(ReplicaSetMonitor, MasterIsSourceOfTruth) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     BSONArray primaryHosts = BSON_ARRAY("a"
                                         << "b"
@@ -764,7 +787,8 @@ TEST(ReplicaSetMonitor, MasterIsSourceOfTruth) {
                                         << "hosts"
                                         << (primary ? primaryHosts : secondaryHosts)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         ns = refresher.getNextStep();
     }
@@ -780,7 +804,8 @@ TEST(ReplicaSetMonitor, MasterIsSourceOfTruth) {
 // Test multiple master nodes that disagree about set membership
 TEST(ReplicaSetMonitor, MultipleMastersDisagree) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     BSONArray hostsForSeed[3];
     hostsForSeed[0] = BSON_ARRAY("a"
@@ -818,7 +843,8 @@ TEST(ReplicaSetMonitor, MultipleMastersDisagree) {
                                         << "hosts"
                                         << hostsForSeed[i % 2]
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         // Ensure the primary is the host we just got a reply from
         HostAndPort currentPrimary = state->getMatchingHost(primaryOnly);
@@ -854,7 +880,8 @@ TEST(ReplicaSetMonitor, MultipleMastersDisagree) {
                                     << "hosts"
                                     << hostsForSeed[0]
                                     << "ok"
-                                    << true));
+                                    << true),
+                               false);
 
     // scan should be complete
     ns = refresher.getNextStep();
@@ -876,7 +903,8 @@ TEST(ReplicaSetMonitor, MultipleMastersDisagree) {
 // Ensure getMatchingHost returns hosts even if scan is ongoing
 TEST(ReplicaSetMonitor, GetMatchingDuringScan) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     const ReadPreferenceSetting primaryOnly(ReadPreference::PrimaryOnly, TagSet());
     const ReadPreferenceSetting secondaryOnly(ReadPreference::SecondaryOnly, TagSet());
@@ -910,7 +938,8 @@ TEST(ReplicaSetMonitor, GetMatchingDuringScan) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         bool hasPrimary = !(state->getMatchingHost(primaryOnly).empty());
         bool hasSecondary = !(state->getMatchingHost(secondaryOnly).empty());
@@ -956,7 +985,8 @@ TEST(ReplicaSetMonitor, OutOfBandFailedHost) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         if (i >= 1) {
             HostAndPort a("a");
@@ -977,7 +1007,8 @@ TEST(ReplicaSetMonitor, OutOfBandFailedHost) {
 // Newly elected primary with electionId >= maximum electionId seen by the Refresher
 TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -1015,7 +1046,8 @@ TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
                                        << "electionId"
                                        << OID::fromTerm(i)  // electionId must increase every cycle.
                                        << "ok"
-                                       << true));
+                                       << true),
+                                   false);
 
         // Ensure the set primary is the host we just got a reply from
         HostAndPort currentPrimary = state->getMatchingHost(primaryOnly);
@@ -1042,7 +1074,8 @@ TEST(ReplicaSetMonitorTests, NewPrimaryWithMaxElectionId) {
 // Ignore electionId of secondaries
 TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     set<HostAndPort> seen;
 
@@ -1073,7 +1106,8 @@ TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
     }
 
     // check that the SetState's maxElectionId == primary's electionId
@@ -1088,7 +1122,8 @@ TEST(ReplicaSetMonitorTests, IgnoreElectionIdFromSecondaries) {
 // Stale Primary with obsolete electionId
 TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     const OID firstElectionId = OID::gen();
     const OID secondElectionId = OID::gen();
@@ -1120,7 +1155,8 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         Node* node = state->findNode(ns.host);
         ASSERT(node);
@@ -1151,7 +1187,8 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         Node* node = state->findNode(ns.host);
         ASSERT(node);
@@ -1182,7 +1219,8 @@ TEST(ReplicaSetMonitorTests, StalePrimaryWithObsoleteElectionId) {
                                                       << "b"
                                                       << "c")
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         Node* node = state->findNode(ns.host);
         ASSERT(node);
@@ -1215,7 +1253,8 @@ TEST(ReplicaSetMonitor, PrimaryIsUpCheck) {
  */
 TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasNewerConfigVersion) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     auto ns = refresher.getNextStep();
     ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
@@ -1238,7 +1277,8 @@ TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasNewerConfigVersion) {
                                                   << "b"
                                                   << "c")
                                     << "ok"
-                                    << true));
+                                    << true),
+                               false);
 
     // check that the SetState's maxElectionId == primary's electionId
     ASSERT_EQUALS(state->maxElectionId, OID("7fffffff0000000000000001"));
@@ -1264,7 +1304,8 @@ TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasNewerConfigVersion) {
                                                   << "b"
                                                   << "c")
                                     << "ok"
-                                    << true));
+                                    << true),
+                               false);
 
     ASSERT_EQUALS(state->maxElectionId, primaryElectionId);
     ASSERT_EQUALS(state->configVersion, 2);
@@ -1275,7 +1316,8 @@ TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasNewerConfigVersion) {
  */
 TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasOlderConfigVersion) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     auto ns = refresher.getNextStep();
     ASSERT_EQUALS(ns.step, NextStep::CONTACT_HOST);
@@ -1299,7 +1341,8 @@ TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasOlderConfigVersion) {
                                                   << "b"
                                                   << "c")
                                     << "ok"
-                                    << true));
+                                    << true),
+                               false);
 
     ASSERT_EQUALS(state->maxElectionId, primaryElectionId);
     ASSERT_EQUALS(state->configVersion, 2);
@@ -1322,7 +1365,8 @@ TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasOlderConfigVersion) {
                                                   << "b"
                                                   << "c")
                                     << "ok"
-                                    << true));
+                                    << true),
+                               false);
 
     ASSERT_EQUALS(state->maxElectionId, primaryElectionId);
     ASSERT_EQUALS(state->configVersion, 2);
@@ -1333,7 +1377,8 @@ TEST(ReplicaSetMonitorTests, TwoPrimaries2ndHasOlderConfigVersion) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSMatch) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
     repl::OpTime opTime{Timestamp{10, 10}, 10};
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(100));
@@ -1365,7 +1410,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSMatch) {
                                                                 << "opTime"
                                                                 << opTime)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
         ns = refresher.getNextStep();
     }
 
@@ -1385,7 +1431,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSMatch) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSNoMatch) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
     repl::OpTime opTime{Timestamp{10, 10}, 10};
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(200));
@@ -1415,7 +1462,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNoMatch) {
                                                                 << "opTime"
                                                                 << opTime)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         ns = refresher.getNextStep();
     }
@@ -1436,7 +1484,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNoMatch) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSNoPrimaryMatch) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
     repl::OpTime opTime{Timestamp{10, 10}, 10};
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(200));
@@ -1467,7 +1516,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNoPrimaryMatch) {
                                                 << "opTime"
                                                 << opTime)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         ns = refresher.getNextStep();
     }
@@ -1490,7 +1540,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNoPrimaryMatch) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSAllFailed) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
     repl::OpTime opTime{Timestamp{10, 10}, 10};
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(200));
@@ -1521,7 +1572,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSAllFailed) {
                                                 << "opTime"
                                                 << opTime)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
 
         ns = refresher.getNextStep();
     }
@@ -1543,7 +1595,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSAllFailed) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSAllButPrimaryFailed) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
     repl::OpTime opTime{Timestamp{10, 10}, 10};
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(200));
@@ -1573,7 +1626,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSAllButPrimaryFailed) {
                                                                 << "opTime"
                                                                 << opTime)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
         ns = refresher.getNextStep();
     }
 
@@ -1595,7 +1649,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSAllButPrimaryFailed) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSOneSecondaryFailed) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
     repl::OpTime opTime{Timestamp{10, 10}, 10};
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(200));
@@ -1625,7 +1680,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSOneSecondaryFailed) {
                                                                 << "opTime"
                                                                 << opTime)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
         ns = refresher.getNextStep();
     }
 
@@ -1646,7 +1702,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSOneSecondaryFailed) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSNonStaleSecondaryMatched) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
     repl::OpTime opTime{Timestamp{10, 10}, 10};
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(200));
@@ -1678,7 +1735,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNonStaleSecondaryMatched) {
                                                 << "opTime"
                                                 << opTime)
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
         ns = refresher.getNextStep();
     }
 
@@ -1698,7 +1756,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNonStaleSecondaryMatched) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSNoLastWrite) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(200));
     BSONArray hosts = BSON_ARRAY("a"
@@ -1720,7 +1779,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNoLastWrite) {
                                         << "hosts"
                                         << hosts
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
         ns = refresher.getNextStep();
     }
 
@@ -1739,7 +1799,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSNoLastWrite) {
  */
 TEST(ReplicaSetMonitor, MaxStalenessMSZeroNoLastWrite) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     const ReadPreferenceSetting secondary(ReadPreference::SecondaryOnly, TagSet(), Seconds(0));
     BSONArray hosts = BSON_ARRAY("a"
@@ -1761,7 +1822,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSZeroNoLastWrite) {
                                         << "hosts"
                                         << hosts
                                         << "ok"
-                                        << true));
+                                        << true),
+                                   false);
         ns = refresher.getNextStep();
     }
 
@@ -1780,7 +1842,8 @@ TEST(ReplicaSetMonitor, MaxStalenessMSZeroNoLastWrite) {
  */
 TEST(ReplicaSetMonitor, MinOpTimeMatched) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     repl::OpTime minOpTimeSetting{Timestamp{10, 10}, 10};
     repl::OpTime opTimeNonStale{Timestamp{10, 10}, 11};
@@ -1810,7 +1873,7 @@ TEST(ReplicaSetMonitor, MinOpTimeMatched) {
                                                             : opTimeStale.toBSON()))
                             << "ok"
                             << true);
-        refresher.receivedIsMaster(ns.host, -1, bson);
+        refresher.receivedIsMaster(ns.host, -1, bson, false);
         ns = refresher.getNextStep();
     }
 
@@ -1825,7 +1888,8 @@ TEST(ReplicaSetMonitor, MinOpTimeMatched) {
  */
 TEST(ReplicaSetMonitor, MinOpTimeNotMatched) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     repl::OpTime minOpTimeSetting{Timestamp{10, 10}, 10};
     repl::OpTime opTimeNonStale{Timestamp{10, 10}, 11};
@@ -1855,7 +1919,7 @@ TEST(ReplicaSetMonitor, MinOpTimeNotMatched) {
                                                             : opTimeStale.toBSON()))
                             << "ok"
                             << true);
-        refresher.receivedIsMaster(ns.host, -1, bson);
+        refresher.receivedIsMaster(ns.host, -1, bson, false);
         ns = refresher.getNextStep();
     }
 
@@ -1870,7 +1934,8 @@ TEST(ReplicaSetMonitor, MinOpTimeNotMatched) {
  */
 TEST(ReplicaSetMonitor, MinOpTimeIgnored) {
     SetStatePtr state = std::make_shared<SetState>("name", basicSeedsSet);
-    Refresher refresher(state);
+    StatsForTest stats;
+    Refresher refresher(state, nullptr, nullptr, stats.stats.get());
 
     repl::OpTime minOpTimeSetting{Timestamp{10, 10}, 10};
     repl::OpTime opTimeStale{Timestamp{10, 10}, 9};
@@ -1905,7 +1970,7 @@ TEST(ReplicaSetMonitor, MinOpTimeIgnored) {
                                     << opTimeStale.toBSON())
                             << "ok"
                             << true);
-        refresher.receivedIsMaster(ns.host, -1, bson);
+        refresher.receivedIsMaster(ns.host, -1, bson, false);
         ns = refresher.getNextStep();
     }
 

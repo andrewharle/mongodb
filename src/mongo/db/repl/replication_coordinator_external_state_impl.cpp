@@ -58,6 +58,7 @@
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/op_observer.h"
 #include "mongo/db/repair_database.h"
+#include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/drop_pending_collection_reaper.h"
 #include "mongo/db/repl/isself.h"
@@ -73,7 +74,6 @@
 #include "mongo/db/repl/storage_interface.h"
 #include "mongo/db/repl/sync_tail.h"
 #include "mongo/db/s/balancer/balancer.h"
-#include "mongo/db/s/chunk_splitter.h"
 #include "mongo/db/s/config/sharding_catalog_manager.h"
 #include "mongo/db/s/sharding_initialization_mongod.h"
 #include "mongo/db/s/sharding_state_recovery.h"
@@ -424,21 +424,23 @@ Status ReplicationCoordinatorExternalStateImpl::initializeReplSetStorage(Operati
                            "initiate oplog entry",
                            NamespaceString::kRsOplogNamespace.toString(),
                            [this, &opCtx, &config] {
+                               // Permit writing to the oplog before we step up to primary.
+                               AllowNonLocalWritesBlock allowNonLocalWrites(opCtx);
                                Lock::GlobalWrite globalWrite(opCtx);
 
                                WriteUnitOfWork wuow(opCtx);
                                Helpers::putSingleton(opCtx, configCollectionName, config);
-                               const auto msgObj = BSON("msg"
-                                                        << "initiating set");
+                               const auto msgObj = BSON("msg" << kInitiatingSetMsg);
                                _service->getOpObserver()->onOpMessage(opCtx, msgObj);
                                wuow.commit();
-                               // ReplSetTest assumes that immediately after the replSetInitiate
-                               // command returns, it can allow other nodes to initial sync with no
-                               // retries and they will succeed.  Unfortunately, initial sync will
-                               // fail if it finds its sync source has an empty oplog.  Thus, we
-                               // need to wait here until the seed document is visible in our oplog.
-                               _storageInterface->waitForAllEarlierOplogWritesToBeVisible(opCtx);
                            });
+
+        // ReplSetTest assumes that immediately after the replSetInitiate
+        // command returns, it can allow other nodes to initial sync with no
+        // retries and they will succeed.  Unfortunately, initial sync will
+        // fail if it finds its sync source has an empty oplog.  Thus, we
+        // need to wait here until the seed document is visible in our oplog.
+        _storageInterface->waitForAllEarlierOplogWritesToBeVisible(opCtx);
 
         // Update unique index format version for all non-replicated collections. It is possible
         // for MongoDB to have a "clean startup", i.e., no non-local databases, but still have
@@ -773,7 +775,6 @@ void ReplicationCoordinatorExternalStateImpl::shardingOnStepDownHook() {
     if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
         Balancer::get(_service)->interruptBalancer();
     } else if (ShardingState::get(_service)->enabled()) {
-        ChunkSplitter::get(_service).onStepDown();
         CatalogCacheLoader::get(_service).onStepDown();
     }
 
@@ -857,7 +858,6 @@ void ReplicationCoordinatorExternalStateImpl::_shardingOnTransitionToPrimaryHook
         }
 
         CatalogCacheLoader::get(_service).onStepUp();
-        ChunkSplitter::get(_service).onStepUp();
     } else {  // unsharded
         if (auto validator = LogicalTimeValidator::get(_service)) {
             validator->enableKeyGenerator(opCtx, true);

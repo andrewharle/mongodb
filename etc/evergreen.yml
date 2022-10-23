@@ -276,7 +276,7 @@ variables:
   - name: external_auth
   - name: external_auth_windows
     distros:
-    - windows-64-2016
+    - windows-2016-dc
   - name: jsCore
   - name: jsCore_ese
   - name: jsCore_decimal
@@ -578,31 +578,6 @@ functions:
         https_validate_certificates = False
         EOF
 
-  "call BF Suggestion service":
-    command: shell.exec
-    params:
-      working_dir: src
-      shell: bash
-      silent: true
-      script: |
-        report_file="report.json"
-        # Check if the report file exists and has failures.
-        if [ -f $report_file ] && grep -Eq "\"failures\": [1-9]" $report_file; then
-          # Calling the BF Suggestion server endpoint to start feature extraction.
-          payload="{\"task_id\": \"${task_id}\", \"execution\": ${execution}}"
-          echo "Sending task info to the BF suggestion service"
-          # The --user option is passed through stdin to avoid showing in process list.
-          user_option="--user ${bfsuggestion_user}:${bfsuggestion_password}"
-          curl --header "Content-Type: application/json" \
-               --data "$payload" \
-               --max-time 10 \
-               --silent \
-               --show-error \
-               --config - \
-               https://bfsuggestion.corp.mongodb.com/tasks <<< $user_option
-          echo "Request to BF Suggestion service status: $?"
-        fi
-
   "upload debugsymbols" : &upload_debugsymbols
     command: s3.put
     params:
@@ -810,17 +785,7 @@ functions:
         set -o verbose
         set -o errexit
 
-        # For patch builds determine if we can bypass compile.
-        if [[ "${is_patch}" = "true" && "${task_name}" = "compile" ]]; then
-          ${activate_virtualenv}
-          $python buildscripts/bypass_compile_and_fetch_binaries.py            \
-            --project ${project}                                               \
-            --buildVariant ${build_variant}                                    \
-            --revision ${revision}                                             \
-            --patchFile patch_files.txt                                        \
-            --outFile bypass_compile_expansions.yml                            \
-            --jsonArtifact artifacts.json
-        fi
+        # Do nothing, bypass_compile is disabled.
 
   "send benchmark results" :
     command: json.send
@@ -879,7 +844,6 @@ functions:
 
         ${activate_virtualenv}
         pip install -r buildscripts/requirements.txt
-        pip install boto3==1.5.27
 
   "execute resmoke tests" : &execute_resmoke_tests
     command: shell.exec
@@ -894,7 +858,6 @@ functions:
         # Install any pip modules needed by the scripts or tests
         ${activate_virtualenv}
         pip install -r buildscripts/requirements.txt
-        pip install boto3==1.5.27
 
         if [[ ${disable_unit_tests|false} = "false" && ! -f ${skip_tests|/dev/null} ]]; then
 
@@ -957,12 +920,6 @@ functions:
           path_value="$path_value:${task_path_suffix}"
         fi
 
-        if [ "${is_patch}" = "true" ]; then
-          extra_args="$extra_args --tagFile=etc/test_lifecycle.yml --patchBuild"
-        else
-          extra_args="$extra_args --tagFile=etc/test_retrial.yml"
-        fi
-
         resmoke_cmd_args="${resmoke_args}"
 
         # The "resmoke_wrapper" expansion is used by the 'burn_in_tests' task to wrap the resmoke.py
@@ -972,7 +929,6 @@ functions:
         PATH="$path_value"                              \
             AWS_PROFILE=${aws_profile_remote}           \
             ${gcov_environment}                         \
-            ${rlp_environment}                          \
             ${lang_environment}                         \
             ${san_options}                              \
             ${san_symbolizer}                           \
@@ -1732,7 +1688,7 @@ functions:
       script: |
         set -o errexit
 
-        export KITCHEN_ARTIFACTS_URL="https://s3.amazonaws.com/mciuploads/${project}/${build_variant}/${revision}/artifacts/${build_id}.tgz"
+        export KITCHEN_ARTIFACTS_URL="https://s3.amazonaws.com/mciuploads/${project}/${build_variant}/${revision}/artifacts/${build_id}-packages.tgz"
         export KITCHEN_SECURITY_GROUP="${kitchen_security_group}"
         export KITCHEN_SSH_KEY_ID="${kitchen_ssh_key_id}"
         export KITCHEN_SUBNET="${kitchen_subnet}"
@@ -1758,29 +1714,6 @@ functions:
 
         kitchen destroy "${packager_distro}"\$ || true
         test "$verified" = "true"
-
-  "fetch test_lifecycle.yml":
-  - command: shell.exec
-    type: test
-    params:
-      working_dir: src
-      script: |
-        set -o verbose
-
-        ${activate_virtualenv}
-        $python buildscripts/fetch_test_lifecycle.py                      \
-            --metadataRepo git@github.com:mongodb/mongo-test-metadata.git \
-            --lifecycleFile etc/test_lifecycle.yml                        \
-            --referencesFile references.yml                               \
-            --destinationFile etc/test_lifecycle.yml                      \
-            --revision ${revision}                                        \
-            ${project}
-        exit_code=$?
-        if [ ${fail_task_on_error|false} = true ]; then
-          exit $exit_code
-        else
-          exit 0
-        fi
 
   "copy ec2 monitor files": &copy_ec2_monitor_files
     command: shell.exec
@@ -1815,14 +1748,14 @@ functions:
             --verbose                                        \
             --userHost $USER@$private_ip_address             \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmd"
           $python buildscripts/remote_operations.py          \
             --verbose                                        \
             --userHost $USER@$private_ip_address             \
             --operation "copy_from"                          \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --file ec2_monitor_files.tgz
           sleep 30
         done
@@ -1890,7 +1823,7 @@ functions:
             --userHost $USER@${private_ip_address}           \
             --operation "copy_to"                            \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --file buildscripts/mount_drives.sh
 
     - command: shell.exec
@@ -1927,7 +1860,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -1954,7 +1887,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -1977,7 +1910,7 @@ functions:
             --userHost $USER@${private_ip_address}           \
             --operation "copy_to"                            \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             $file_param                                      \
             --remoteDir ${remote_dir}
 
@@ -2001,7 +1934,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2039,7 +1972,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2064,7 +1997,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|3}                       \
+            --access_retry_count ${ssh_retries|3}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2106,7 +2039,8 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --op_retry_count 2                               \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - command: shell.exec
@@ -2177,7 +2111,7 @@ functions:
               --verbose                                        \
               --userHost $USER@${private_ip_address}           \
               --sshConnectionOptions "$ssh_connection_options" \
-              --retries ${ssh_retries|0}                       \
+              --access_retry_count ${ssh_retries|0}            \
               --commands "$cmds"
           fi
 
@@ -2200,7 +2134,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries|0}                       \
+            --access_retry_count ${ssh_retries|0}            \
             --commands "$cmds"
 
     - *copy_ec2_monitor_files
@@ -2253,7 +2187,7 @@ functions:
           --verbose                                        \
           --userHost $USER@${private_ip_address}           \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
+          --access_retry_count ${ssh_retries|0}            \
           --commands "$cmd"
 
   "copy EC2 artifacts": &copy_ec2_artifacts
@@ -2273,7 +2207,7 @@ functions:
           --userHost $USER@${private_ip_address}           \
           --operation "copy_from"                          \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries|0}                       \
+          --access_retry_count ${ssh_retries|0}            \
           --file ec2_artifacts.tgz
 
   "cleanup EC2 instance": &cleanup_ec2_instance
@@ -2315,7 +2249,7 @@ functions:
           --verbose                                        \
           --userHost $USER@${private_ip_address}           \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries}                         \
+          --access_retry_count ${ssh_retries}              \
           --commands "$cmds"                               \
           --commandDir $remote_dir
 
@@ -2336,7 +2270,7 @@ functions:
           --userHost $USER@${private_ip_address}           \
           --operation "copy_from"                          \
           --sshConnectionOptions "$ssh_connection_options" \
-          --retries ${ssh_retries}                         \
+          --access_retry_count ${ssh_retries}              \
           --file "$remote_dir/*.core"                      \
           --file "$remote_dir/*.mdmp"
         # Since both type of core files do not exist on the same host, this command
@@ -2876,7 +2810,7 @@ functions:
               --userHost $USER@${private_ip_address}           \
               --operation "copy_to"                            \
               --sshConnectionOptions "$ssh_connection_options" \
-              --retries ${ssh_retries}                         \
+              --access_retry_count ${ssh_retries}              \
               $file_param                                      \
               --remoteDir $remote_dir
           fi
@@ -2894,7 +2828,7 @@ functions:
             --verbose                                        \
             --userHost $USER@${private_ip_address}           \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries}                         \
+            --access_retry_count ${ssh_retries}              \
             --commands "$cmds"
 
           $python buildscripts/remote_operations.py          \
@@ -2902,7 +2836,7 @@ functions:
             --userHost $USER@${private_ip_address}           \
             --operation "copy_from"                          \
             --sshConnectionOptions "$ssh_connection_options" \
-            --retries ${ssh_retries}                         \
+            --access_retry_count ${ssh_retries}              \
             --file "$remote_dir/debugger*.*"                 \
             --file "$remote_dir/*.$core_ext"
         fi
@@ -3028,7 +2962,6 @@ post:
   - func: "attach report"
   - func: "attach artifacts"
   - func: "save ec2 task artifacts"
-  - func: "call BF Suggestion service"
   - func: "kill processes"
   - func: "save local client logs"
   - func: "save code coverage data"
@@ -3054,27 +2987,6 @@ timeout:
 #######################################
 #               Tasks                 #
 #######################################
-
-## The test_lifecycle_excluded_tasks are a list of tasks names which include:
-##   - Non jstests, i.e., compile, unittests
-##   - Non standard jstests, i.e., jstestfuzz
-## Note that the task name supports glob patterns.
-test_lifecycle_excluded_tasks:
-- burn_in_tests
-- compile*
-- benchmarks*
-- dbtest*
-- idl_tests
-- integration*
-- jepsen*
-- jstestfuzz*
-- lint
-- mongos*
-- package
-- push
-- rollback_fuzzer*
-- unittests*
-- update_fuzzer*
 
 tasks:
 
@@ -3158,12 +3070,6 @@ tasks:
           $python ../buildscripts/make_archive.py -o mongodb-shell.${ext|tgz} $(find mongodb-* -type f)
           cd ..
 
-  # Test lifecycle is temporarily disabled to reduce load on Evergreen API.
-  # - func: "fetch test_lifecycle.yml"
-  #   vars:
-  #     # Do not fail the task if we fail to fetch the test_lifecycle.yml file
-  #     fail_task_on_error: false
-
     - command: archive.targz_pack
       params:
         target: "artifacts.tgz"
@@ -3187,20 +3093,35 @@ tasks:
           - "./etc/pip/**"
           - "./etc/*san.suppressions"
           - "./etc/repo_config.yaml"
-          - "./etc/test_lifecycle.yml"
-          - "./etc/test_retrial.yml"
           - "./build/integration_tests/**"
           - "./build/integration_tests.txt"
           - "./build/**.gcno"
           - "repo/**"
           - "src/mongo/util/options_parser/test_config_files/**"
-          - "library_dependency_graph.json"
           - "src/third_party/JSON-Schema-Test-Suite/tests/draft4/**"
           - "bypass_compile_expansions.yml"
           - "patch_files.txt"
           - "artifacts.json"
         exclude_files:
           - "*_test.pdb"
+    - command: archive.targz_pack
+      params:
+        target: "packages.tgz"
+        source_dir: "src"
+        include:
+          - "repo/**"
+          - "./**.msi"
+    - command: s3.put
+      params:
+        optional: true
+        aws_key: ${aws_key}
+        aws_secret: ${aws_secret}
+        local_file: packages.tgz
+        remote_file: ${project}/${build_variant}/${revision}/artifacts/${build_id}-packages.tgz
+        bucket: mciuploads
+        permissions: public-read
+        content_type: application/tar
+        display_name: Packages
     - func: "upload debugsymbols"
     - command: s3.put
       params:
@@ -3267,17 +3188,6 @@ tasks:
           --use-new-tools
           --build-mongoreplay="${build_mongoreplay}"
           --detect-odr-violations
-    - command: s3.put
-      params:
-        aws_key: ${aws_key}
-        aws_secret: ${aws_secret}
-        local_file: src/library_dependency_graph.json
-        remote_file: ${project}/${build_variant}/${revision}/library_dependency_graph.${build_id}.json
-        bucket: mciuploads
-        permissions: public-read
-        content_type: application/json
-        display_name: Library Dependency Graph (library_dependency_graph.json)
-        build_variants: [enterprise-rhel-70-64-bit-kitchen-sink] # This must be the Dagger variant
 
 ## unittests - run unittests ##
 - name: unittests
@@ -3673,21 +3583,6 @@ tasks:
       jepsen_read_with_find_and_modify: --read-with-find-and-modify
       jepsen_storage_engine: --storage-engine wiredTiger
       jepsen_test_name: register
-
-- <<: *run_jepsen_template
-  name: jepsen_register_linearizableRead
-  commands:
-  - func: "do setup"
-  - func: "do jepsen setup"
-  - func: "run jepsen test"
-    vars:
-      <<: *jepsen_config_vars
-      jepsen_read_concern: --read-concern linearizable
-      jepsen_storage_engine: --storage-engine mmapv1
-      jepsen_test_name: register
-      # Running Jepsen when using the MMAPv1 storage engine for longer periods of time can lead to
-      # out of memory issues and task timeouts during the analysis phase.
-      jepsen_time_limit: --time-limit 300
 
 - <<: *run_jepsen_template
   name: jepsen_register_linearizableRead_WT
@@ -4578,6 +4473,16 @@ tasks:
       resmoke_args: --suites=replica_sets_multi_stmt_txn_jscore_passthrough --storageEngine=wiredTiger
 
 - <<: *task_template
+  name: replica_sets_abort_multi_stmt_txn_jscore_passthrough
+  depends_on:
+  - name: jsCore
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=replica_sets_abort_multi_stmt_txn_jscore_passthrough --storageEngine=wiredTiger
+
+- <<: *task_template
   name: replica_sets_initsync_jscore_passthrough
   depends_on:
   - name: jsCore
@@ -4760,6 +4665,16 @@ tasks:
       fallback_num_sub_suites: 4
 
 - <<: *task_template
+  name: sharding_hello_failures
+  depends_on:
+  - name: jsCore
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=sharding_hello_failures --storageEngine=wiredTiger
+
+- <<: *task_template
   name: parallel
   depends_on:
   - name: jsCore
@@ -4827,6 +4742,15 @@ tasks:
   - func: "run tests"
     vars:
       resmoke_args: --suites=concurrency_replication_multi_stmt_txn --storageEngine=wiredTiger
+      resmoke_jobs_max: 1
+
+- <<: *task_template
+  name: concurrency_replication_abort_multi_stmt_txn
+  commands:
+  - func: "do setup"
+  - func: "run tests"
+    vars:
+      resmoke_args: --suites=concurrency_replication_abort_multi_stmt_txn --storageEngine=wiredTiger
       resmoke_jobs_max: 1
 
 - <<: *task_template
@@ -4928,14 +4852,6 @@ tasks:
     vars:
       resmoke_args: --suites=concurrency_simultaneous --storageEngine=wiredTiger
       resmoke_jobs_max: 1
-
-- <<: *task_template
-  name: rlp
-  commands:
-  - func: "do setup"
-  - func: "run tests"
-    vars:
-      resmoke_args: --suites=rlp --storageEngine=wiredTiger
 
 - <<: *task_template
   name: read_concern_linearizable_passthrough
@@ -5621,6 +5537,7 @@ tasks:
 - name: push
   patchable: false
   depends_on:
+  - name: compile
   - name: jsCore
   - name: dbtest
   - name: replica_sets_jscore_passthrough
@@ -5658,6 +5575,8 @@ tasks:
 
           cat <<EOF > notary_env.sh
           export NOTARY_TOKEN=${signing_auth_token_40}
+          export BARQUE_USERNAME=${barque_user}
+          export BARQUE_API_KEY=${barque_api_key}
           EOF
 
           echo "${signing_auth_token_40}" > signing_auth_token
@@ -5683,7 +5602,7 @@ tasks:
              CURATOR_RELEASE=${curator_release|"37d930ea2eeb27acb3782f1aa4d69da1e9dac223"}
              curl -L -O http://boxes.10gen.com/build/curator/curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
              tar -zxvf curator-dist-rhel70-$CURATOR_RELEASE.tar.gz
-             ./curator repo --config ./etc/repo_config.yaml --distro ${packager_distro} --edition ${repo_edition} --version ${version} --arch ${packager_arch} --packages repo
+             ./curator repo submit --service ${barque_url} --config ./etc/repo_config.yaml --distro ${packager_distro} --edition ${repo_edition} --version ${version} --arch ${packager_arch} --packages https://s3.amazonaws.com/mciuploads/${project}/${build_variant}/${revision}/artifacts/${build_id}-packages.tgz
           fi
 
     # Put the binaries tarball/zipfile
@@ -6079,67 +5998,6 @@ tasks:
             - {'source': {'path': '${push_path}-STAGE/${push_name}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}-${task_id}.${ext|tgz}.md5', 'bucket': 'build-push-testing'},
                'destination': {'path': '${push_path}/mongodb-${push_name}-${push_arch}-debugsymbols-${suffix}.${ext|tgz}.md5', 'bucket': '${push_bucket}'}}
 
-- name: fetch_test_lifecycle
-  depends_on: []
-  commands:
-  - func: "git get project"
-  - func: "fetch test_lifecycle.yml"
-    vars:
-      # This task is meant to fail if there is an error while fetching test_lifecycle.yml since
-      # the compile task won't fail.
-      fail_task_on_error: true
-
-- name: update_test_lifecycle
-  exec_timeout_secs: 21600 # 6 hour timeout for the task overall
-  depends_on: []
-  commands:
-  - func: "git get project"
-  - func: "configure evergreen api credentials"
-  - command: shell.exec
-    timeout_secs: 14400 # Timeout if there is no output for 4 hours
-    type: test
-    params:
-      working_dir: src
-      silent: true
-      script: |
-        set -o errexit
-
-        # Set up the git ssh private key
-        mkdir -p ~/.ssh
-        echo -n "${testlifecycle_ssh_key}" > ~/.ssh/test_lifecycle.pem
-        chmod 0600 ~/.ssh/test_lifecycle.pem
-        export GIT_SSH_COMMAND="ssh -i ~/.ssh/test_lifecycle.pem"
-
-        # Create the jira credentials configuration file
-        cat > .jira.yml <<END_OF_CREDS
-        server: "https://jira.mongodb.org"
-        access_token: "${testlifecycle_jira_access_token}"
-        access_token_secret: "${testlifecycle_jira_access_token_secret}"
-        consumer_key: "${testlifecycle_jira_consumer_key}"
-        key_cert: |
-        $(echo "${testlifecycle_jira_key_certificate}" | sed  's/^/  /')
-        END_OF_CREDS
-
-        set -o verbose
-
-        ${activate_virtualenv}
-        # Install Python modules to support OAuth with pip until it is available in the toolchain.
-        pip install cryptography==1.7.2 pyjwt==1.5.3
-
-        # We use a small batch size to avoid hitting the load balancer timeout if the Evergreen
-        # API query is not fast enough.
-        # Evergreen executable is in $HOME.
-        PATH=$PATH:$HOME $python buildscripts/update_test_lifecycle.py  \
-            --project ${project}                                        \
-            --requestBatchSize 20                                       \
-            --commit                                                    \
-            --resmokeTagFile "etc/test_lifecycle.yml"                   \
-            --metadataRepo "git@github.com:mongodb/mongo-test-metadata" \
-            --referencesFile "references.yml"                           \
-            --gitUserName "Test Lifecycle"                              \
-            --gitUserEmail "build+testlifecycle@mongodb.com"            \
-            --jiraConfig .jira.yml
-
 
 #######################################
 #             Task Groups             #
@@ -6313,6 +6171,8 @@ buildvariants:
   - name: tool
   - name: write_concern_majority_passthrough
   - name: push
+    distros:
+    - rhel62-small
 
 - name: linux-64-repeated-execution
   stepback: false
@@ -6414,6 +6274,7 @@ buildvariants:
   - name: concurrency_replication
   - name: concurrency_replication_causal_consistency
   - name: concurrency_replication_multi_stmt_txn
+  - name: concurrency_replication_abort_multi_stmt_txn
   - name: concurrency_sharded_replication
   - name: concurrency_sharded_replication_with_balancer
   - name: concurrency_sharded_causal_consistency_gen
@@ -6461,6 +6322,7 @@ buildvariants:
   - name: replica_sets_initsync_static_jscore_passthrough
   - name: replica_sets_jscore_passthrough
   - name: replica_sets_multi_stmt_txn_jscore_passthrough
+  - name: replica_sets_abort_multi_stmt_txn_jscore_passthrough
   - name: replica_sets_kill_primary_jscore_passthrough
   - name: replica_sets_terminate_primary_jscore_passthrough
   - name: replica_sets_kill_secondaries_jscore_passthrough
@@ -6613,6 +6475,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - ubuntu1804-small
 
 - name: enterprise-ubuntu1804-64
   display_name: Enterprise Ubuntu 18.04
@@ -6671,6 +6535,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - ubuntu1804-small
 
 - name: ubuntu1604
   display_name: SSL Ubuntu 16.04
@@ -6713,9 +6579,6 @@ buildvariants:
   - name: sharding_gle_auth_basics_passthrough
   - name: sharding_gle_auth_basics_passthrough_write_cmd
   - name: jepsen_register_findAndModify_WT
-    distros:
-    - ubuntu1604-build
-  - name: jepsen_register_linearizableRead
     distros:
     - ubuntu1604-build
   - name: jepsen_register_linearizableRead_WT
@@ -6801,6 +6664,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - ubuntu1604-small
 
 - name: enterprise-ubuntu1604-arm64
   display_name: Enterprise Ubuntu 16.04 arm64
@@ -6914,197 +6779,6 @@ buildvariants:
     distros:
     - ubuntu1604-test
 
-- name: enterprise-ubuntu1604-ppc64le
-  display_name: Enterprise Ubuntu 16.04 PPC64LE
-  modules:
-  - enterprise
-  run_on:
-  - ubuntu1604-power8-test
-  batchtime: 1440 # 1 day
-  expansions:
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: ppc64le-enterprise-ubuntu1604
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) --release CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_mmapv1,blacklist_from_ppc64le
-    resmoke_jobs_max: 2
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: ppc64le
-    packager_distro: ubuntu1604
-    repo_edition: enterprise
-    tooltags: "ssl sasl"
-    build_mongoreplay: true
-    multiversion_platform: ubuntu1604
-    multiversion_architecture: ppc64le
-    multiversion_edition: enterprise
-    use_default_timeouts: true
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - ubuntu1604-power8-build
-  - name: aggregation
-  - name: aggregation_auth
-  - name: auth_gen
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_write_cmd
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: jsCore
-  - name: jsCore_compatibility
-  - name: jsCore_decimal
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: jstestfuzz_gen
-  - name: jstestfuzz_concurrent_gen
-  - name: jstestfuzz_concurrent_replication_gen
-  - name: jstestfuzz_concurrent_sharded_gen
-  - name: jstestfuzz_replication_gen
-  - name: jstestfuzz_sharded_gen
-  - name: mongosTest
-  - name: noPassthrough_gen
-  - name: noPassthroughWithMongod_gen
-  - name: bulk_gle_passthrough
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: concurrency
-  - name: concurrency_replication
-  - name: concurrency_replication_causal_consistency
-  - name: concurrency_replication_multi_stmt_txn
-  - name: concurrency_sharded_replication
-  - name: concurrency_sharded_replication_with_balancer
-  - name: concurrency_simultaneous
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_auth_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: sharding_jscore_passthrough
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: push
-    distros:
-    - ubuntu1604-test
-
-- name: enterprise-ubuntu1804-s390x
-  display_name: Enterprise Ubuntu 18.04 s390x
-  modules:
-  - enterprise
-  run_on:
-  - ubuntu1804-zseries-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-ubuntu1804
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1804 --release --jlink=3 -j$(grep -c ^processor /proc/cpuinfo) CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_mmapv1
-    resmoke_jobs_max: 2
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: ubuntu1804
-    repo_edition: enterprise
-    tooltags: "ssl sasl"
-    build_mongoreplay: true
-    multiversion_platform: ubuntu1804
-    multiversion_architecture: s390x
-    multiversion_edition: enterprise
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - ubuntu1804-zseries-build
-  - name: aggregation
-  - name: aggregation_ese
-  - name: aggregation_auth
-  - name: aggregation_read_concern_majority_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: audit
-  - name: auth_gen
-  - name: auth_audit_gen
-  - name: bulk_gle_passthrough
-  - name: concurrency
-  - name: concurrency_replication
-  - name: concurrency_replication_causal_consistency
-  - name: concurrency_replication_multi_stmt_txn
-  - name: concurrency_sharded_replication
-  - name: concurrency_sharded_replication_with_balancer
-  - name: concurrency_simultaneous
-  - name: ese
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_write_cmd
-  - name: integration_tests_replset
-  - name: integration_tests_sharded
-  - name: integration_tests_standalone
-  - name: jsCore
-  - name: jsCore_ese
-  - name: jsCore_compatibility
-  - name: jsCore_decimal
-  - name: jsCore_op_query
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: jstestfuzz_gen
-  - name: jstestfuzz_concurrent_gen
-  - name: jstestfuzz_concurrent_replication_gen
-  - name: jstestfuzz_concurrent_sharded_gen
-  - name: jstestfuzz_replication_gen
-  - name: jstestfuzz_sharded_gen
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: mongosTest
-  - name: noPassthroughWithMongod_gen
-  - name: noPassthrough_gen
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: read_concern_linearizable_passthrough
-  - name: read_concern_majority_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_ese_gen
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_ese_gen
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_csrs_continuous_config_stepdown_gen
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_op_query_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_op_query_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: snmp
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: write_concern_majority_passthrough
-  - name: push
-    distros:
-    - ubuntu1804-test
-
-
 - name: enterprise-linux-64-amazon-ami
   display_name: "Enterprise Amazon Linux"
   modules:
@@ -7178,6 +6852,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - linux-64-amzn-small
 
 - name: amazon
   display_name: SSL Amazon Linux
@@ -7202,6 +6878,7 @@ buildvariants:
     tooltags: "ssl"
     build_mongoreplay: true
     virtualenv: /opt/mongodbtoolchain/v2/bin/virtualenv
+    large_distro_name: linux-64-amzn-build
   tasks:
   - name: compile_all_run_unittests_TG
     distros:
@@ -7269,6 +6946,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - linux-64-amzn-small
 
 - name: enterprise-amazon2
   display_name: "Enterprise Amazon Linux 2"
@@ -7333,6 +7012,7 @@ buildvariants:
   - name: sharding_auth_gen
   - name: sharding_auth_audit_gen
   - name: sharding_ese_gen
+  - name: sharding_hello_failures
   - name: slow1_gen
   - name: serial_run
   - name: sharded_collections_jscore_passthrough
@@ -7346,6 +7026,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - amazon2-small
 
 - name: amazon2
   display_name: SSL Amazon Linux 2
@@ -7434,6 +7116,7 @@ buildvariants:
   - name: sharding_jscore_passthrough
   - name: sharding_jscore_op_query_passthrough
   - name: sharding_jscore_passthrough_wire_ops_gen
+  - name: sharding_hello_failures
   - name: ssl_gen
   - name: sslSpecial_gen
   - name: tool
@@ -7441,6 +7124,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - amazon2-small
 
 ###########################################
 #         Windows buildvariants           #
@@ -7639,7 +7324,7 @@ buildvariants:
   - name: external_auth
   - name: external_auth_windows
     distros:
-    - windows-64-2016
+    - windows-2016-dc
   - name: jsCore
   - name: jsCore_ese
   - name: jsCore_decimal
@@ -7861,11 +7546,11 @@ buildvariants:
   - name: noPassthrough_gen
   - name: parallel_gen
   - name: parallel_compatibility
-  - name: powercycle
-  - name: powercycle_fcv3.6
-  - name: powercycle_kill_mongod
-  - name: powercycle_replication
-  - name: powercycle_syncdelay
+  # - name: powercycle
+  # - name: powercycle_fcv3.6
+  # - name: powercycle_kill_mongod
+  # - name: powercycle_replication
+  # - name: powercycle_syncdelay
   - name: read_concern_linearizable_passthrough
   - name: read_concern_majority_passthrough_gen
   - name: replica_sets
@@ -8218,8 +7903,7 @@ buildvariants:
     push_bucket: downloads.10gen.com
     push_name: linux
     push_arch: x86_64-enterprise-rhel62
-    rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform: rhel62
     multiversion_edition: enterprise
     has_packages: true
@@ -8290,6 +7974,222 @@ buildvariants:
     distros:
     - rhel62-large
   - name: concurrency_replication_multi_stmt_txn
+  - name: concurrency_replication_abort_multi_stmt_txn
+  - name: concurrency_sharded_replication
+  - name: concurrency_sharded_replication_with_balancer
+  - name: concurrency_sharded_causal_consistency_gen
+  - name: concurrency_sharded_causal_consistency_and_balancer
+  - name: concurrency_sharded_with_stepdowns
+  - name: concurrency_sharded_with_stepdowns_and_balancer
+  - name: concurrency_simultaneous
+  - name: disk_wiredtiger
+  - name: ese
+  - name: failpoints
+  - name: failpoints_auth
+  - name: gle_auth
+  - name: gle_auth_basics_passthrough
+  - name: gle_auth_basics_passthrough_write_cmd
+  - name: gle_auth_write_cmd
+  - name: idl_tests
+  - name: integration_tests_replset
+  - name: integration_tests_sharded
+  - name: integration_tests_standalone
+  - name: jsCore
+  - name: jsCore_ese
+  - name: jsCore_auth
+  - name: jsCore_compatibility
+  - name: jsCore_decimal
+  - name: jsCore_minimum_batch_size
+  - name: jsCore_op_query
+  - name: jsCore_txns
+  - name: causally_consistent_jscore_txns_passthrough
+  - name: jsonSchema
+  - name: jstestfuzz_gen
+  - name: jstestfuzz_concurrent_gen
+  - name: jstestfuzz_concurrent_replication_gen
+  - name: jstestfuzz_concurrent_replication_session_gen
+  - name: jstestfuzz_concurrent_sharded_gen
+  - name: jstestfuzz_concurrent_sharded_causal_consistency_gen
+  - name: jstestfuzz_concurrent_sharded_continuous_stepdown_gen
+  - name: jstestfuzz_concurrent_sharded_session_gen
+  - name: jstestfuzz_interrupt_gen
+  - name: jstestfuzz_interrupt_replication_gen
+  - name: jstestfuzz_replication_gen
+  - name: jstestfuzz_replication_initsync_gen
+  - name: jstestfuzz_replication_session_gen
+  - name: jstestfuzz_sharded_gen
+  - name: jstestfuzz_sharded_causal_consistency_gen
+  - name: jstestfuzz_sharded_continuous_stepdown_gen
+  - name: jstestfuzz_sharded_session_gen
+  - name: logical_session_cache_replication_100ms_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_replication_10sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_replication_default_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_sharding_100ms_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_sharding_10sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_sharding_default_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_standalone_100ms_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_standalone_10sec_refresh_jscore_passthrough_gen
+  - name: logical_session_cache_standalone_default_refresh_jscore_passthrough_gen
+  - name: mongosTest
+  - name: multiversion_auth
+  - name: multiversion
+  - name: multiversion_multistorage_engine
+  - name: noPassthroughWithMongod_gen
+  - name: noPassthrough_gen
+  - name: parallel_gen
+  - name: parallel_compatibility
+  - name: read_concern_linearizable_passthrough
+  - name: sharding_hello_failures
+    distros:
+    - rhel62-large
+  - name: read_concern_majority_passthrough_gen
+  - name: read_only
+  - name: read_only_sharded
+  - name: replica_sets
+    distros:
+    - rhel62-large
+  - name: replica_sets_auth_gen
+  - name: replica_sets_ese_gen
+  - name: replica_sets_jscore_passthrough
+  - name: replica_sets_initsync_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_initsync_static_jscore_passthrough
+    distros:
+    - rhel62-small
+  - name: replica_sets_multi_stmt_txn_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_abort_multi_stmt_txn_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_kill_primary_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_terminate_primary_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_kill_secondaries_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: retryable_writes_jscore_passthrough_gen
+  - name: retryable_writes_jscore_stepdown_passthrough
+    distros:
+    - rhel62-large
+  - name: sasl
+  - name: session_jscore_passthrough
+  - name: sharded_collections_jscore_passthrough
+  - name: sharding_gen
+  - name: sharding_auth_gen
+  - name: sharding_auth_audit_gen
+  - name: sharding_ese_gen
+  - name: sharding_gle_auth_basics_passthrough
+  - name: sharding_gle_auth_basics_passthrough_write_cmd
+  - name: sharding_jscore_passthrough
+  - name: sharding_jscore_op_query_passthrough
+  - name: sharding_jscore_passthrough_wire_ops_gen
+  - name: sharding_last_stable_mongos_and_mixed_shards_gen
+  - name: sharding_csrs_continuous_config_stepdown_gen
+  - name: sharding_op_query_gen
+  - name: slow1_gen
+  - name: serial_run
+  - name: snmp
+  - name: ssl_gen
+  - name: sslSpecial_gen
+  - name: tool
+  - name: update_fuzzer_gen
+  - name: update_fuzzer_replication_gen
+  - name: write_concern_majority_passthrough
+    distros:
+    - rhel62-large
+  - name: secondary_reads_passthrough_gen
+  - name: package
+    distros:
+    - ubuntu1604-packer
+  - name: push
+    distros:
+    - rhel62-small
+
+- name: enterprise-rhel-62-64-bit-store-fam-images-in-side-coll
+  display_name: "Enterprise RHEL 6.2 (storeFindAndModifyImagesInSideCollection=True)"
+  modules:
+  - enterprise
+  run_on:
+  - rhel62-small
+  expansions:
+    test_flags: >-
+      --mongodSetParameters="{storeFindAndModifyImagesInSideCollection: true}"
+      --excludeWithAnyTags=requires_mmapv1,requires_storing_fam_images_in_oplog
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
+    multiversion_platform: rhel62
+    multiversion_edition: enterprise
+    has_packages: true
+    packager_script: packager_enterprise.py
+    packager_arch: x86_64
+    packager_distro: rhel62
+    repo_edition: enterprise
+    scons_cache_scope: shared
+    tooltags: "ssl sasl"
+    build_mongoreplay: true
+    jstestfuzz_num_generated_files: 40
+    jstestfuzz_concurrent_num_files: 10
+    target_resmoke_time: 10
+    large_distro_name: rhel62-large
+  tasks:
+  - name: compile_all_run_unittests_TG
+    distros:
+    - rhel62-large
+  - name: compile_benchmarks
+    distros:
+    - rhel62-large
+  - name: rollback_fuzzer_gen
+  - name: rollback_fuzzer_clean_shutdowns_gen
+  - name: rollback_fuzzer_unclean_shutdowns_gen
+  - name: aggregation
+  - name: aggregation_ese
+  - name: aggregation_auth
+  - name: aggregation_facet_unwind_passthrough
+  - name: aggregation_mongos_passthrough
+  - name: aggregation_one_shard_sharded_collections
+  - name: aggregation_read_concern_majority_passthrough
+  - name: aggregation_sharded_collections_passthrough
+  - name: audit
+  - name: auth_gen
+  - name: auth_audit_gen
+  - name: benchmarks_orphaned
+    distros:
+    - centos6-perf
+  - name: benchmarks_sharding
+    distros:
+    - centos6-perf
+  - name: buildscripts_test
+  - name: bulk_gle_passthrough
+  - name: causally_consistent_jscore_passthrough_gen
+  - name: causally_consistent_jscore_passthrough_auth_gen
+  - name: sharded_causally_consistent_jscore_passthrough_gen
+  - name: change_streams
+  - name: change_streams_mongos_passthrough
+  - name: change_streams_mongos_sessions_passthrough
+  - name: change_streams_secondary_reads
+  - name: change_streams_sharded_collections_passthrough
+  - name: change_streams_whole_db_passthrough
+  - name: change_streams_whole_db_mongos_passthrough
+  - name: change_streams_whole_db_secondary_reads_passthrough
+  - name: change_streams_whole_db_sharded_collections_passthrough
+  - name: change_streams_whole_cluster_passthrough
+  - name: change_streams_whole_cluster_mongos_passthrough
+  - name: change_streams_whole_cluster_secondary_reads_passthrough
+  - name: change_streams_whole_cluster_sharded_collections_passthrough
+  - name: concurrency
+  - name: concurrency_replication
+  - name: concurrency_replication_causal_consistency
+    distros:
+    - rhel62-large
+  - name: concurrency_replication_multi_stmt_txn
+  - name: concurrency_replication_abort_multi_stmt_txn
   - name: concurrency_sharded_replication
   - name: concurrency_sharded_replication_with_balancer
   - name: concurrency_sharded_causal_consistency_gen
@@ -8373,8 +8273,11 @@ buildvariants:
     - rhel62-large
   - name: replica_sets_initsync_static_jscore_passthrough
     distros:
-    - rhel62-large
+    - rhel62-small
   - name: replica_sets_multi_stmt_txn_jscore_passthrough
+    distros:
+    - rhel62-large
+  - name: replica_sets_abort_multi_stmt_txn_jscore_passthrough
     distros:
     - rhel62-large
   - name: replica_sets_kill_primary_jscore_passthrough
@@ -8390,7 +8293,6 @@ buildvariants:
   - name: retryable_writes_jscore_stepdown_passthrough
     distros:
     - rhel62-large
-  - name: rlp
   - name: sasl
   - name: session_jscore_passthrough
   - name: sharded_collections_jscore_passthrough
@@ -8421,7 +8323,6 @@ buildvariants:
   - name: package
     distros:
     - ubuntu1604-packer
-  - name: push
 
 - name: enterprise-rhel-62-64-bit-majority-read-concern-off
   display_name: "Enterprise RHEL 6.2 (majority read concern off)"
@@ -8431,8 +8332,7 @@ buildvariants:
   - rhel62-small
   expansions:
     test_flags: --majorityReadConcern=off --excludeWithAnyTags=requires_mmapv1,requires_majority_read_concern,uses_change_streams
-    rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform: rhel62
     multiversion_edition: enterprise
     repo_edition: enterprise
@@ -8542,7 +8442,6 @@ buildvariants:
     distros:
     - rhel62-large
   - name: retryable_writes_jscore_passthrough_gen
-  - name: rlp
   - name: sasl
   - name: session_jscore_passthrough
   - name: sharded_collections_jscore_passthrough
@@ -8580,7 +8479,7 @@ buildvariants:
   batchtime: 10080 # 7 days
   stepback: false
   expansions:
-    test_flags: --excludeWithAnyTags=requires_mmapv1
+    test_flags: --excludeWithAnyTags=requires_mmapv1,resource_intensive
     compile_flags: --dbg=on --gcov --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform: rhel62
     multiversion_edition: enterprise
@@ -8760,6 +8659,7 @@ buildvariants:
   - name: sasl
   - name: sharding_auth_gen
   - name: sharding_auth_audit_gen
+  - name: sharding_hello_failures
   - name: snmp
   - name: ssl_gen
   - name: sslSpecial_gen
@@ -8768,7 +8668,7 @@ buildvariants:
     - ubuntu1604-packer
   - name: push
     distros:
-    - rhel70
+    - rhel70-small
 
 - name: enterprise-rhel-80-64-bit
   display_name: "Enterprise RHEL 8.0"
@@ -8833,24 +8733,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
-
-# This variant is to intentionally test uncommon features nightly
-- <<: *enterprise-rhel-70-64-bit-template
-  name: enterprise-rhel-70-64-bit-kitchen-sink
-  display_name: "~ Enterprise RHEL 7.0 (Dagger, tcmalloc-profiling)"
-  batchtime: 1440 # 1 day
-  expansions:
-    <<: *enterprise-rhel-70-64-bit-expansions-template
-    compile_flags: --ssl --use-cpu-profiler MONGO_DISTMOD=rhel70 -j$(grep -c ^processor /proc/cpuinfo) --release --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    additional_targets: dagger # If this moves to another variant, update the compile_all task
-  tasks:
-  - name: compile_all_run_unittests_TG
     distros:
-    - rhel70
-  - name: compile_benchmarks
-    distros:
-    - rhel70
-  - name: jsCore
+    - rhel80-small
 
 - name: ubuntu1604-debug
   display_name: "* Ubuntu 16.04 DEBUG"
@@ -8973,6 +8857,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - rhel62-small
 
 - name: rhel70
   display_name: SSL RHEL 7.0
@@ -9073,7 +8959,7 @@ buildvariants:
     - ubuntu1604-packer
   - name: push
     distros:
-    - rhel70
+    - rhel70-small
 
 - name: rhel80
   display_name: SSL RHEL 8.0
@@ -9173,322 +9059,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
-
-- name: enterprise-rhel-71-ppc64le
-  display_name: Enterprise RHEL 7.1 PPC64LE
-  modules:
-  - enterprise
-  run_on:
-  - rhel71-power8-test
-  batchtime: 1440 # 1 day
-  stepback: false
-  expansions:
-    # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
-    compile_flags: --ssl MONGO_DISTMOD=rhel71 --release -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_mmapv1,blacklist_from_ppc64le
-    resmoke_jobs_factor: 0.25
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: ppc64le
-    packager_distro: rhel71
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: ppc64le-enterprise-rhel71
-    repo_edition: enterprise
-    tooltags: "ssl sasl"
-    build_mongoreplay: true
-    multiversion_platform: rhel71
-    multiversion_architecture: ppc64le
-    multiversion_edition: enterprise
-  tasks:
-  - name: compile_all_run_unittests_TG
     distros:
-    - rhel71-power8-build
-  - name: aggregation
-  - name: aggregation_ese
-  - name: aggregation_auth
-  - name: aggregation_read_concern_majority_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: audit
-  - name: auth_gen
-  - name: auth_audit_gen
-  - name: bulk_gle_passthrough
-  - name: concurrency
-  - name: concurrency_replication
-  - name: concurrency_replication_causal_consistency
-  - name: concurrency_replication_multi_stmt_txn
-  - name: concurrency_sharded_replication
-  - name: concurrency_sharded_replication_with_balancer
-  - name: concurrency_simultaneous
-  - name: ese
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_write_cmd
-  - name: integration_tests_replset
-  - name: integration_tests_sharded
-  - name: integration_tests_standalone
-  - name: jsCore
-  - name: jsCore_ese
-  - name: jsCore_compatibility
-  - name: jsCore_decimal
-  - name: jsCore_op_query
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: jstestfuzz_gen
-  - name: jstestfuzz_concurrent_gen
-  - name: jstestfuzz_concurrent_replication_gen
-  - name: jstestfuzz_concurrent_sharded_gen
-  - name: jstestfuzz_replication_gen
-  - name: jstestfuzz_sharded_gen
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: mongosTest
-  - name: noPassthroughWithMongod_gen
-  - name: noPassthrough_gen
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: read_concern_linearizable_passthrough
-  - name: read_concern_majority_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_ese_gen
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_ese_gen
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_csrs_continuous_config_stepdown_gen
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_op_query_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_op_query_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: snmp
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: write_concern_majority_passthrough
-  - name: secondary_reads_passthrough_gen
-  - name: push
-    distros:
-    - rhel70
-
-- name: enterprise-rhel-72-s390x
-  display_name: Enterprise RHEL 7.2 s390x
-  modules:
-  - enterprise
-  run_on:
-  - rhel72-zseries-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    compile_flags: --ssl MONGO_DISTMOD=rhel72 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_mmapv1
-    resmoke_jobs_max: 2
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: rhel72
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-rhel72
-    repo_edition: enterprise
-    tooltags: "ssl sasl"
-    build_mongoreplay: true
-    multiversion_platform: rhel72
-    multiversion_architecture: s390x
-    multiversion_edition: enterprise
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel72-zseries-build
-  - name: aggregation
-  - name: aggregation_ese
-  - name: aggregation_auth
-  - name: aggregation_read_concern_majority_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: audit
-  - name: auth_gen
-  - name: auth_audit_gen
-  - name: bulk_gle_passthrough
-  - name: concurrency
-  - name: concurrency_replication
-  - name: concurrency_replication_causal_consistency
-  - name: concurrency_replication_multi_stmt_txn
-  - name: concurrency_sharded_replication
-  - name: concurrency_sharded_replication_with_balancer
-  - name: concurrency_simultaneous
-  - name: ese
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_write_cmd
-  - name: integration_tests_replset
-  - name: integration_tests_sharded
-  - name: integration_tests_standalone
-  - name: jsCore
-  - name: jsCore_ese
-  - name: jsCore_compatibility
-  - name: jsCore_decimal
-  - name: jsCore_op_query
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: jstestfuzz_gen
-  - name: jstestfuzz_concurrent_gen
-  - name: jstestfuzz_concurrent_replication_gen
-  - name: jstestfuzz_concurrent_sharded_gen
-  - name: jstestfuzz_replication_gen
-  - name: jstestfuzz_sharded_gen
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: mongosTest
-  - name: noPassthroughWithMongod_gen
-  - name: noPassthrough_gen
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: read_concern_linearizable_passthrough
-  - name: read_concern_majority_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_ese_gen
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_ese_gen
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_csrs_continuous_config_stepdown_gen
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_op_query_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_op_query_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: snmp
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: write_concern_majority_passthrough
-  - name: secondary_reads_passthrough_gen
-  - name: push
-    distros:
-    - rhel70
-
-- name: enterprise-rhel-67-s390x
-  display_name: Enterprise RHEL 6.7 s390x
-  modules:
-  - enterprise
-  run_on:
-  - rhel67-zseries-test
-  batchtime: 1440 # 1 day
-  stepback: false
-  expansions:
-    compile_flags: --ssl MONGO_DISTMOD=rhel67 --release -j3 CCFLAGS="-march=z9-109 -mtune=z10" --variables-files=etc/scons/mongodbtoolchain_gcc.vars --use-s390x-crc32=off
-    test_flags: --excludeWithAnyTags=requires_mmapv1,blacklist_from_rhel_67_s390x
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: rhel67
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-rhel67
-    repo_edition: enterprise
-    tooltags: "ssl sasl"
-    build_mongoreplay: true
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel67-zseries-build
-  - name: aggregation
-  - name: aggregation_ese
-  - name: aggregation_auth
-  - name: aggregation_read_concern_majority_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: audit
-  - name: auth_gen
-  - name: auth_audit_gen
-  - name: bulk_gle_passthrough
-  - name: concurrency
-  - name: concurrency_replication
-  - name: concurrency_replication_causal_consistency
-  - name: concurrency_replication_multi_stmt_txn
-  - name: concurrency_sharded_replication
-  - name: concurrency_sharded_replication_with_balancer
-  - name: concurrency_simultaneous
-  - name: ese
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_write_cmd
-  - name: integration_tests_replset
-  - name: integration_tests_standalone
-  - name: jsCore
-  - name: jsCore_ese
-  - name: jsCore_auth
-  - name: jsCore_compatibility
-  - name: jsCore_decimal
-  - name: jsCore_minimum_batch_size
-  - name: jsCore_op_query
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: mongosTest
-  - name: noPassthroughWithMongod_gen
-  - name: noPassthrough_gen
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: read_concern_linearizable_passthrough
-  - name: read_concern_majority_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_ese_gen
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_ese_gen
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_csrs_continuous_config_stepdown_gen
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_op_query_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_op_query_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: snmp
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: write_concern_majority_passthrough
-  - name: secondary_reads_passthrough_gen
-  - name: push
-    distros:
-    - rhel62-large
+    - rhel80-small
 
 ###########################################
 #          Ubuntu buildvariants           #
@@ -9581,6 +9153,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - ubuntu1404-small
 
 - name: enterprise-ubuntu1404-64
   display_name: Enterprise Ubuntu 14.04
@@ -9635,6 +9209,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - ubuntu1404-small
 
 - name: enterprise-ubuntu1604-64
   display_name: Enterprise Ubuntu 16.04
@@ -9666,9 +9242,6 @@ buildvariants:
   - name: audit
   - name: ese
   - name: jepsen_register_findAndModify_WT
-    distros:
-    - ubuntu1604-build
-  - name: jepsen_register_linearizableRead
     distros:
     - ubuntu1604-build
   - name: jepsen_register_linearizableRead_WT
@@ -9713,6 +9286,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - ubuntu1604-small
 
 
 - name: enterprise-ubuntu-dynamic-1604-clang-3.8-libcxx
@@ -9807,114 +9382,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
-
-
-- name: enterprise-suse12-s390x
-  display_name: Enterprise SLES 12 s390x
-  modules:
-  - enterprise
-  run_on:
-  - suse12-zseries-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    push_path: linux
-    push_bucket: downloads.10gen.com
-    push_name: linux
-    push_arch: s390x-enterprise-suse12
-    compile_flags: --ssl MONGO_DISTMOD=suse12 --release -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    test_flags: --excludeWithAnyTags=requires_mmapv1
-    has_packages: true
-    packager_script: packager_enterprise.py
-    packager_arch: s390x
-    packager_distro: suse12
-    repo_edition: enterprise
-    tooltags: "ssl sasl"
-    build_mongoreplay: true
-    multiversion_platform: suse12
-    multiversion_architecture: s390x
-    multiversion_edition: enterprise
-  tasks:
-  - name: compile_all_run_unittests_TG
     distros:
-    - suse12-zseries-build
-  - name: aggregation
-  - name: aggregation_ese
-  - name: aggregation_auth
-  - name: aggregation_read_concern_majority_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: audit
-  - name: auth_gen
-  - name: auth_audit_gen
-  - name: bulk_gle_passthrough
-  - name: concurrency
-  - name: concurrency_replication
-  - name: concurrency_replication_causal_consistency
-  - name: concurrency_replication_multi_stmt_txn
-  - name: concurrency_sharded_replication
-  - name: concurrency_sharded_replication_with_balancer
-  - name: concurrency_simultaneous
-  - name: ese
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_write_cmd
-  - name: integration_tests_replset
-  - name: integration_tests_sharded
-  - name: integration_tests_standalone
-  - name: jsCore
-  - name: jsCore_ese
-  - name: jsCore_compatibility
-  - name: jsCore_decimal
-  - name: jsCore_op_query
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: jstestfuzz_gen
-  - name: jstestfuzz_concurrent_gen
-  - name: jstestfuzz_concurrent_replication_gen
-  - name: jstestfuzz_concurrent_sharded_gen
-  - name: jstestfuzz_replication_gen
-  - name: jstestfuzz_sharded_gen
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: mongosTest
-  - name: noPassthroughWithMongod_gen
-  - name: noPassthrough_gen
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: read_concern_linearizable_passthrough
-  - name: read_concern_majority_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_ese_gen
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_ese_gen
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_csrs_continuous_config_stepdown_gen
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_op_query_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_op_query_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: snmp
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: write_concern_majority_passthrough
-  - name: secondary_reads_passthrough_gen
-  - name: push
-    distros:
-    - suse12-test
+    - suse12-small
 
 - name: suse12
   display_name: SSL SUSE 12
@@ -10001,6 +9470,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - suse12-small
 
 ###########################################
 #          Debian buildvariants           #
@@ -10058,6 +9529,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - debian81-small
 
 - name: debian81
   display_name: SSL Debian 8.1
@@ -10147,6 +9620,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - debian81-small
 
 - name: enterprise-debian92-64
   display_name: Enterprise Debian 9.2
@@ -10203,6 +9678,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - debian92-small
 
 - name: debian92
   display_name: SSL Debian 9.2
@@ -10295,6 +9772,8 @@ buildvariants:
     distros:
     - ubuntu1604-packer
   - name: push
+    distros:
+    - debian92-small
 
 ################################
 # storage engine buildvariants #
@@ -10308,9 +9787,8 @@ buildvariants:
   - rhel62-small
   batchtime: 1440 # 1 day
   expansions:
-    rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
     test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_journaling,requires_mmapv1,uses_transactions
-    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include" --use-basis-tech-rosette-linguistics-platform=on
+    compile_flags: --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars
     multiversion_platform: rhel62
     multiversion_edition: enterprise
     scons_cache_scope: shared
@@ -10413,7 +9891,6 @@ buildvariants:
   - name: replica_sets_jscore_passthrough
   - name: retryable_writes_jscore_passthrough_gen
   - name: retryable_writes_jscore_stepdown_passthrough
-  - name: rlp
   - name: rollback_fuzzer_gen
   - name: sasl
   - name: session_jscore_passthrough
@@ -10514,179 +9991,6 @@ buildvariants:
   - name: tool
   - name: update_fuzzer_gen
   - name: update_fuzzer_replication_gen
-
-- name: enterprise-rhel-71-ppc64le-inmem
-  display_name: Enterprise RHEL 7.1 PPC64LE (inMemory) DEBUG
-  modules:
-  - enterprise
-  run_on:
-  - rhel71-power8-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    # We need to compensate for SMT8 setting the cpu count very high and lower the amount of parallelism down
-    compile_flags: --dbg=on --opt=on --ssl MONGO_DISTMOD=rhel71 -j$(echo "$(grep -c processor /proc/cpuinfo)/2" | bc) CCFLAGS="-mcpu=power8 -mtune=power8 -mcmodel=medium" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_mmapv1,requires_journaling,uses_transactions,blacklist_from_ppc64le
-    tooltags: "ssl sasl"
-    resmoke_jobs_factor: 0.25
-    build_mongoreplay: true
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel71-power8-build
-  - name: aggregation
-  - name: aggregation_auth
-  - name: aggregation_read_concern_majority_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: audit
-  - name: auth_gen
-  - name: auth_audit_gen
-  - name: bulk_gle_passthrough
-  - name: concurrency
-  - name: concurrency_replication
-  - name: concurrency_replication_causal_consistency
-  - name: concurrency_sharded_replication
-  - name: concurrency_sharded_replication_with_balancer
-  - name: concurrency_simultaneous
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_write_cmd
-  - name: integration_tests_replset
-  - name: integration_tests_sharded
-  - name: integration_tests_standalone
-  - name: jsCore
-  - name: jsCore_auth
-  - name: jsCore_compatibility
-  - name: jsCore_op_query
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: mongosTest
-  - name: noPassthrough_gen
-  - name: noPassthroughWithMongod_gen
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: read_concern_linearizable_passthrough
-  - name: read_concern_majority_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_op_query_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_op_query_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: snmp
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: write_concern_majority_passthrough
-  - name: secondary_reads_passthrough_gen
-
-- name: enterprise-rhel-72-s390x-inmem
-  display_name: Enterprise RHEL 7.2 s390x (inMemory) DEBUG
-  modules:
-  - enterprise
-  run_on:
-  - rhel72-zseries-test
-  batchtime: 10080 # 7 days
-  stepback: false
-  expansions:
-    compile_flags: --dbg=on --opt=on --ssl MONGO_DISTMOD=rhel72 -j3 CCFLAGS="-march=z196 -mtune=zEC12" --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-    test_flags: --storageEngine=inMemory --excludeWithAnyTags=requires_persistence,requires_mmapv1,requires_journaling,uses_transactions
-    tooltags: "ssl sasl"
-    resmoke_jobs_max: 2
-    build_mongoreplay: true
-  tasks:
-  - name: compile_all_run_unittests_TG
-    distros:
-    - rhel72-zseries-build
-  - name: aggregation
-  - name: aggregation_auth
-  - name: aggregation_read_concern_majority_passthrough
-  - name: aggregation_sharded_collections_passthrough
-  - name: audit
-  - name: auth_gen
-  - name: auth_audit_gen
-  - name: bulk_gle_passthrough
-  - name: concurrency
-    distros:
-    - rhel72-zseries-build
-  - name: concurrency_replication
-    distros:
-    - rhel72-zseries-build
-  - name: concurrency_replication_causal_consistency
-    distros:
-    - rhel72-zseries-build
-  - name: concurrency_sharded_replication
-    distros:
-    - rhel72-zseries-build
-  - name: concurrency_sharded_replication_with_balancer
-    distros:
-    - rhel72-zseries-build
-  - name: concurrency_simultaneous
-    distros:
-    - rhel72-zseries-build
-  - name: failpoints
-  - name: failpoints_auth
-  - name: gle_auth
-  - name: gle_auth_basics_passthrough
-  - name: gle_auth_basics_passthrough_write_cmd
-  - name: gle_auth_write_cmd
-  - name: integration_tests_replset
-  - name: integration_tests_sharded
-  - name: integration_tests_standalone
-  - name: jsCore
-  - name: jsCore_auth
-  - name: jsCore_compatibility
-  - name: jsCore_op_query
-  - name: jsCore_txns
-  - name: causally_consistent_jscore_txns_passthrough
-  - name: logical_session_cache_replication_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_sharding_1sec_refresh_jscore_passthrough_gen
-  - name: logical_session_cache_standalone_1sec_refresh_jscore_passthrough_gen
-  - name: mongosTest
-  - name: noPassthrough_gen
-  - name: noPassthroughWithMongod_gen
-  - name: parallel_gen
-  - name: parallel_compatibility
-  - name: read_concern_linearizable_passthrough
-  - name: read_concern_majority_passthrough_gen
-  - name: replica_sets
-  - name: replica_sets_auth_gen
-  - name: replica_sets_jscore_passthrough
-  - name: sasl
-  - name: sharded_collections_jscore_passthrough
-  - name: sharding_gen
-  - name: sharding_auth_gen
-  - name: sharding_auth_audit_gen
-  - name: sharding_gle_auth_basics_passthrough
-  - name: sharding_gle_auth_basics_passthrough_write_cmd
-  - name: sharding_jscore_passthrough
-  - name: sharding_jscore_op_query_passthrough
-  - name: sharding_jscore_passthrough_wire_ops_gen
-  - name: sharding_op_query_gen
-  - name: slow1_gen
-  - name: serial_run
-  - name: snmp
-  - name: ssl_gen
-  - name: sslSpecial_gen
-  - name: tool
-  - name: write_concern_majority_passthrough
-  - name: secondary_reads_passthrough_gen
 
 
 ###########################################
@@ -11162,7 +10466,7 @@ buildvariants:
   expansions:
     test_flags: --excludeWithAnyTags=requires_mmapv1
     lang_environment: LANG=C
-    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars --link-model=dynamic
+    compile_flags: --ssl MONGO_DISTMOD=ubuntu1604 -j$(grep -c ^processor /proc/cpuinfo) --variables-files=etc/scons/mongodbtoolchain_gcc.vars --link-model=dynamic --allocator=system
     scons_cache_scope: shared
     scons_cache_mode: all
     tooltags: "ssl sasl"
@@ -11181,9 +10485,6 @@ buildvariants:
   batchtime: 1440 # 1 day
   stepback: false
   tasks:
-# Test lifecycle is temporarily disabled to reduce load on Evergreen API.
-# - name: update_test_lifecycle
-  - name: fetch_test_lifecycle
   - name: lint_fuzzer_sanity_all
 
 - name: enterprise-rhel-62-64-bit-mmapv1
@@ -11196,12 +10497,9 @@ buildvariants:
   expansions:
     # Transactions are not supported on the MMAPv1 storage engine.
     test_flags: --storageEngine=mmapv1 --excludeWithAnyTags=requires_wiredtiger,uses_transactions,requires_document_locking,requires_majority_read_concern,uses_change_streams
-    rlp_environment: MONGOD_UNITTEST_RLP_LANGUAGE_TEST_BTROOT=/opt/basis
     compile_flags: >-
       --ssl MONGO_DISTMOD=rhel62 -j$(grep -c ^processor /proc/cpuinfo) --release
       --variables-files=etc/scons/mongodbtoolchain_gcc.vars
-      CPPPATH="/opt/basis/rlp/rlp/include /opt/basis/rlp/utilities/include"
-      --use-basis-tech-rosette-linguistics-platform=on
     multiversion_platform: rhel62
     multiversion_edition: enterprise
     has_packages: true
@@ -11285,7 +10583,6 @@ buildvariants:
   - name: replica_sets_jscore_passthrough
     distros:
     - rhel62-large
-  - name: rlp
   - name: rollback_fuzzer_gen
   - name: serial_run
   - name: sharded_collections_jscore_passthrough

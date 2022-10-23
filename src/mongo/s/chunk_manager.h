@@ -133,6 +133,11 @@ public:
     void getAllShardIds(std::set<ShardId>* all) const;
 
     /**
+     * Returns the number of shards on which the collection has any chunks
+     */
+    int getNShardsOwningChunks() const;
+
+    /**
      * Returns true if, for this shard, the chunks are identical in both chunk managers
      */
     bool compatibleWith(const RoutingTableHistory& other, const ShardId& shard) const;
@@ -345,7 +350,9 @@ public:
      * Throws a DBException with the ShardKeyNotFound code if unable to target a single shard due to
      * collation or due to the key not matching the shard key pattern.
      */
-    Chunk findIntersectingChunk(const BSONObj& shardKey, const BSONObj& collation) const;
+    Chunk findIntersectingChunk(const BSONObj& shardKey,
+                                const BSONObj& collation,
+                                bool bypassIsFieldHashedCheck = false) const;
 
     /**
      * Same as findIntersectingChunk, but assumes the simple collation.
@@ -376,6 +383,13 @@ public:
      */
     void getAllShardIds(std::set<ShardId>* all) const {
         _rt->getAllShardIds(all);
+    }
+
+    /**
+     * Returns the number of shards on which the collection has any chunks
+     */
+    int getNShardsOwningChunks() {
+        return _rt->getNShardsOwningChunks();
     }
 
     // Transforms query into bounds for each field in the shard key

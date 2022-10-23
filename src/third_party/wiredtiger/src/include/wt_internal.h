@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -427,6 +427,7 @@ typedef uint64_t wt_timestamp_t;
 #include "packing.i"
 #include "reconcile.i"
 #include "serial.i"
+#include "time.i"
 
 #if defined(__cplusplus)
 }

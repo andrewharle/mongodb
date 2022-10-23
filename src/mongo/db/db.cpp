@@ -461,6 +461,10 @@ ExitCode _initAndListen(int listenPort) {
         exitCleanly(EXIT_NEED_DOWNGRADE);
     }
 
+    // Notify the storage engine that startup is completed before repair exits below, as repair sets
+    // the upgrade flag to true.
+    serviceContext->getStorageEngine()->notifyStartupComplete();
+
     if (storageGlobalParams.upgrade) {
         log() << "finished checking dbs";
         exitCleanly(EXIT_CLEAN);
@@ -904,31 +908,41 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
                 opCtx = uniqueOpCtx.get();
             }
 
-            try {
-                // For faster tests, we allow a short wait time with setParameter.
-                auto waitTime = waitForStepDownOnNonCommandShutdown.load()
-                    ? Milliseconds(Seconds(10))
-                    : Milliseconds(100);
+            // If this is a single node replica set, then we don't have to wait
+            // for any secondaries. Ignore stepdown.
+            if (repl::ReplicationCoordinator::get(serviceContext)->getConfig().getNumMembers() !=
+                1) {
+                try {
+                    // For faster tests, we allow a short wait time with setParameter.
+                    auto waitTime = waitForStepDownOnNonCommandShutdown.load()
+                        ? Milliseconds(Seconds(10))
+                        : Milliseconds(100);
 
-                uassertStatusOK(
-                    replCoord->stepDown(opCtx, false /* force */, waitTime, Seconds(120)));
-            } catch (const ExceptionFor<ErrorCodes::NotMaster>&) {
-                // ignore not master errors
-            } catch (const DBException& e) {
-                log() << "Failed to stepDown in non-command initiated shutdown path "
-                      << e.toString();
+                    log(LogComponent::kReplication)
+                        << "Stepping down the ReplicationCoordinator for shutdown, waitTime: "
+                        << waitTime;
+                    uassertStatusOK(
+                        replCoord->stepDown(opCtx, false /* force */, waitTime, Seconds(120)));
+                } catch (const ExceptionFor<ErrorCodes::NotMaster>&) {
+                    // ignore not master errors
+                } catch (const DBException& e) {
+                    log() << "Failed to stepDown in non-command initiated shutdown path "
+                          << e.toString();
+                }
             }
         }
     }
 
     // Terminate the balancer thread so it doesn't leak memory.
     if (auto balancer = Balancer::get(serviceContext)) {
+        log(LogComponent::kSharding) << "Shutting down the balancer";
         balancer->interruptBalancer();
         balancer->waitForBalancerToStop();
     }
 
     // Join the logical session cache before the transport layer.
     if (auto lsc = LogicalSessionCache::get(serviceContext)) {
+        log(LogComponent::kControl) << "Shutting down the LogicalSessionCache";
         lsc->joinOnShutDown();
     }
 
@@ -939,10 +953,12 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     }
 
     // Shut down the global dbclient pool so callers stop waiting for connections.
+    log(LogComponent::kNetwork) << "Shutting down the global connection pool";
     globalConnPool.shutdown();
 
     if (auto storageEngine = serviceContext->getStorageEngine()) {
         if (storageEngine->supportsReadConcernSnapshot()) {
+            log() << "Shutting down the PeriodicThreadToAbortExpiredTransactions";
             PeriodicThreadToAbortExpiredTransactions::get(serviceContext)->stop();
         }
 
@@ -955,27 +971,34 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
         // This can wait a long time while we drain the secondary's apply queue, especially if it
         // is building an index.
+        log(LogComponent::kReplication) << "Shutting down the ReplicationCoordinator";
         repl::ReplicationCoordinator::get(serviceContext)->shutdown(opCtx);
 
+        log(LogComponent::kSharding) << "Shutting down the ShardingInitializationMongoD";
         ShardingInitializationMongoD::get(serviceContext)->shutDown(opCtx);
 
         // Destroy all stashed transaction resources, in order to release locks.
+        log(LogComponent::kCommand) << "Killing all open transactions";
         SessionKiller::Matcher matcherAllSessions(
             KillAllSessionsByPatternSet{makeKillAllSessionsByPattern(opCtx)});
         killSessionsLocalKillTransactions(opCtx, matcherAllSessions);
     }
 
+    log(LogComponent::kDefault) << "Killing all operations for shutdown";
     serviceContext->setKillAllOperations();
 
+    log(LogComponent::kNetwork) << "Shutting down the ReplicaSetMonitor";
     ReplicaSetMonitor::shutdown();
 
     if (auto sr = Grid::get(serviceContext)->shardRegistry()) {
+        log(LogComponent::kSharding) << "Shutting down the shard registry";
         sr->shutdown();
     }
 
     // Validator shutdown must be called after setKillAllOperations is called. Otherwise, this can
     // deadlock.
     if (auto validator = LogicalTimeValidator::get(serviceContext)) {
+        log(LogComponent::kReplication) << "Shutting down the LogicalTimeValidator";
         validator->shutDown();
     }
 
@@ -986,6 +1009,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     // Shutdown the Service Entry Point and its sessions and give it a grace period to complete.
     if (auto sep = serviceContext->getServiceEntryPoint()) {
+        log(LogComponent::kCommand) << "Shutting down the ServiceEntryPoint";
         if (!sep->shutdown(Seconds(10))) {
             log(LogComponent::kNetwork)
                 << "Service entry point failed to shutdown within timelimit.";
@@ -994,6 +1018,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     // Shutdown and wait for the service executor to exit
     if (auto svcExec = serviceContext->getServiceExecutor()) {
+        log(LogComponent::kExecutor) << "Shutting down the service executor";
         Status status = svcExec->shutdown(Seconds(10));
         if (!status.isOK()) {
             log(LogComponent::kNetwork) << "Service executor failed to shutdown within timelimit: "
@@ -1001,11 +1026,15 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
         }
     }
 #endif
+
+    log(LogComponent::kControl) << "Shutting down free monitoring";
     stopFreeMonitoring();
 
     // Shutdown Full-Time Data Capture
+    log(LogComponent::kFTDC) << "Shutting down full-time data capture";
     stopMongoDFTDC();
 
+    log() << "Shutting down the HealthLog";
     HealthLog::get(serviceContext).shutdown();
 
     // We should always be able to acquire the global lock at shutdown.
@@ -1020,6 +1049,7 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
     DefaultLockerImpl* globalLocker = new DefaultLockerImpl();
     LockResult result = globalLocker->lockGlobalBegin(MODE_X, Date_t::max());
     if (result == LOCK_WAITING) {
+        log() << "Acquiring the global lock for shutdown";
         result = globalLocker->lockGlobalComplete(Date_t::max());
     }
 
@@ -1027,12 +1057,14 @@ void shutdownTask(const ShutdownTaskArgs& shutdownArgs) {
 
     // Global storage engine may not be started in all cases before we exit
     if (serviceContext->getStorageEngine()) {
+        log() << "Shutting down the storage engine";
         shutdownGlobalStorageEngineCleanly(serviceContext);
     }
 
     // We drop the scope cache because leak sanitizer can't see across the
     // thread we use for proxying MozJS requests. Dropping the cache cleans up
     // the memory and makes leak sanitizer happy.
+    log(LogComponent::kDefault) << "Dropping the scope cache for shutdown";
     ScriptEngine::dropScopeCache();
 
     log(LogComponent::kControl) << "now exiting";

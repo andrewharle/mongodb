@@ -52,6 +52,7 @@ static const std::vector<StringData> kCpuKeys{
     "btime"_sd, "cpu"_sd, "ctxt"_sd, "processes"_sd, "procs_blocked"_sd, "procs_running"_sd};
 
 static const std::vector<StringData> kMemKeys{
+    "MemAvailable"_sd,
     "MemTotal"_sd,
     "MemFree"_sd,
     "Cached"_sd,
@@ -70,6 +71,17 @@ static const std::vector<StringData> kMemKeys{
 
 static const std::vector<StringData> kNetstatKeys{
     "Tcp:"_sd, "Ip:"_sd, "TcpExt:"_sd, "IpExt:"_sd,
+};
+
+static const std::vector<StringData> kVMKeys{
+    "balloon_deflate"_sd,
+    "balloon_inflate"_sd,
+    "nr_mlock"_sd,
+    "numa_pages_migrated"_sd,
+    "pgfault"_sd,
+    "pgmajfault"_sd,
+    "pswpin"_sd,
+    "pswpout"_sd,
 };
 
 /**
@@ -123,6 +135,14 @@ public:
             processStatusErrors(procparser::parseProcDiskStatsFile(
                                     "/proc/diskstats"_sd, _disksStringData, &subObjBuilder),
                                 &subObjBuilder);
+            subObjBuilder.doneFast();
+        }
+
+        {
+            BSONObjBuilder subObjBuilder(builder.subobjStart("vmstat"_sd));
+            processStatusErrors(
+                procparser::parseProcVMStatFile("/proc/vmstat"_sd, kVMKeys, &subObjBuilder),
+                &subObjBuilder);
             subObjBuilder.doneFast();
         }
     }

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -104,10 +104,12 @@ __wt_meta_checkpoint_clear(WT_SESSION_IMPL *session, const char *fname)
 static int
 __ckpt_set(WT_SESSION_IMPL *session, const char *fname, const char *v, bool use_base)
 {
+    WT_DATA_HANDLE *dhandle;
     WT_DECL_ITEM(tmp);
     WT_DECL_RET;
+    size_t meta_base_length;
     char *config, *newcfg;
-    const char *cfg[3], *str;
+    const char *cfg[3], *meta_base, *str;
 
     /*
      * If the caller knows we're on a path like checkpoints where we have a valid checkpoint and
@@ -116,12 +118,35 @@ __ckpt_set(WT_SESSION_IMPL *session, const char *fname, const char *v, bool use_
      * use the slower path through configuration parsing functions.
      */
     config = newcfg = NULL;
+    dhandle = session->dhandle;
     str = v == NULL ? "checkpoint=(),checkpoint_lsn=" : v;
-    if (use_base && session->dhandle != NULL) {
+    if (use_base && dhandle != NULL) {
         WT_ERR(__wt_scr_alloc(session, 0, &tmp));
-        WT_ASSERT(session, strcmp(session->dhandle->name, fname) == 0);
+        WT_ASSERT(session, strcmp(dhandle->name, fname) == 0);
+
+        /* Check the metadata is not corrupted. */
+        meta_base = dhandle->meta_base;
+        meta_base_length = strlen(meta_base);
+        if (dhandle->meta_base_length != meta_base_length)
+            WT_PANIC_RET(session, WT_PANIC,
+              "Corrupted metadata. The original metadata length was %lu while the new one is %lu.",
+              dhandle->meta_base_length, meta_base_length);
+#ifdef HAVE_DIAGNOSTIC
+        if (!WT_STREQ(dhandle->orig_meta_base, meta_base))
+            WT_PANIC_RET(session, WT_PANIC,
+              "Corrupted metadata. The original metadata length was %lu while the new one is %lu. "
+              "The original metadata inserted was %s and the current "
+              "metadata is now %s.",
+              dhandle->meta_base_length, meta_base_length, dhandle->orig_meta_base, meta_base);
+#endif
+
         /* Concatenate the metadata base string with the checkpoint string. */
-        WT_ERR(__wt_buf_fmt(session, tmp, "%s,%s", session->dhandle->meta_base, str));
+        WT_ERR(__wt_buf_fmt(session, tmp, "%s,%s", meta_base, str));
+        /*
+         * Check the new metadata length is at least as long as the original metadata string with
+         * the checkpoint base stripped out.
+         */
+        WT_ASSERT(session, tmp->size >= dhandle->meta_base_length);
         WT_ERR(__wt_metadata_update(session, fname, tmp->mem));
     } else {
         /* Retrieve the metadata for this file. */
@@ -256,19 +281,24 @@ __ckpt_compare_order(const void *a, const void *b)
  *     Load all available checkpoint information for a file.
  */
 int
-__wt_meta_ckptlist_get(WT_SESSION_IMPL *session, const char *fname, WT_CKPT **ckptbasep)
+__wt_meta_ckptlist_get(
+  WT_SESSION_IMPL *session, const char *fname, bool update, WT_CKPT **ckptbasep)
 {
     WT_CKPT *ckpt, *ckptbase;
     WT_CONFIG ckptconf;
     WT_CONFIG_ITEM k, v;
+    WT_CONNECTION_IMPL *conn;
     WT_DECL_ITEM(buf);
     WT_DECL_RET;
     size_t allocated, slot;
+    time_t secs;
+    uint64_t most_recent;
     char *config;
 
     *ckptbasep = NULL;
 
     ckptbase = NULL;
+    conn = S2C(session);
     allocated = slot = 0;
     config = NULL;
 
@@ -301,6 +331,27 @@ __wt_meta_ckptlist_get(WT_SESSION_IMPL *session, const char *fname, WT_CKPT **ck
 
     /* Sort in creation-order. */
     __wt_qsort(ckptbase, slot, sizeof(WT_CKPT), __ckpt_compare_order);
+
+    if (update) {
+        /*
+         * We're updating the time value here instead of in the "set" helper because this needs to
+         * happen first in order to figure out what checkpoints we can safely remove.
+         */
+        ckpt = &ckptbase[slot];
+        __wt_seconds(session, &secs);
+        ckpt->sec = (uint64_t)secs;
+        /*
+         * Update time value for most recent checkpoint, not letting it move backwards. It is
+         * possible to race here, so use atomic CAS. This code relies on the fact that anyone we
+         * race with will only increase (never decrease) the most recent checkpoint time value.
+         */
+        for (;;) {
+            WT_ORDERED_READ(most_recent, conn->ckpt_most_recent);
+            if (ckpt->sec <= most_recent ||
+              __wt_atomic_cas64(&conn->ckpt_most_recent, most_recent, ckpt->sec))
+                break;
+        }
+    }
 
     /* Return the array to our caller. */
     *ckptbasep = ckptbase;
@@ -380,7 +431,6 @@ __wt_meta_ckptlist_set(
     WT_CKPT *ckpt;
     WT_DECL_ITEM(buf);
     WT_DECL_RET;
-    time_t secs;
     int64_t maxorder;
     const char *sep;
     bool has_lsn;
@@ -419,13 +469,6 @@ __wt_meta_ckptlist_set(
             /* Set the order and timestamp. */
             if (F_ISSET(ckpt, WT_CKPT_ADD))
                 ckpt->order = ++maxorder;
-
-            /*
-             * XXX Assumes a time_t fits into a uintmax_t, which isn't guaranteed, a time_t has to
-             * be an arithmetic type, but not an integral type.
-             */
-            __wt_seconds(session, &secs);
-            ckpt->sec = (uintmax_t)secs;
         }
         if (strcmp(ckpt->name, WT_CHECKPOINT) == 0)
             WT_ERR(__wt_buf_catfmt(session, buf,

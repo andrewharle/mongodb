@@ -40,6 +40,11 @@ namespace mongo {
 namespace repl {
 
 /**
+ * The first oplog entry is a no-op with this message in its "msg" field.
+ */
+constexpr auto kInitiatingSetMsg = "initiating set"_sd;
+
+/**
  * A parsed oplog entry that inherits from the OplogEntryBase parsed by the IDL.
  * This class is immutable.
  */
@@ -95,7 +100,8 @@ public:
                const boost::optional<StmtId>& statementId,
                const boost::optional<OpTime>& prevWriteOpTimeInTransaction,
                const boost::optional<OpTime>& preImageOpTime,
-               const boost::optional<OpTime>& postImageOpTime);
+               const boost::optional<OpTime>& postImageOpTime,
+               const boost::optional<repl::RetryImageEnum>& needsRetryImage = boost::none);
 
     // DEPRECATED: This constructor can throw. Use static parse method instead.
     explicit OplogEntry(BSONObj raw);

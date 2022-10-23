@@ -83,6 +83,7 @@
 #include "mongo/util/log.h"
 #include "mongo/util/mongoutils/str.h"
 #include "mongo/util/net/socket_exception.h"
+#include "mongo/util/processinfo.h"
 #include "mongo/util/scopeguard.h"
 
 namespace mongo {
@@ -121,6 +122,33 @@ public:
     }
 
 } exportedWriterThreadCountParam;
+
+/**
+ * This variable determines the minimum number of writer threads SyncTail will have. It can be
+ * overridden
+ * using the "replWriterMinThreadCount" server parameter.
+ */
+int replWriterMinThreadCount = 0;
+
+class ExportedWriterMinThreadCountParameter
+    : public ExportedServerParameter<int, ServerParameterType::kStartupOnly> {
+public:
+    ExportedWriterMinThreadCountParameter()
+        : ExportedServerParameter<int, ServerParameterType::kStartupOnly>(
+              ServerParameterSet::getGlobal(),
+              "replWriterMinThreadCount",
+              &replWriterMinThreadCount) {}
+
+    virtual Status validate(const int& potentialNewValue) {
+        if (potentialNewValue < 0 || potentialNewValue > 256) {
+            return Status(ErrorCodes::BadValue,
+                          "replWriterMinThreadCount must be between 0 and 256");
+        }
+
+        return Status::OK();
+    }
+
+} exportedWriterMinThreadCountParam;
 
 class ExportedBatchLimitOperationsParameter
     : public ExportedServerParameter<int, ServerParameterType::kStartupAndRuntime> {
@@ -349,14 +377,26 @@ std::size_t SyncTail::calculateBatchLimitBytes(OperationContext* opCtx,
 }
 
 std::unique_ptr<ThreadPool> SyncTail::makeWriterPool() {
-    return makeWriterPool(replWriterThreadCount);
+    if (replWriterThreadCount < replWriterMinThreadCount) {
+        severe() << "replWriterMinThreadCount must be less than or equal to replWriterThreadCount.";
+        fassertFailedNoTrace(5605400);
+    }
+
+    // Reduce content pinned in cache by single oplog batch on small machines by reducing the number
+    // of threads of ReplWriter to reduce the number of concurrent open WT transactions.
+    auto numberOfThreads =
+        std::min(replWriterThreadCount, 2 * static_cast<int>(ProcessInfo::getNumAvailableCores()));
+
+    return makeWriterPool(numberOfThreads);
 }
 
 std::unique_ptr<ThreadPool> SyncTail::makeWriterPool(int threadCount) {
     ThreadPool::Options options;
     options.threadNamePrefix = "repl writer worker ";
     options.poolName = "repl writer worker Pool";
-    options.maxThreads = options.minThreads = static_cast<size_t>(threadCount);
+    options.minThreads =
+        replWriterMinThreadCount < threadCount ? replWriterMinThreadCount : threadCount;
+    options.maxThreads = static_cast<size_t>(threadCount);
     options.onCreateThread = [](const std::string&) {
         // Only do this once per thread
         if (!Client::getCurrent()) {
@@ -372,7 +412,8 @@ std::unique_ptr<ThreadPool> SyncTail::makeWriterPool(int threadCount) {
 // static
 Status SyncTail::syncApply(OperationContext* opCtx,
                            const BSONObj& op,
-                           OplogApplication::Mode oplogApplicationMode) {
+                           OplogApplication::Mode oplogApplicationMode,
+                           const bool isDataConsistent) {
     // Count each log op application as a separate operation, for reporting purposes
     CurOp individualOp(opCtx);
 
@@ -395,8 +436,13 @@ Status SyncTail::syncApply(OperationContext* opCtx,
         // wants to. We should ignore these errors intelligently while in RECOVERING and STARTUP
         // mode (similar to initial sync) instead so we do not accidentally ignore real errors.
         bool shouldAlwaysUpsert = (oplogApplicationMode != OplogApplication::Mode::kInitialSync);
-        Status status = applyOperation_inlock(
-            opCtx, db, op, shouldAlwaysUpsert, oplogApplicationMode, incrementOpsAppliedStats);
+        Status status = applyOperation_inlock(opCtx,
+                                              db,
+                                              op,
+                                              shouldAlwaysUpsert,
+                                              oplogApplicationMode,
+                                              isDataConsistent,
+                                              incrementOpsAppliedStats);
         if (!status.isOK() && status.code() == ErrorCodes::WriteConflict) {
             throw WriteConflictException();
         }
@@ -553,7 +599,8 @@ void applyOps(std::vector<MultiApplier::OperationPtrs>& writerVectors,
               const SyncTail::MultiSyncApplyFunc& func,
               SyncTail* st,
               std::vector<Status>* statusVector,
-              std::vector<WorkerMultikeyPathInfo>* workerMultikeyPathInfo) {
+              std::vector<WorkerMultikeyPathInfo>* workerMultikeyPathInfo,
+              const bool isDataConsistent) {
     invariant(writerVectors.size() == statusVector->size());
     for (size_t i = 0; i < writerVectors.size(); i++) {
         if (!writerVectors[i].empty()) {
@@ -562,10 +609,11 @@ void applyOps(std::vector<MultiApplier::OperationPtrs>& writerVectors,
                 st,
                 &writer = writerVectors.at(i),
                 &status = statusVector->at(i),
-                &workerMultikeyPathInfo = workerMultikeyPathInfo->at(i)
+                &workerMultikeyPathInfo = workerMultikeyPathInfo->at(i),
+                isDataConsistent
             ] {
                 auto opCtx = cc().makeOperationContext();
-                status = func(opCtx.get(), &writer, st, &workerMultikeyPathInfo);
+                status = func(opCtx.get(), &writer, st, &workerMultikeyPathInfo, isDataConsistent);
             }));
         }
     }
@@ -608,7 +656,7 @@ void scheduleWritesToOplog(OperationContext* opCtx,
     // setup/teardown overhead across many writes.
     const size_t kMinOplogEntriesPerThread = 16;
     const bool enoughToMultiThread =
-        ops.size() >= kMinOplogEntriesPerThread * threadPool->getStats().numThreads;
+        ops.size() >= kMinOplogEntriesPerThread * threadPool->getStats().options.maxThreads;
 
     // Only doc-locking engines support parallel writes to the oplog because they are required to
     // ensure that oplog entries are ordered correctly, even if inserted out-of-order. Additionally,
@@ -622,7 +670,7 @@ void scheduleWritesToOplog(OperationContext* opCtx,
     }
 
 
-    const size_t numOplogThreads = threadPool->getStats().numThreads;
+    const size_t numOplogThreads = threadPool->getStats().options.maxThreads;
     const size_t numOpsPerThread = ops.size() / numOplogThreads;
     for (size_t thread = 0; thread < numOplogThreads; thread++) {
         size_t begin = thread * numOpsPerThread;
@@ -809,6 +857,21 @@ void tryToGoLiveAsASecondary(OperationContext* opCtx,
         LOG(2) << "We cannot transition to SECONDARY state because our 'lastApplied' optime is "
                   "less than the 'minValid' optime. minValid optime: "
                << minValid << ", lastApplied optime: " << lastApplied;
+        return;
+    }
+
+    // Rolling back with eMRC false, we set initialDataTimestamp to max(local oplog top, source's
+    // oplog top), then rollback via refetch. Data is inconsistent until lastApplied >=
+    // initialDataTimestamp.
+    auto storageEngine = opCtx->getServiceContext()->getStorageEngine();
+    auto initialTs = storageEngine->getInitialDataTimestamp();
+    if (lastApplied.getTimestamp() < initialTs) {
+        invariant(!storageEngine->supportsRecoverToStableTimestamp());
+        LOG(2) << "We cannot transition to SECONDARY state because our 'lastApplied' optime is "
+                  "less than the initial data timestamp and enableMajorityReadConcern = false. "
+                  "minValid optime: "
+               << minValid << ", lastApplied optime: " << lastApplied
+               << ", initialDataTimestamp: " << initialTs;
         return;
     }
 
@@ -1377,7 +1440,8 @@ bool SyncTail::fetchAndInsertMissingDocument(OperationContext* opCtx,
 Status multiSyncApply(OperationContext* opCtx,
                       MultiApplier::OperationPtrs* ops,
                       SyncTail* st,
-                      WorkerMultikeyPathInfo* workerMultikeyPathInfo) {
+                      WorkerMultikeyPathInfo* workerMultikeyPathInfo,
+                      const bool isDataConsistent) {
     invariant(st);
 
     UnreplicatedWritesBlock uwb(opCtx);
@@ -1406,7 +1470,7 @@ Status multiSyncApply(OperationContext* opCtx,
 
             // If we are successful in grouping and applying inserts, advance the current iterator
             // past the end of the inserted group of entries.
-            auto groupResult = insertGroup.groupAndApplyInserts(it);
+            auto groupResult = insertGroup.groupAndApplyInserts(it, isDataConsistent);
             if (groupResult.isOK()) {
                 it = groupResult.getValue();
                 continue;
@@ -1414,7 +1478,8 @@ Status multiSyncApply(OperationContext* opCtx,
 
             // If we didn't create a group, try to apply the op individually.
             try {
-                const Status status = SyncTail::syncApply(opCtx, entry.raw, oplogApplicationMode);
+                const Status status =
+                    SyncTail::syncApply(opCtx, entry.raw, oplogApplicationMode, isDataConsistent);
 
                 if (!status.isOK()) {
                     severe() << "Error applying operation (" << redact(entry.toBSON())
@@ -1449,7 +1514,8 @@ Status multiSyncApply(OperationContext* opCtx,
 Status multiInitialSyncApply(OperationContext* opCtx,
                              MultiApplier::OperationPtrs* ops,
                              SyncTail* st,
-                             WorkerMultikeyPathInfo* workerMultikeyPathInfo) {
+                             WorkerMultikeyPathInfo* workerMultikeyPathInfo,
+                             const bool isDataConsistent) {
     invariant(st);
 
     UnreplicatedWritesBlock uwb(opCtx);
@@ -1466,8 +1532,8 @@ Status multiInitialSyncApply(OperationContext* opCtx,
         for (auto it = ops->begin(); it != ops->end(); ++it) {
             auto& entry = **it;
             try {
-                const Status s =
-                    SyncTail::syncApply(opCtx, entry.raw, OplogApplication::Mode::kInitialSync);
+                const Status s = SyncTail::syncApply(
+                    opCtx, entry.raw, OplogApplication::Mode::kInitialSync, isDataConsistent);
                 if (!s.isOK()) {
                     // In initial sync, update operations can cause documents to be missed during
                     // collection cloning. As a result, it is possible that a document that we
@@ -1529,7 +1595,7 @@ StatusWith<OpTime> SyncTail::multiApply(OperationContext* opCtx, MultiApplier::O
     // Increment the batch size stat.
     oplogApplicationBatchSize.increment(ops.size());
 
-    std::vector<WorkerMultikeyPathInfo> multikeyVector(_writerPool->getStats().numThreads);
+    std::vector<WorkerMultikeyPathInfo> multikeyVector(_writerPool->getStats().options.maxThreads);
     {
         // Each node records cumulative batch application stats for itself using this timer.
         TimerHolder timer(&applyBatchStats);
@@ -1579,11 +1645,16 @@ StatusWith<OpTime> SyncTail::multiApply(OperationContext* opCtx, MultiApplier::O
         //   and create a pseudo oplog.
         std::vector<MultiApplier::Operations> derivedOps;
 
-        std::vector<MultiApplier::OperationPtrs> writerVectors(_writerPool->getStats().numThreads);
+        std::vector<MultiApplier::OperationPtrs> writerVectors(
+            _writerPool->getStats().options.maxThreads);
         fillWriterVectors(opCtx, &ops, &writerVectors, &derivedOps);
 
         // Wait for writes to finish before applying ops.
         _writerPool->waitForIdle();
+
+        // Read `minValid` prior to it possibly being written to.
+        const bool isDataConsistent =
+            _consistencyMarkers->getMinValid(opCtx) < ops.front().getOpTime();
 
         // Reset consistency markers in case the node fails while applying ops.
         if (!_options.skipWritesToOplog) {
@@ -1592,8 +1663,15 @@ StatusWith<OpTime> SyncTail::multiApply(OperationContext* opCtx, MultiApplier::O
         }
 
         {
-            std::vector<Status> statusVector(_writerPool->getStats().numThreads, Status::OK());
-            applyOps(writerVectors, _writerPool, _applyFunc, this, &statusVector, &multikeyVector);
+            std::vector<Status> statusVector(_writerPool->getStats().options.maxThreads,
+                                             Status::OK());
+            applyOps(writerVectors,
+                     _writerPool,
+                     _applyFunc,
+                     this,
+                     &statusVector,
+                     &multikeyVector,
+                     isDataConsistent);
             _writerPool->waitForIdle();
 
             // If any of the statuses is not ok, return error.

@@ -117,6 +117,7 @@ void refreshRecipientRoutingTable(OperationContext* opCtx,
 MONGO_FAIL_POINT_DEFINE(doNotRefreshRecipientAfterCommit);
 MONGO_FAIL_POINT_DEFINE(failMigrationCommit);
 MONGO_FAIL_POINT_DEFINE(hangBeforeLeavingCriticalSection);
+MONGO_FAIL_POINT_DEFINE(hangBeforePostMigrationCommitRefresh);
 MONGO_FAIL_POINT_DEFINE(migrationCommitNetworkError);
 
 MigrationSourceManager* MigrationSourceManager::get(CollectionShardingRuntime& csr) {
@@ -471,6 +472,11 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* opC
                                   << "metadata also failed"));
     }
 
+    if (MONGO_FAIL_POINT(hangBeforePostMigrationCommitRefresh)) {
+        log() << "hangBeforePostMigrationCommitRefresh fail point enabled";
+        MONGO_FAIL_POINT_PAUSE_WHILE_SET(hangBeforePostMigrationCommitRefresh);
+    }
+
     // Do a best effort attempt to incrementally refresh the metadata before leaving the critical
     // section. It is okay if the refresh fails because that will cause the metadata to be cleared
     // and subsequent callers will try to do a full refresh.
@@ -563,7 +569,8 @@ Status MigrationSourceManager::commitChunkMetadataOnConfig(OperationContext* opC
                                                           : CollectionShardingRuntime::kDelayed;
         UninterruptibleLockGuard noInterrupt(opCtx->lockState());
         AutoGetCollection autoColl(opCtx, getNss(), MODE_IS);
-        return CollectionShardingRuntime::get(opCtx, getNss())->cleanUpRange(range, whenToClean);
+        return CollectionShardingRuntime::get(opCtx, getNss())
+            ->cleanUpRange(opCtx, autoColl.getCollection(), range, whenToClean);
     }();
 
     if (!MONGO_FAIL_POINT(doNotRefreshRecipientAfterCommit)) {

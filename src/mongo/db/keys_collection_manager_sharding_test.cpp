@@ -372,4 +372,71 @@ TEST_F(KeysManagerShardedTest, HasSeenKeysIsFalseUntilKeysAreFound) {
     ASSERT_EQ(true, keyManager()->hasSeenKeys());
 }
 
+LogicalTime addSeconds(const LogicalTime& logicalTime, const Seconds& seconds) {
+    auto asTimestamp = logicalTime.asTimestamp();
+    return LogicalTime(Timestamp(asTimestamp.getSecs() + seconds.count(), asTimestamp.getInc()));
+}
+
+TEST(KeysCollectionManagerUtilTest, HowMuchSleepNeedForWithDefaultKeysRotationIntervalIs20Days) {
+    auto secondsSinceEpoch = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
+    auto defaultKeysIntervalSeconds = Seconds(KeysRotationIntervalSec);
+
+    auto currentTime = LogicalTime(Timestamp(secondsSinceEpoch, 0));
+    auto latestExpiredAt = addSeconds(currentTime, defaultKeysIntervalSeconds * 2);
+    auto defaultInterval = Milliseconds(defaultKeysIntervalSeconds);
+
+    auto nextWakeupMillis = keys_collection_manager_util::howMuchSleepNeedFor(
+        currentTime, latestExpiredAt, defaultInterval);
+    ASSERT_EQ(nextWakeupMillis, Hours(24) * 20);
+}
+
+TEST(KeysCollectionManagerUtilTest, HowMuchSleepNeedForIsNeverLongerThan20Days) {
+    auto secondsSinceEpoch = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
+    auto keysRotationInterval = Seconds(Hours(24) * 50);
+
+    auto currentTime = LogicalTime(Timestamp(secondsSinceEpoch, 0));
+    auto latestExpiredAt = addSeconds(currentTime, keysRotationInterval * 2);
+    auto interval = Milliseconds(keysRotationInterval);
+
+    auto nextWakeupMillis =
+        keys_collection_manager_util::howMuchSleepNeedFor(currentTime, latestExpiredAt, interval);
+    ASSERT_EQ(nextWakeupMillis, Hours(24) * 20);
+}
+
+TEST(KeysCollectionManagerUtilTest, HowMuchSleepNeedForIsNeverHigherThanRotationInterval) {
+    auto secondsSinceEpoch = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
+    auto keysRotationInterval = Seconds(Hours(24) * 5);
+
+    auto currentTime = LogicalTime(Timestamp(secondsSinceEpoch, 0));
+    auto latestExpiredAt = addSeconds(currentTime, keysRotationInterval * 2);
+    auto interval = Milliseconds(keysRotationInterval);
+
+    auto nextWakeupMillis =
+        keys_collection_manager_util::howMuchSleepNeedFor(currentTime, latestExpiredAt, interval);
+    ASSERT_EQ(nextWakeupMillis, interval);
+}
+
+LogicalTime subtractSeconds(const LogicalTime& logicalTime, const Seconds& seconds) {
+    auto asTimestamp = logicalTime.asTimestamp();
+    return LogicalTime(Timestamp(asTimestamp.getSecs() - seconds.count(), asTimestamp.getInc()));
+}
+
+TEST(KeysCollectionManagerUtilTest, HowMuchSleepNeedForAfterNotFindingKeys) {
+    // Default refresh interval if keys could not be found.
+    const Milliseconds kRefreshIntervalIfErrored(200);
+
+    auto secondsSinceEpoch = durationCount<Seconds>(Date_t::now().toDurationSinceEpoch());
+    auto keysRotationInterval = Milliseconds(5000);
+
+    // The latest found key expired before the current time, which means no new keys were found
+    // despite the previous refresh succeeding.
+    auto currentTime = LogicalTime(Timestamp(secondsSinceEpoch, 0));
+    auto latestExpiredAt = subtractSeconds(currentTime, Seconds(1));
+    auto interval = Milliseconds(keysRotationInterval);
+
+    auto nextWakeupMillis =
+        keys_collection_manager_util::howMuchSleepNeedFor(currentTime, latestExpiredAt, interval);
+    ASSERT_EQ(nextWakeupMillis, kRefreshIntervalIfErrored);
+}
+
 }  // namespace mongo

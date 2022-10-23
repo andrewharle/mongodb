@@ -38,10 +38,13 @@
 #include "mongo/db/kill_sessions_local.h"
 #include "mongo/db/service_context.h"
 #include "mongo/db/session.h"
+#include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
 #include "mongo/util/periodic_runner.h"
 
 namespace mongo {
+// Used in our core transaction passthrough suites to test the abort logic for expired transactions.
+MONGO_FAIL_POINT_DEFINE(increaseFrequencyOfPeriodicThreadToExpireTransactions);
 
 namespace {
 const auto gServiceDecoration =
@@ -74,6 +77,17 @@ void PeriodicThreadToAbortExpiredTransactions::_init(ServiceContext* serviceCont
 
     auto periodicRunner = serviceContext->getPeriodicRunner();
     invariant(periodicRunner);
+    auto jobPeriodMillis = Milliseconds(1000);
+
+    if (MONGO_FAIL_POINT(increaseFrequencyOfPeriodicThreadToExpireTransactions)) {
+        // This failpoint is used in test suites in conjunction with the
+        // setTransactionLifetimeToRandomMillis failpoint, which sets the the transaction lifetime
+        // to expire in milliseconds.
+        jobPeriodMillis = Milliseconds(5);
+        log() << "increaseFrequencyOfPeriodicThreadToExpireTransactions failpoint enabled -- "
+                 "setting frequency of periodic thread to "
+              << jobPeriodMillis << " ms.";
+    }
 
     // We want this job period to be dynamic, to run every (transactionLifetimeLimitSeconds/2)
     // seconds, where transactionLifetimeLimitSeconds is an adjustable server parameter, or within
@@ -113,9 +127,14 @@ void PeriodicThreadToAbortExpiredTransactions::_init(ServiceContext* serviceCont
                                         // behind an active transaction's intent lock.
                                         opCtx->lockState()->setMaxLockTimeout(Milliseconds(0));
 
+                                        // This thread needs storage rollback to complete timely, so
+                                        // instruct the storage engine to not do any extra eviction
+                                        // for this thread, if supported.
+                                        opCtx->recoveryUnit()->setNoEvictionAfterRollback();
+
                                         killAllExpiredTransactions(opCtx.get());
                                     },
-                                    Seconds(1));
+                                    jobPeriodMillis);
 
     _anchor = std::make_shared<PeriodicJobAnchor>(periodicRunner->makeJob(std::move(job)));
 }

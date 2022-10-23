@@ -50,12 +50,19 @@ namespace {
 // Used to generate sequence numbers to assign to each newly created RoutingTableHistory
 AtomicUInt32 nextCMSequenceNumber(0);
 
-void checkAllElementsAreOfType(BSONType type, const BSONObj& o) {
-    for (auto&& element : o) {
-        uassert(ErrorCodes::ConflictingOperationInProgress,
-                str::stream() << "Not all elements of " << o << " are of type " << typeName(type),
-                element.type() == type);
+bool allElementsAreOfType(BSONType type, const BSONObj& obj) {
+    for (auto&& elem : obj) {
+        if (elem.type() != type) {
+            return false;
+        }
     }
+    return true;
+}
+
+void checkAllElementsAreOfType(BSONType type, const BSONObj& o) {
+    uassert(ErrorCodes::ConflictingOperationInProgress,
+            str::stream() << "Not all elements of " << o << " are of type " << typeName(type),
+            allElementsAreOfType(type, o));
 }
 
 std::string extractKeyStringInternal(const BSONObj& shardKeyValue, Ordering ordering) {
@@ -88,17 +95,25 @@ RoutingTableHistory::RoutingTableHistory(NamespaceString nss,
       _collectionVersion(collectionVersion),
       _shardVersions(_constructShardVersionMap()) {}
 
-Chunk ChunkManager::findIntersectingChunk(const BSONObj& shardKey, const BSONObj& collation) const {
+Chunk ChunkManager::findIntersectingChunk(const BSONObj& shardKey,
+                                          const BSONObj& collation,
+                                          bool bypassIsFieldHashedCheck) const {
     const bool hasSimpleCollation = (collation.isEmpty() && !_rt->getDefaultCollator()) ||
         SimpleBSONObjComparator::kInstance.evaluate(collation == CollationSpec::kSimpleSpec);
     if (!hasSimpleCollation) {
         for (BSONElement elt : shardKey) {
+            // We must assume that if the field is specified as "hashed" in the shard key pattern,
+            // then the hash value could have come from a collatable type. If we want to skip the
+            // check in the special case where the _id field is hashed and used as the shard key,
+            // set bypassIsFieldHashedCheck. This assumes that a request with a query that contains
+            // an _id field can target a specific shard.
             uassert(ErrorCodes::ShardKeyNotFound,
                     str::stream() << "Cannot target single shard due to collation of key "
                                   << elt.fieldNameStringData()
                                   << " for namespace "
                                   << getns().toString(),
-                    !CollationIndexKey::isCollatableType(elt.type()));
+                    !CollationIndexKey::isCollatableType(elt.type()) &&
+                        (!_rt->getShardKeyPattern().isHashedPattern() || bypassIsFieldHashedCheck));
         }
     }
 
@@ -193,6 +208,16 @@ void ChunkManager::getShardIdsForQuery(OperationContext* opCtx,
 void ChunkManager::getShardIdsForRange(const BSONObj& min,
                                        const BSONObj& max,
                                        std::set<ShardId>* shardIds) const {
+    // If our range is [MinKey, MaxKey], we can simply return all shard ids right away. However,
+    // this optimization does not apply when we are reading from a snapshot because _shardVersions
+    // contains shards with chunks and is built based on the last refresh. Therefore, it is
+    // possible for _shardVersions to have fewer entries if a shard no longer owns chunks when it
+    // used to at _clusterTime.
+    if (!_clusterTime && allElementsAreOfType(MinKey, min) && allElementsAreOfType(MaxKey, max)) {
+        getAllShardIds(shardIds);
+        return;
+    }
+
     const auto bounds = _rt->overlappingRanges(min, max, true);
     for (auto it = bounds.first; it != bounds.second; ++it) {
         shardIds->insert(it->second->getShardIdAt(_clusterTime));
@@ -235,6 +260,10 @@ void RoutingTableHistory::getAllShardIds(std::set<ShardId>* all) const {
                    _shardVersions.end(),
                    std::inserter(*all, all->begin()),
                    [](const ShardVersionMap::value_type& pair) { return pair.first; });
+}
+
+int RoutingTableHistory::getNShardsOwningChunks() const {
+    return _shardVersions.size();
 }
 
 std::pair<ChunkInfoMap::const_iterator, ChunkInfoMap::const_iterator>

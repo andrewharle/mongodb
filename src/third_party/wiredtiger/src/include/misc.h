@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -76,12 +76,6 @@
  * Constant value.
  */
 #define WT_ENCRYPT_LEN_SIZE sizeof(uint32_t)
-
-/*
- * Default hash table size; we don't need a prime number of buckets because we always use a good
- * hash function.
- */
-#define WT_HASH_ARRAY_SIZE 512
 
 /*
  * __wt_calloc_def, __wt_calloc_one --
