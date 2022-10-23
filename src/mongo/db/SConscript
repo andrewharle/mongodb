@@ -134,6 +134,7 @@ env.CppUnitTest(
         'common',
         'op_observer_impl',
         'repl/replmocks',
+        'repl/storage_interface_impl',
         'service_context_d_test_fixture',
     ],
 )
@@ -246,6 +247,16 @@ env.CppUnitTest(
         '$BUILD_DIR/mongo/db/auth/authmocks',
         '$BUILD_DIR/mongo/unittest/concurrency',
         '$BUILD_DIR/mongo/util/clock_source_mock',
+    ],
+)
+
+env.CppUnitTest(
+    target='operation_id_test',
+    source=[
+        'operation_id_test.cpp',
+    ],
+    LIBDEPS=[
+        'service_context',
     ],
 )
 
@@ -506,6 +517,7 @@ env.Library(
         'multi_key_path_tracker.cpp',
         'operation_context.cpp',
         'operation_context_group.cpp',
+        'operation_id.cpp',
         'service_context.cpp',
         'server_recovery.cpp',
         'unclean_shutdown.cpp',
@@ -651,6 +663,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         'commands/server_status',
+        'op_observer',
         'update/update_driver',
     ]
 )
@@ -748,6 +761,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        'server_parameters',
     ],
 )
 
@@ -764,9 +778,12 @@ env.Library(
         'views/views_mongod',
         '$BUILD_DIR/mongo/base',
         '$BUILD_DIR/mongo/db/catalog/uuid_catalog',
+        '$BUILD_DIR/mongo/s/coreshard',
+        "$BUILD_DIR/mongo/s/grid",
     ],
     LIBDEPS_PRIVATE=[
         '$BUILD_DIR/mongo/db/commands/mongod_fcv',
+        '$BUILD_DIR/mongo/db/repl/image_collection_entry',
     ],
 )
 
@@ -1370,6 +1387,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         's/sharding_api_d',
+        '$BUILD_DIR/mongo/db/repl/repl_coordinator_interface'
     ]
 )
 
@@ -1798,6 +1816,7 @@ env.Library(
     ],
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/repl/image_collection_entry',
         'catalog_raii',
         'catalog/collection_info_cache',
         'concurrency/lock_manager',

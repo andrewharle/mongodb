@@ -77,6 +77,7 @@
 #include "mongo/db/repl/apply_ops.h"
 #include "mongo/db/repl/bgsync.h"
 #include "mongo/db/repl/dbcheck.h"
+#include "mongo/db/repl/image_collection_entry_gen.h"
 #include "mongo/db/repl/oplogreader.h"
 #include "mongo/db/repl/optime.h"
 #include "mongo/db/repl/repl_client_info.h"
@@ -219,8 +220,8 @@ bool shouldBuildInForeground(OperationContext* opCtx,
                              const NamespaceString& indexNss,
                              repl::OplogApplication::Mode mode) {
     if (mode == OplogApplication::Mode::kRecovering) {
-        LOG(3) << "apply op: building background index " << index
-               << " in the foreground because the node is in recovery";
+        log() << "apply op: building background index " << index
+              << " in the foreground because the node is in recovery - see SERVER-43097";
         return true;
     }
 
@@ -240,6 +241,16 @@ bool shouldBuildInForeground(OperationContext* opCtx,
     return false;
 }
 
+
+StringData getInvalidatingReason(const OplogApplication::Mode mode, const bool isDataConsistent) {
+    if (mode == OplogApplication::Mode::kInitialSync) {
+        return "initial sync"_sd;
+    } else if (!isDataConsistent) {
+        return "minvalid suggests inconsistent snapshot"_sd;
+    }
+
+    return ""_sd;
+}
 
 }  // namespace
 
@@ -312,6 +323,44 @@ void createIndexForApplyOps(OperationContext* opCtx,
     }
 }
 
+void writeToImageCollection(OperationContext* opCtx,
+                            const BSONObj& op,
+                            const BSONObj& image,
+                            repl::RetryImageEnum imageKind,
+                            const StringData& invalidatedReason,
+                            bool* upsertConfigImage) {
+    AutoGetCollection autoColl(opCtx, NamespaceString::kConfigImagesNamespace, LockMode::MODE_IX);
+    repl::ImageEntry imageEntry;
+    LogicalSessionId sessionId =
+        LogicalSessionId::parse(IDLParserErrorContext("ParseSessionIdWhenWritingToImageCollection"),
+                                op.getField(OplogEntryBase::kSessionIdFieldName).Obj());
+    imageEntry.set_id(sessionId);
+    imageEntry.setTxnNumber(op.getField(OplogEntryBase::kTxnNumberFieldName).numberLong());
+    imageEntry.setTs(op["ts"].timestamp());
+    imageEntry.setImageKind(imageKind);
+    imageEntry.setImage(image);
+    if (image.isEmpty()) {
+        imageEntry.setInvalidated(true);
+        imageEntry.setInvalidatedReason(invalidatedReason);
+    }
+
+    UpdateRequest request(NamespaceString::kConfigImagesNamespace);
+    request.setQuery(
+        BSON("_id" << imageEntry.get_id().toBSON() << "ts" << BSON("$lt" << imageEntry.getTs())));
+    request.setUpsert(*upsertConfigImage);
+    request.setUpdates(imageEntry.toBSON());
+    request.setFromOplogApplication(true);
+    try {
+        // This code path can also be hit by things such as `applyOps` and tenant migrations.
+        repl::UnreplicatedWritesBlock dontReplicate(opCtx);
+        ::mongo::update(opCtx, autoColl.getDb(), request);
+    } catch (const ExceptionFor<ErrorCodes::DuplicateKey>&) {
+        // We can get a duplicate key when two upserts race on inserting a document.
+        *upsertConfigImage = false;
+        throw WriteConflictException();
+    }
+}
+
 namespace {
 
 /**
@@ -360,7 +409,8 @@ OplogDocWriter _logOpWriter(OperationContext* opCtx,
                             Date_t wallTime,
                             const OperationSessionInfo& sessionInfo,
                             StmtId statementId,
-                            const OplogLink& oplogLink) {
+                            const OplogLink& oplogLink,
+                            boost::optional<repl::RetryImageEnum> needsRetryImage) {
     BSONObjBuilder b(256);
 
     b.append("ts", optime.getTimestamp());
@@ -378,6 +428,10 @@ OplogDocWriter _logOpWriter(OperationContext* opCtx,
 
     if (o2)
         b.append("o2", *o2);
+
+    if (needsRetryImage) {
+        b.append("needsRetryImage", repl::RetryImage_serializer(*needsRetryImage));
+    }
 
     invariant(wallTime != Date_t{});
     b.appendDate("wall", wallTime);
@@ -415,7 +469,7 @@ void _logOpsInner(OperationContext* opCtx,
                   Collection* oplogCollection,
                   OpTime finalOpTime) {
     auto replCoord = ReplicationCoordinator::get(opCtx);
-    if (nss.size() && replCoord->getReplicationMode() == ReplicationCoordinator::modeReplSet &&
+    if (replCoord->getReplicationMode() == ReplicationCoordinator::modeReplSet &&
         !replCoord->canAcceptWritesFor(opCtx, nss)) {
         uasserted(17405,
                   str::stream() << "logOp() but can't accept write to collection " << nss.ns());
@@ -458,7 +512,8 @@ OpTime logOp(OperationContext* opCtx,
              const OperationSessionInfo& sessionInfo,
              StmtId statementId,
              const OplogLink& oplogLink,
-             const OplogSlot& oplogSlot) {
+             const OplogSlot& oplogSlot,
+             boost::optional<repl::RetryImageEnum> needsRetryImage) {
     auto replCoord = ReplicationCoordinator::get(opCtx);
     // For commands, the test below is on the command ns and therefore does not check for
     // specific namespaces such as system.profile. This is the caller's responsibility.
@@ -499,7 +554,8 @@ OpTime logOp(OperationContext* opCtx,
                                wallClockTime,
                                sessionInfo,
                                statementId,
-                               oplogLink);
+                               oplogLink,
+                               needsRetryImage);
     const DocWriter* basePtr = &writer;
     auto timestamp = slot.opTime.getTimestamp();
     _logOpsInner(opCtx, nss, &basePtr, &timestamp, 1, oplog, slot.opTime);
@@ -571,7 +627,8 @@ std::vector<OpTime> logInsertOps(OperationContext* opCtx,
                                           wallClockTime,
                                           sessionInfo,
                                           begin[i].stmtId,
-                                          oplogLink));
+                                          oplogLink,
+                                          {}));
         oplogLink.prevOpTime = insertStatementOplogSlot.opTime;
         timestamps[i] = oplogLink.prevOpTime.getTimestamp();
         opTimes.push_back(insertStatementOplogSlot.opTime);
@@ -1074,6 +1131,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
                              const BSONObj& op,
                              bool alwaysUpsert,
                              OplogApplication::Mode mode,
+                             const bool isDataConsistent,
                              IncrementOpsAppliedStatsFn incrementOpsAppliedStats) {
     LOG(3) << "applying op: " << redact(op)
            << ", oplog application mode: " << OplogApplication::modeToString(mode);
@@ -1438,6 +1496,19 @@ Status applyOperation_inlock(OperationContext* opCtx,
         request.setUpdates(o);
         request.setUpsert(upsert);
         request.setFromOplogApplication(true);
+        boost::optional<repl::RetryImageEnum> imageKind;
+        if (op.hasField(OplogEntryBase::kNeedsRetryImageFieldName)) {
+            imageKind = repl::RetryImage_parse(
+                IDLParserErrorContext("applyUpdate"),
+                op.getField(OplogEntryBase::kNeedsRetryImageFieldName).String());
+            if (mode != OplogApplication::Mode::kInitialSync && isDataConsistent) {
+                if (imageKind == repl::RetryImageEnum::kPreImage) {
+                    request.setReturnDocs(UpdateRequest::ReturnDocOption::RETURN_OLD);
+                } else if (imageKind == repl::RetryImageEnum::kPostImage) {
+                    request.setReturnDocs(UpdateRequest::ReturnDocOption::RETURN_NEW);
+                }
+            }
+        }
 
         UpdateLifecycleImpl updateLifecycle(requestNss);
         request.setLifecycle(&updateLifecycle);
@@ -1448,6 +1519,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
         }
 
         const StringData ns = fieldNs.valuestrsafe();
+        bool upsertConfigImage = true;
         auto status = writeConflictRetry(opCtx, "applyOps_update", ns, [&] {
             WriteUnitOfWork wuow(opCtx);
             if (timestamp != Timestamp::min()) {
@@ -1493,7 +1565,15 @@ Status applyOperation_inlock(OperationContext* opCtx,
                     }
                 }
             }
-
+            if (op.hasField(OplogEntryBase::kNeedsRetryImageFieldName)) {
+                invariant(imageKind);
+                writeToImageCollection(opCtx,
+                                       op,
+                                       ur.requestedDocImage,
+                                       *imageKind,
+                                       getInvalidatingReason(mode, isDataConsistent),
+                                       &upsertConfigImage);
+            }
             wuow.commit();
             return Status::OK();
         });
@@ -1526,6 +1606,7 @@ Status applyOperation_inlock(OperationContext* opCtx,
             timestamp = fieldTs.timestamp();
         }
 
+        bool upsertConfigImage = true;
         const StringData ns = fieldNs.valuestrsafe();
         writeConflictRetry(opCtx, "applyOps_delete", ns, [&] {
             WriteUnitOfWork wuow(opCtx);
@@ -1534,8 +1615,23 @@ Status applyOperation_inlock(OperationContext* opCtx,
             }
 
             if (opType[1] == 0) {
-                const auto justOne = true;
-                deleteObjects(opCtx, collection, requestNss, deleteCriteria, justOne);
+                DeleteRequest request(requestNss);
+                request.setQuery(deleteCriteria);
+                if (mode != OplogApplication::Mode::kInitialSync &&
+                    op.hasField(OplogEntryBase::kNeedsRetryImageFieldName) && isDataConsistent) {
+                    request.setReturnDeleted(true);
+                }
+                boost::optional<BSONObj> preImage = deleteObject(opCtx, collection, request);
+                if (op.hasField(OplogEntryBase::kNeedsRetryImageFieldName)) {
+                    // If preImage is boost::none, this indicates we did not request a preImage due
+                    // to being in initial sync.
+                    writeToImageCollection(opCtx,
+                                           op,
+                                           preImage.value_or(BSONObj()),
+                                           repl::RetryImageEnum::kPreImage,
+                                           getInvalidatingReason(mode, isDataConsistent),
+                                           &upsertConfigImage);
+                }
             } else
                 verify(opType[1] == 'b');  // "db" advertisement
             wuow.commit();

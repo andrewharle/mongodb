@@ -58,6 +58,7 @@
 #include "mongo/db/stats/fill_locker_info.h"
 #include "mongo/db/stats/top.h"
 #include "mongo/db/transaction_history_iterator.h"
+#include "mongo/platform/random.h"
 #include "mongo/stdx/memory.h"
 #include "mongo/transport/transport_layer.h"
 #include "mongo/util/fail_point_service.h"
@@ -87,6 +88,9 @@ MONGO_EXPORT_SERVER_PARAMETER(transactionLifetimeLimitSeconds, std::int32_t, 60)
 
         return Status::OK();
     });
+
+// Used in our core transaction passthrough suites to test the abort logic for expired transactions.
+MONGO_FAIL_POINT_DEFINE(setTransactionLifetimeToRandomMillis);
 
 
 namespace {
@@ -335,7 +339,7 @@ void Session::beginOrContinueTxn(OperationContext* opCtx,
     invariant(!opCtx->lockState()->isLocked());
 
     stdx::lock_guard<stdx::mutex> lg(_mutex);
-    _beginOrContinueTxn(lg, txnNumber, autocommit, startTransaction);
+    _beginOrContinueTxn(lg, opCtx, txnNumber, autocommit, startTransaction);
 }
 
 void Session::beginOrContinueTxnOnMigration(OperationContext* opCtx, TxnNumber txnNumber) {
@@ -343,7 +347,7 @@ void Session::beginOrContinueTxnOnMigration(OperationContext* opCtx, TxnNumber t
     invariant(!opCtx->lockState()->isLocked());
 
     stdx::lock_guard<stdx::mutex> lg(_mutex);
-    _beginOrContinueTxnOnMigration(lg, txnNumber);
+    _beginOrContinueTxnOnMigration(lg, opCtx, txnNumber);
 }
 
 void Session::_setSpeculativeTransactionOpTime(WithLock,
@@ -495,6 +499,7 @@ bool Session::checkStatementExecutedNoOplogEntryFetch(TxnNumber txnNumber, StmtI
 }
 
 void Session::_beginOrContinueTxn(WithLock wl,
+                                  OperationContext* opCtx,
                                   TxnNumber txnNumber,
                                   boost::optional<bool> autocommit,
                                   boost::optional<bool> startTransaction) {
@@ -504,7 +509,7 @@ void Session::_beginOrContinueTxn(WithLock wl,
 
     // Check if the given transaction number is valid for this session. The transaction number must
     // be >= the active transaction number.
-    _checkTxnValid(wl, txnNumber);
+    _checkTxnValid(wl, txnNumber, autocommit);
 
     //
     // Continue an active transaction.
@@ -545,7 +550,7 @@ void Session::_beginOrContinueTxn(WithLock wl,
                 ServerTransactionsMetrics::get(getGlobalServiceContext())->incrementCurrentActive();
                 ServerTransactionsMetrics::get(getGlobalServiceContext())
                     ->decrementCurrentInactive();
-                _abortTransaction(wl);
+                _abortTransaction(wl, opCtx);
                 uasserted(ErrorCodes::NoSuchTransaction,
                           str::stream() << "Transaction " << txnNumber
                                         << " has been aborted because an earlier command in this "
@@ -581,13 +586,24 @@ void Session::_beginOrContinueTxn(WithLock wl,
              serverGlobalParams.featureCompatibility.getVersion() ==
                  ServerGlobalParams::FeatureCompatibility::Version::kFullyUpgradedTo40));
 
-        _setActiveTxn(wl, txnNumber);
+        _setActiveTxn(wl, opCtx, txnNumber);
         _autocommit = false;
         _txnState = MultiDocumentTransactionState::kInProgress;
 
         const auto now = curTimeMicros64();
         _transactionExpireDate = Date_t::fromMillisSinceEpoch(now / 1000) +
             Seconds{transactionLifetimeLimitSeconds.load()};
+
+        if (MONGO_FAIL_POINT(setTransactionLifetimeToRandomMillis)) {
+            PseudoRandom prng(SecureRandom::create()->nextInt64());
+            // Override the transaction lifetime to expire in the next 0-20 ms.
+            const auto expireMillis = prng.nextInt32(20);
+            log() << "setTransactionLifetimeToRandomMillis failpoint enabled -- "
+                  << "setting transaction to expire in " << expireMillis << "ms.";
+            _transactionExpireDate =
+                Date_t::fromMillisSinceEpoch(now / 1000) + Milliseconds{expireMillis};
+        }
+
         // Tracks various transactions metrics.
         {
             stdx::lock_guard<stdx::mutex> ls(_statsMutex);
@@ -602,7 +618,7 @@ void Session::_beginOrContinueTxn(WithLock wl,
     } else {
         // Execute a retryable write.
         invariant(startTransaction == boost::none);
-        _setActiveTxn(wl, txnNumber);
+        _setActiveTxn(wl, opCtx, txnNumber);
         _autocommit = true;
         _txnState = MultiDocumentTransactionState::kNone;
     }
@@ -610,17 +626,39 @@ void Session::_beginOrContinueTxn(WithLock wl,
     invariant(_transactionOperations.empty());
 }
 
-void Session::_checkTxnValid(WithLock, TxnNumber txnNumber) const {
-    uassert(ErrorCodes::TransactionTooOld,
-            str::stream() << "Cannot start transaction " << txnNumber << " on session "
-                          << getSessionId()
-                          << " because a newer transaction "
-                          << _activeTxnNumber
-                          << " has already started.",
-            txnNumber >= _activeTxnNumber);
+void Session::_checkTxnValid(WithLock,
+                             TxnNumber txnNumber,
+                             boost::optional<bool> autocommit) const {
+    if (txnNumber < _activeTxnNumber) {
+        const std::string currOperation =
+            _txnState == MultiDocumentTransactionState::kNone ? "retryable write" : "transaction";
+        if (!autocommit) {
+            uasserted(ErrorCodes::TransactionTooOld,
+                      str::stream() << "Retryable write with txnNumber " << txnNumber
+                                    << " is prohibited on session "
+                                    << _sessionId
+                                    << " because a newer "
+                                    << currOperation
+                                    << " with txnNumber "
+                                    << _activeTxnNumber
+                                    << " has already started on this session.");
+        } else {
+            uasserted(ErrorCodes::TransactionTooOld,
+                      str::stream() << "Cannot start transaction " << txnNumber << " on session "
+                                    << _sessionId
+                                    << " because a newer "
+                                    << currOperation
+                                    << " with txnNumber "
+                                    << _activeTxnNumber
+                                    << " has already started on this session.");
+        }
+    }
 }
 
 Session::TxnResources::TxnResources(OperationContext* opCtx, bool keepTicket) {
+    if (!opCtx->getWriteUnitOfWork()) {
+        return;
+    }
     stdx::lock_guard<Client> lk(*opCtx->getClient());
     _ruState = opCtx->getWriteUnitOfWork()->release();
     opCtx->setWriteUnitOfWork(nullptr);
@@ -682,6 +720,10 @@ void Session::TxnResources::release(OperationContext* opCtx) {
 
     auto& readConcernArgs = repl::ReadConcernArgs::get(opCtx);
     readConcernArgs = _readConcernArgs;
+}
+
+void Session::TxnResources::setNoEvictionAfterRollback() {
+    _recoveryUnit->setNoEvictionAfterRollback();
 }
 
 void Session::stashTransactionResources(OperationContext* opCtx) {
@@ -864,17 +906,17 @@ void Session::unstashTransactionResources(OperationContext* opCtx, const std::st
     }
 }
 
-void Session::abortArbitraryTransaction() {
+void Session::abortArbitraryTransaction(OperationContext* opCtx) {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
 
     if (_txnState != MultiDocumentTransactionState::kInProgress) {
         return;
     }
 
-    _abortTransaction(lock);
+    _abortTransaction(lock, opCtx);
 }
 
-void Session::abortArbitraryTransactionIfExpired() {
+void Session::abortArbitraryTransactionIfExpired(OperationContext* opCtx) {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
     if (_txnState != MultiDocumentTransactionState::kInProgress || !_transactionExpireDate ||
         _transactionExpireDate >= Date_t::now()) {
@@ -894,7 +936,7 @@ void Session::abortArbitraryTransactionIfExpired() {
           << _sessionId.getId()
           << " because it has been running for longer than 'transactionLifetimeLimitSeconds'";
 
-    _abortTransaction(lock);
+    _abortTransaction(lock, opCtx);
 }
 
 void Session::abortActiveTransaction(OperationContext* opCtx) {
@@ -917,7 +959,7 @@ void Session::abortActiveTransaction(OperationContext* opCtx) {
         return;
     }
 
-    _abortTransaction(lock);
+    _abortTransaction(lock, opCtx);
     {
         stdx::lock_guard<stdx::mutex> ls(_statsMutex);
         // Add the latest operation stats to the aggregate OpDebug object stored in the
@@ -952,7 +994,7 @@ void Session::abortActiveTransaction(OperationContext* opCtx) {
         repl::ReadConcernArgs::get(opCtx));
 }
 
-void Session::_abortTransaction(WithLock wl) {
+void Session::_abortTransaction(WithLock wl, OperationContext* opCtx) {
     // TODO SERVER-33432 Disallow aborting committed transaction after we implement implicit abort.
     // A transaction in kCommitting state will either commit or abort for storage-layer reasons; it
     // is too late to abort externally.
@@ -977,6 +1019,10 @@ void Session::_abortTransaction(WithLock wl) {
                             MultiDocumentTransactionState::kAborted,
                             _txnResourceStash->getReadConcernArgs());
         ServerTransactionsMetrics::get(getGlobalServiceContext())->decrementCurrentInactive();
+
+        if (opCtx->recoveryUnit()->getNoEvictionAfterRollback()) {
+            _txnResourceStash->setNoEvictionAfterRollback();
+        }
     } else {
         ServerTransactionsMetrics::get(getGlobalServiceContext())->decrementCurrentActive();
     }
@@ -992,21 +1038,26 @@ void Session::_abortTransaction(WithLock wl) {
         .incrementGlobalTransactionLatencyStats(_singleTransactionStats.getDuration(curTime));
 }
 
-void Session::_beginOrContinueTxnOnMigration(WithLock wl, TxnNumber txnNumber) {
+void Session::_beginOrContinueTxnOnMigration(WithLock wl,
+                                             OperationContext* opCtx,
+                                             TxnNumber txnNumber) {
     _checkValid(wl);
-    _checkTxnValid(wl, txnNumber);
+    // The value for 'autocommit' is only used to
+    // generate the uassert error message. In this case, the exception will never be
+    // propagated to the user.
+    _checkTxnValid(wl, txnNumber, boost::optional<bool>());
 
     // Check for continuing an existing transaction
     if (txnNumber == _activeTxnNumber)
         return;
 
-    _setActiveTxn(wl, txnNumber);
+    _setActiveTxn(wl, opCtx, txnNumber);
 }
 
-void Session::_setActiveTxn(WithLock wl, TxnNumber txnNumber) {
+void Session::_setActiveTxn(WithLock wl, OperationContext* opCtx, TxnNumber txnNumber) {
     // Abort the existing transaction if it's not committed or aborted.
     if (_txnState == MultiDocumentTransactionState::kInProgress) {
-        _abortTransaction(wl);
+        _abortTransaction(wl, opCtx);
     }
     _activeTxnNumber = txnNumber;
     _activeTxnCommittedStatements.clear();
@@ -1428,62 +1479,63 @@ void Session::_registerUpdateCacheOnCommit(OperationContext* opCtx,
                                            TxnNumber newTxnNumber,
                                            std::vector<StmtId> stmtIdsWritten,
                                            const repl::OpTime& lastStmtIdWriteOpTime) {
-    opCtx->recoveryUnit()->onCommit(
-        [ this, newTxnNumber, stmtIdsWritten = std::move(stmtIdsWritten), lastStmtIdWriteOpTime ](
-            boost::optional<Timestamp>) {
-            RetryableWritesStats::get(getGlobalServiceContext())
-                ->incrementTransactionsCollectionWriteCount();
+    opCtx->recoveryUnit()->onCommit([
+        this,
+        opCtx,
+        newTxnNumber,
+        stmtIdsWritten = std::move(stmtIdsWritten),
+        lastStmtIdWriteOpTime
+    ](boost::optional<Timestamp>) {
+        RetryableWritesStats::get(getGlobalServiceContext())
+            ->incrementTransactionsCollectionWriteCount();
 
-            stdx::lock_guard<stdx::mutex> lg(_mutex);
+        stdx::lock_guard<stdx::mutex> lg(_mutex);
 
-            if (!_isValid)
-                return;
+        if (!_isValid)
+            return;
 
-            // The cache of the last written record must always be advanced after a write so that
-            // subsequent writes have the correct point to start from.
-            if (!_lastWrittenSessionRecord) {
-                _lastWrittenSessionRecord.emplace();
+        // The cache of the last written record must always be advanced after a write so that
+        // subsequent writes have the correct point to start from.
+        if (!_lastWrittenSessionRecord) {
+            _lastWrittenSessionRecord.emplace();
 
-                _lastWrittenSessionRecord->setSessionId(_sessionId);
+            _lastWrittenSessionRecord->setSessionId(_sessionId);
+            _lastWrittenSessionRecord->setTxnNum(newTxnNumber);
+            _lastWrittenSessionRecord->setLastWriteOpTime(lastStmtIdWriteOpTime);
+        } else {
+            if (newTxnNumber > _lastWrittenSessionRecord->getTxnNum())
                 _lastWrittenSessionRecord->setTxnNum(newTxnNumber);
+
+            if (lastStmtIdWriteOpTime > _lastWrittenSessionRecord->getLastWriteOpTime())
                 _lastWrittenSessionRecord->setLastWriteOpTime(lastStmtIdWriteOpTime);
-            } else {
-                if (newTxnNumber > _lastWrittenSessionRecord->getTxnNum())
-                    _lastWrittenSessionRecord->setTxnNum(newTxnNumber);
+        }
 
-                if (lastStmtIdWriteOpTime > _lastWrittenSessionRecord->getLastWriteOpTime())
-                    _lastWrittenSessionRecord->setLastWriteOpTime(lastStmtIdWriteOpTime);
-            }
+        if (newTxnNumber > _activeTxnNumber) {
+            // This call is necessary in order to advance the txn number and reset the cached
+            // state in the case where just before the storage transaction commits, the cache
+            // entry gets invalidated and immediately refreshed while there were no writes for
+            // newTxnNumber yet. In this case _activeTxnNumber will be less than newTxnNumber
+            // and we will fail to update the cache even though the write was successful.
+            _beginOrContinueTxn(lg, opCtx, newTxnNumber, boost::none, boost::none);
+        }
 
-            if (newTxnNumber > _activeTxnNumber) {
-                // This call is necessary in order to advance the txn number and reset the cached
-                // state in the case where just before the storage transaction commits, the cache
-                // entry gets invalidated and immediately refreshed while there were no writes for
-                // newTxnNumber yet. In this case _activeTxnNumber will be less than newTxnNumber
-                // and we will fail to update the cache even though the write was successful.
-                _beginOrContinueTxn(lg, newTxnNumber, boost::none, boost::none);
-            }
+        if (newTxnNumber == _activeTxnNumber) {
+            for (const auto stmtId : stmtIdsWritten) {
+                if (stmtId == kIncompleteHistoryStmtId) {
+                    _hasIncompleteHistory = true;
+                    continue;
+                }
 
-            if (newTxnNumber == _activeTxnNumber) {
-                for (const auto stmtId : stmtIdsWritten) {
-                    if (stmtId == kIncompleteHistoryStmtId) {
-                        _hasIncompleteHistory = true;
-                        continue;
-                    }
-
-                    const auto insertRes =
-                        _activeTxnCommittedStatements.emplace(stmtId, lastStmtIdWriteOpTime);
-                    if (!insertRes.second) {
-                        const auto& existingOpTime = insertRes.first->second;
-                        fassertOnRepeatedExecution(_sessionId,
-                                                   newTxnNumber,
-                                                   stmtId,
-                                                   existingOpTime,
-                                                   lastStmtIdWriteOpTime);
-                    }
+                const auto insertRes =
+                    _activeTxnCommittedStatements.emplace(stmtId, lastStmtIdWriteOpTime);
+                if (!insertRes.second) {
+                    const auto& existingOpTime = insertRes.first->second;
+                    fassertOnRepeatedExecution(
+                        _sessionId, newTxnNumber, stmtId, existingOpTime, lastStmtIdWriteOpTime);
                 }
             }
-        });
+        }
+    });
 
     MONGO_FAIL_POINT_BLOCK(onPrimaryTransactionalWrite, customArgs) {
         const auto& data = customArgs.getData();

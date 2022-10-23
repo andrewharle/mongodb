@@ -49,6 +49,7 @@
 #include "mongo/db/auth/action_set.h"
 #include "mongo/db/auth/action_type.h"
 #include "mongo/db/auth/address_restriction.h"
+#include "mongo/db/auth/auth_options.h"
 #include "mongo/db/auth/authorization_manager.h"
 #include "mongo/db/auth/authorization_manager_global.h"
 #include "mongo/db/auth/authorization_session.h"
@@ -67,6 +68,7 @@
 #include "mongo/db/operation_context.h"
 #include "mongo/db/ops/write_ops.h"
 #include "mongo/db/query/cursor_response.h"
+#include "mongo/db/server_parameters.h"
 #include "mongo/db/service_context.h"
 #include "mongo/rpc/get_status_from_command_result.h"
 #include "mongo/s/write_ops/batched_command_response.h"
@@ -798,12 +800,17 @@ public:
         }
 
 #ifdef MONGO_CONFIG_SSL
-        if (args.userName.getDB() == "$external" && getSSLManager() &&
+        if (getSSLManager() && dbname == "$external" &&
             getSSLManager()->getSSLConfiguration().isClusterMember(args.userName.getUser())) {
-            uasserted(ErrorCodes::BadValue,
-                      "Cannot create an x.509 user with a subjectname "
-                      "that would be recognized as an internal "
-                      "cluster member.");
+            if (shouldEnforceUserClusterSeparation()) {
+                uasserted(ErrorCodes::BadValue,
+                          "Cannot create an x.509 user with a subjectname that would be "
+                          "recognized as an internal cluster member");
+            } else {
+                log() << "Creating user '" << args.userName
+                      << "' which would be considered a cluster member if clusterAuthMode enabled "
+                         "X509 authentication";
+            }
         }
 #endif
 

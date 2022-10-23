@@ -44,6 +44,7 @@
 #include "mongo/db/pipeline/expression_context.h"
 #include "mongo/db/pipeline/value.h"
 #include "mongo/db/query/datetime/date_time_support.h"
+#include "mongo/db/query/query_knobs.h"
 #include "mongo/platform/bits.h"
 #include "mongo/platform/decimal128.h"
 #include "mongo/util/mongoutils/str.h"
@@ -639,7 +640,13 @@ Value ExpressionArrayToObject::evaluate(const Document& root, Variables* variabl
                                   << typeName(valArray[0].getType()),
                     (valArray[0].getType() == BSONType::String));
 
-            output[valArray[0].getString()] = valArray[1];
+            auto keyName = valArray[0].getStringData();
+
+            uassert(4940400,
+                    "Key field cannot contain an embedded null byte",
+                    keyName.find('\0') == std::string::npos);
+
+            output[keyName] = valArray[1];
 
         } else {
             uassert(
@@ -671,7 +678,13 @@ Value ExpressionArrayToObject::evaluate(const Document& root, Variables* variabl
                               << typeName(key.getType()),
                 (key.getType() == BSONType::String));
 
-            output[key.getString()] = value;
+            auto keyName = key.getStringData();
+
+            uassert(4940401,
+                    "Key field cannot contain an embedded null byte",
+                    keyName.find('\0') == std::string::npos);
+
+            output[keyName] = value;
         }
     }
 
@@ -1861,10 +1874,12 @@ Value ExpressionDateToString::evaluate(const Document& root, Variables* variable
             return Value(BSONNULL);
         }
 
-        return Value(timeZone->formatDate(formatValue.getStringData(), date.coerceToDate()));
+        return Value(uassertStatusOK(
+            timeZone->formatDate(formatValue.getStringData(), date.coerceToDate())));
     }
 
-    return Value(timeZone->formatDate(Value::kISOFormatString, date.coerceToDate()));
+    return Value(
+        uassertStatusOK(timeZone->formatDate(Value::kISOFormatString, date.coerceToDate())));
 }
 
 void ExpressionDateToString::_doAddDependencies(DepsTracker* deps) const {
@@ -2686,11 +2701,17 @@ Value ExpressionMultiply::evaluate(const Document& root, Variables* variables) c
                 decimalProduct = decimalProduct.multiply(val.coerceToDecimal());
             } else {
                 doubleProduct *= val.coerceToDouble();
-                if (!std::isfinite(val.coerceToDouble()) ||
-                    mongoSignedMultiplyOverflow64(longProduct, val.coerceToLong(), &longProduct)) {
-                    // The number is either Infinity or NaN, or the 'longProduct' would have
-                    // overflowed, so we're abandoning it.
-                    productType = NumberDouble;
+
+                if (productType != NumberDouble) {
+                    // If `productType` is not a double, it must be one of the integer types, so we
+                    // attempt to update `longProduct`.
+                    if (!std::isfinite(val.coerceToDouble()) ||
+                        mongoSignedMultiplyOverflow64(
+                            longProduct, val.coerceToLong(), &longProduct)) {
+                        // The number is either Infinity or NaN, or the 'longProduct' would have
+                        // overflowed, so we're abandoning it.
+                        productType = NumberDouble;
+                    }
                 }
             }
         } else if (val.nullish()) {
@@ -3029,6 +3050,12 @@ Value ExpressionIndexOfCP::evaluate(const Document& root, Variables* variables) 
         // Don't let 'endCodePointIndex' exceed the number of code points in the string.
         endCodePointIndex =
             std::min(codePointLength, static_cast<size_t>(endIndexArg.coerceToInt()));
+    }
+
+    // If the start index is past the end, then always return -1 since 'token' does not exist within
+    // these invalid bounds.
+    if (endCodePointIndex < startCodePointIndex) {
+        return Value(-1);
     }
 
     if (startByteIndex == 0 && input.empty() && token.empty()) {
@@ -3597,10 +3624,11 @@ Value ExpressionRange::evaluate(const Document& root, Variables* variables) cons
                           << endVal.toString(),
             endVal.integral());
 
-    int current = startVal.coerceToInt();
-    int end = endVal.coerceToInt();
+    // Cast to broader type 'int64_t' to prevent overflow during loop.
+    int64_t current = startVal.coerceToInt();
+    int64_t end = endVal.coerceToInt();
 
-    int step = 1;
+    int64_t step = 1;
     if (vpOperand.size() == 3) {
         // A step was specified by the user.
         Value stepVal(vpOperand[2]->evaluate(root, variables));
@@ -3619,14 +3647,29 @@ Value ExpressionRange::evaluate(const Document& root, Variables* variables) cons
         uassert(34449, "$range requires a non-zero step value", step != 0);
     }
 
+    // Calculate how much memory is needed to generate the array and avoid going over the memLimit.
+    auto steps = (end - current) / step;
+    // If steps not positive then no amount of steps can get you from start to end. For example
+    // with start=5, end=7, step=-1 steps would be negative and in this case we would return an
+    // empty array.
+    auto length = steps >= 0 ? 1 + steps : 0;
+    int64_t memNeeded = sizeof(std::vector<Value>) + length * startVal.getApproximateSize();
+    auto memLimit = internalQueryMaxRangeBytes.load();
+    uassert(ErrorCodes::ExceededMemoryLimit,
+            str::stream() << "$range would use too much memory (" << memNeeded << " bytes) "
+                          << "and cannot spill to disk. Memory limit: "
+                          << memLimit
+                          << " bytes",
+            memNeeded < memLimit);
+
     std::vector<Value> output;
 
     while ((step > 0 ? current < end : current > end)) {
-        output.push_back(Value(current));
+        output.emplace_back(static_cast<int>(current));
         current += step;
     }
 
-    return Value(output);
+    return Value(std::move(output));
 }
 
 REGISTER_EXPRESSION(range, ExpressionRange::parse);
@@ -4435,9 +4478,13 @@ Value ExpressionSubtract::evaluate(const Document& root, Variables* variables) c
         double left = lhs.coerceToDouble();
         return Value(left - right);
     } else if (diffType == NumberLong) {
-        long long right = rhs.coerceToLong();
-        long long left = lhs.coerceToLong();
-        return Value(left - right);
+        long long result;
+
+        // If there is an overflow, convert the values to doubles.
+        if (mongoSignedSubtractOverflow64(lhs.coerceToLong(), rhs.coerceToLong(), &result)) {
+            return Value(lhs.coerceToDouble() - rhs.coerceToDouble());
+        }
+        return Value(result);
     } else if (diffType == NumberInt) {
         long long right = rhs.coerceToLong();
         long long left = lhs.coerceToLong();
@@ -5162,8 +5209,8 @@ public:
             };
         table[BSONType::Date][BSONType::String] =
             [](const boost::intrusive_ptr<ExpressionContext>& expCtx, Value inputValue) {
-                auto dateString = TimeZoneDatabase::utcZone().formatDate(Value::kISOFormatString,
-                                                                         inputValue.getDate());
+                auto dateString = uassertStatusOK(TimeZoneDatabase::utcZone().formatDate(
+                    Value::kISOFormatString, inputValue.getDate()));
                 return Value(dateString);
             };
         table[BSONType::Date]

@@ -81,7 +81,6 @@ PoolForHost::PoolForHost()
       _minValidCreationTimeMicroSec(0),
       _type(ConnectionString::INVALID),
       _maxPoolSize(kPoolSizeUnlimited),
-      _maxInUse(kDefaultMaxInUse),
       _checkedOut(0),
       _badConns(0),
       _parentDestroyed(false),
@@ -220,8 +219,10 @@ void PoolForHost::initializeHostName(const std::string& hostName) {
     }
 }
 
-void PoolForHost::waitForFreeConnection(int timeout, stdx::unique_lock<stdx::mutex>& lk) {
-    auto condition = [&] { return (numInUse() < _maxInUse || _inShutdown.load()); };
+void PoolForHost::waitForFreeConnection(int timeout,
+                                        stdx::unique_lock<stdx::mutex>& lk,
+                                        int maxInUse) {
+    auto condition = [&] { return (numInUse() < maxInUse || _inShutdown.load()); };
 
     if (timeout > 0) {
         stdx::chrono::seconds timeoutSeconds{timeout};
@@ -229,7 +230,7 @@ void PoolForHost::waitForFreeConnection(int timeout, stdx::unique_lock<stdx::mut
         // If we timed out waiting without getting a new connection, throw.
         uassert(ErrorCodes::ExceededTimeLimit,
                 str::stream() << "too many connections to " << _hostName << ":" << timeout,
-                !_cv.wait_for(lk, timeoutSeconds, condition));
+                _cv.wait_for(lk, timeoutSeconds, condition));
     } else {
         _cv.wait(lk, condition);
     }
@@ -272,7 +273,7 @@ public:
                 if (p.openConnections() >= _this->_maxInUse) {
                     log() << "Too many in-use connections; waiting until there are fewer than "
                           << _this->_maxInUse;
-                    p.waitForFreeConnection(timeout, lk);
+                    p.waitForFreeConnection(timeout, lk, _this->_maxInUse);
                 } else {
                     // Drop the lock here, so we can connect without holding it.
                     // _finishCreate will take the lock again.
@@ -437,9 +438,11 @@ void DBConnectionPool::release(const string& host, DBClientBase* c) {
 }
 
 void DBConnectionPool::decrementEgress(const string& host, DBClientBase* c) {
-    stdx::lock_guard<stdx::mutex> L(_mutex);
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
     PoolForHost& p = _pools[PoolKey(host, c->getSoTimeout())];
     --p._checkedOut;
+    lk.unlock();
+    p.notifyWaiters();
 }
 
 DBConnectionPool::~DBConnectionPool() {
@@ -572,7 +575,7 @@ bool DBConnectionPool::poolKeyCompare::operator()(const PoolKey& a, const PoolKe
     if (DBConnectionPool::serverNameCompare()(b.ident, a.ident))
         return false;
 
-    return a.timeout < b.timeout;
+    return a.socketTimeoutMs < b.socketTimeoutMs;
 }
 
 bool DBConnectionPool::isConnectionGood(const string& hostName, DBClientBase* conn) {

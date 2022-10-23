@@ -123,7 +123,7 @@ var ReplSetTest = function(opts) {
         var twoPrimaries = false;
         self.nodes.forEach(function(node) {
             try {
-                node.setSlaveOk();
+                node.setSecondaryOk();
                 var n = node.getDB('admin').runCommand({ismaster: 1});
                 self._liveNodes.push(node);
                 if (n.ismaster == true) {
@@ -192,6 +192,40 @@ var ReplSetTest = function(opts) {
                 true);
         });
         return result;
+    }
+
+    /**
+     * Wrap a function so it can accept a node id or connection as its first argument. The argument
+     * is converted to a connection.
+     */
+    function _nodeParamToConn(wrapped) {
+        return function(node, ...wrappedArgs) {
+            if (node.getDB) {
+                return wrapped.call(this, node, ...wrappedArgs);
+            }
+
+            assert(self.nodes.hasOwnProperty(node), `${node} not found in self.nodes`);
+            return wrapped.call(this, self.nodes[node], ...wrappedArgs);
+        };
+    }
+
+    /**
+     * Wrap a function so it accepts a single node or list of them as its first argument. The
+     * function is called once per node provided.
+     */
+    function _nodeParamToSingleNode(wrapped) {
+        return function(node, ...wrappedArgs) {
+            if (node.hasOwnProperty('length')) {
+                let returnValueList = [];
+                for (let i = 0; i < node.length; i++) {
+                    returnValueList.push(wrapped.call(this, node[i], ...wrappedArgs));
+                }
+
+                return returnValueList;
+            }
+
+            return wrapped.call(this, node, ...wrappedArgs);
+        };
     }
 
     /**
@@ -456,6 +490,13 @@ var ReplSetTest = function(opts) {
         }
 
         return undefined;
+    };
+
+    this.getDbPath = function(node) {
+        // Get a replica set node (check for use of bridge).
+        const n = this.getNodeId(node);
+        const replNode = _useBridge ? _unbridgedNodes[n] : this.nodes[n];
+        return replNode.dbpath;
     };
 
     this.getPort = function(n) {
@@ -812,7 +853,7 @@ var ReplSetTest = function(opts) {
 
             print("AwaitNodesAgreeOnPrimary: Nodes agreed on primary " + nodes[primary].name);
             return true;
-        }, "Awaiting nodes to agree on primary", timeout);
+        }, "Awaiting nodes to agree on primary timed out", timeout);
     };
 
     /**
@@ -1167,47 +1208,64 @@ var ReplSetTest = function(opts) {
      * Modifies the election timeout to be 24 hours so that no unplanned elections happen. Then
      * runs replSetInitiate on the replica set with the new config.
      */
-    this.initiateWithHighElectionTimeout = function(opts = {}) {
-        let cfg = this.getReplSetConfig();
-        cfg.settings = Object.assign(opts, {"electionTimeoutMillis": 24 * 60 * 60 * 1000});
-        this.initiate(cfg);
+    this.initiateWithHighElectionTimeout = function(config) {
+        config = config || this.getReplSetConfig();
+        config.settings = config.settings || {};
+        config.settings["electionTimeoutMillis"] = ReplSetTest.kForeverMillis;
+        this.initiate(config);
     };
 
     /**
-     * Steps up 'node' as primary.
-     * Waits for all nodes to reach the same optime before sending the replSetStepUp command
-     * to 'node'.
+     * Steps up 'node' as primary and by default it waits for the stepped up node to become a
+     * writable primary and waits for all nodes to reach the same optime before sending the
+     * replSetStepUp command to 'node'.
+     *
      * Calls awaitReplication() which requires all connections in 'nodes' to be authenticated.
+     * This stepUp() assumes that there is no network partition in the replica set.
      */
-    this.stepUp = function(node) {
-        this.awaitReplication();
-        this.awaitNodesAgreeOnAppliedOpTime();
-        this.awaitNodesAgreeOnPrimary();
-        if (this.getPrimary() === node) {
-            return;
+    this.stepUp = function(node, {
+        awaitReplicationBeforeStepUp: awaitReplicationBeforeStepUp = true,
+        awaitWritablePrimary: awaitWritablePrimary = true
+    } = {}) {
+        jsTest.log("ReplSetTest stepUp: Stepping up " + node.host);
+
+        if (awaitReplicationBeforeStepUp) {
+            this.awaitReplication();
         }
 
-        jsTest.log("Stepping up: " + node.host + " in stepUp");
-        assert.commandWorked(node.adminCommand({replSetStepUp: 1}));
-        this.awaitNodesAgreeOnPrimary();
-        assert.eq(this.getPrimary(), node, 'failed to step up node ' + node.host + ' in stepUp');
-    };
+        assert.soonNoExcept(() => {
+            const res = node.adminCommand({replSetStepUp: 1});
+            // This error is possible if we are running mongoDB binary < 3.4 as
+            // part of multi-version upgrade test. So, for those older branches,
+            // simply wait for the requested node to get elected as primary due
+            // to election timeout.
+            if (!res.ok && res.code === ErrorCodes.CommandNotFound) {
+                jsTest.log(
+                    'replSetStepUp command not supported on node ' + node.host +
+                    " ; so wait for the requested node to get elected due to election timeout.");
+                if (this.getPrimary() === node) {
+                    return true;
+                }
+            }
+            assert.commandWorked(res);
 
-    /**
-     * Steps up 'node' as primary.
-     */
-    this.stepUpNoAwaitReplication = function(node) {
-        jsTest.log("Stepping up: " + node.host + " in stepUpNoAwaitReplication");
-        assert.soonNoExcept(
-            function() {
-                assert.commandWorked(node.adminCommand({replSetStepUp: 1}));
-                self.awaitNodesAgreeOnPrimary(
-                    self.kDefaultTimeoutMS, self.nodes, self.getNodeId(node));
-                return node.adminCommand('replSetGetStatus').myState === ReplSetTest.State.PRIMARY;
-            },
-            'failed to step up node ' + node.host + ' in stepUpNoAwaitReplication',
-            self.kDefaultTimeoutMS);
+            // Since assert.soon() timeout is 10 minutes (default), setting
+            // awaitNodesAgreeOnPrimary() timeout as 1 minute to allow retry of replSetStepUp
+            // command on failure of the replica set to agree on the primary.
+            const timeout = 60 * 100;
+            this.awaitNodesAgreeOnPrimary(timeout, this.nodes, this.getNodeId(node));
 
+            // getPrimary() guarantees that there will be only one writable primary for a replica
+            // set.
+            if (!awaitWritablePrimary || this.getPrimary() === node) {
+                return true;
+            }
+
+            jsTest.log(node.host + ' is not primary after stepUp command');
+            return false;
+        }, "Timed out while waiting for stepUp to succeed on node in port: " + node.port);
+
+        jsTest.log("ReplSetTest stepUp: Finished stepping up " + node.host);
         return node;
     };
 
@@ -1714,6 +1772,14 @@ var ReplSetTest = function(opts) {
         return {master: hashes[0], slaves: hashes.slice(1)};
     };
 
+    this.findOplog = function(conn, query, limit) {
+        return conn.getDB('local')
+            .getCollection(oplogName)
+            .find(query)
+            .sort({$natural: -1})
+            .limit(limit);
+    };
+
     this.dumpOplog = function(conn, query = {}, limit = 10) {
         var log = 'Dumping the latest ' + limit + ' documents that match ' + tojson(query) +
             ' from the oplog ' + oplogName + ' of ' + conn.host;
@@ -1927,10 +1993,15 @@ var ReplSetTest = function(opts) {
 
             print("checkDBHashesForReplSet checking data hashes against primary: " + primary.host);
 
-            slaves.forEach(secondary => {
+            slaves.forEach(node => {
+                // Arbiters have no replicated data.
+                if (isNodeArbiter(node)) {
+                    print("checkDBHashesForReplSet skipping data of arbiter: " + node.host);
+                    return;
+                }
                 print("checkDBHashesForReplSet going to check data hashes on secondary: " +
-                      secondary.host);
-                secondary.getDBNames().forEach(dbName => combinedDBs.add(dbName));
+                      node.host);
+                node.getDBNames().forEach(dbName => combinedDBs.add(dbName));
             });
 
             for (var dbName of combinedDBs) {
@@ -2131,13 +2202,13 @@ var ReplSetTest = function(opts) {
             };
 
             this.next = function() {
-                this._safelyPerformCursorOperation('next', function(cursor) {
+                return this._safelyPerformCursorOperation('next', function(cursor) {
                     return cursor.next();
                 }, kCappedPositionLostSentinel);
             };
 
             this.hasNext = function() {
-                this._safelyPerformCursorOperation('hasNext', function(cursor) {
+                return this._safelyPerformCursorOperation('hasNext', function(cursor) {
                     return cursor.hasNext();
                 }, false);
             };
@@ -2213,8 +2284,14 @@ var ReplSetTest = function(opts) {
             // Note, we read the oplog backwards from last to first.
             const firstReader = readers[firstReaderIndex];
             let prevOplogEntry;
+            assert(firstReader.hasNext(), "oplog is empty while checkOplogs is called");
+            // Track the number of bytes we are reading as we check the oplog. We use this to avoid
+            // out-of-memory issues by calling to garbage collect whenever the memory footprint is
+            // large.
+            let bytesSinceGC = 0;
             while (firstReader.hasNext()) {
                 const oplogEntry = firstReader.next();
+                bytesSinceGC += Object.bsonsize(oplogEntry);
                 if (oplogEntry === kCappedPositionLostSentinel) {
                     // When using legacy OP_QUERY/OP_GET_MORE reads against mongos, it is
                     // possible for hasNext() to return true but for next() to throw an exception.
@@ -2229,10 +2306,20 @@ var ReplSetTest = function(opts) {
                     }
 
                     const otherOplogEntry = readers[i].next();
+                    bytesSinceGC += Object.bsonsize(otherOplogEntry);
                     if (otherOplogEntry && otherOplogEntry !== kCappedPositionLostSentinel) {
-                        assertOplogEntriesEq(
-                            oplogEntry, otherOplogEntry, firstReader, readers[i], prevOplogEntry);
+                        assertOplogEntriesEq.call(this,
+                                                  oplogEntry,
+                                                  otherOplogEntry,
+                                                  firstReader,
+                                                  readers[i],
+                                                  prevOplogEntry);
                     }
+                }
+                // Garbage collect every 10MB.
+                if (bytesSinceGC > (10 * 1024 * 1024)) {
+                    gc();
+                    bytesSinceGC = 0;
                 }
                 prevOplogEntry = oplogEntry;
             }
@@ -2282,7 +2369,14 @@ var ReplSetTest = function(opts) {
         }
 
         function checkCollectionCountsForReplSet(rst) {
-            rst.nodes.forEach(node => checkCollectionCountsForNode(node));
+            rst.nodes.forEach(node => {
+                // Arbiters have no replicated collections.
+                if (isNodeArbiter(node)) {
+                    print("checkCollectionCounts skipping counts for arbiter: " + node.host);
+                    return;
+                }
+                checkCollectionCountsForNode(node);
+            });
             assert(success, `Collection counts did not match. search for '${errPrefix}' in logs.`);
         }
 
@@ -2487,6 +2581,31 @@ var ReplSetTest = function(opts) {
         }
         return started;
     };
+
+    /**
+     * Step down and freeze a particular node or nodes.
+     *
+     * @param node is a single node or list of nodes, by id or conn
+     */
+    this.freeze = _nodeParamToSingleNode(_nodeParamToConn(function(node) {
+        assert.soon(() => {
+            try {
+                // Ensure node is not primary. Ignore errors, probably means it's already secondary.
+                node.adminCommand({replSetStepDown: ReplSetTest.kForeverSecs, force: true});
+                // Prevent node from running election. Fails if it already started an election.
+                assert.commandWorked(node.adminCommand({replSetFreeze: ReplSetTest.kForeverSecs}));
+                return true;
+            } catch (e) {
+                if (isNetworkError(e) || e.code === ErrorCodes.NotSecondary ||
+                    e.code === ErrorCodes.NotYetInitialized) {
+                    jsTestLog(`Failed to freeze node ${node.host}: ${e}`);
+                    return false;
+                }
+
+                throw e;
+            }
+        }, `Failed to run replSetFreeze cmd on ${node.host}`);
+    }));
 
     this.stopMaster = function(signal, opts) {
         var master = this.getPrimary();
@@ -2769,7 +2888,11 @@ var ReplSetTest = function(opts) {
 
         var existingNodes = conf.members.map(member => member.host);
         self.ports = existingNodes.map(node => node.split(':')[1]);
-        self.nodes = existingNodes.map(node => new Mongo(node));
+        self.nodes = existingNodes.map(node => {
+            let conn = new Mongo(node);
+            conn.name = conn.host;
+            return conn;
+        });
         self.waitForKeys = false;
         self.host = existingNodes[0].split(':')[0];
         self.name = conf._id;
@@ -2791,6 +2914,12 @@ var ReplSetTest = function(opts) {
  *  Global default timeout (10 minutes).
  */
 ReplSetTest.kDefaultTimeoutMS = 10 * 60 * 1000;
+
+/**
+ *  Global default number that's effectively infinite.
+ */
+ReplSetTest.kForeverSecs = 24 * 60 * 60;
+ReplSetTest.kForeverMillis = ReplSetTest.kForeverSecs * 1000;
 
 /**
  * Set of states that the replica set can be in. Used for the wait functions.

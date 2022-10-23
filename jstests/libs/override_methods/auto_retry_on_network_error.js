@@ -65,7 +65,6 @@
         "clone",
         "cloneCollection",
         "cloneCollectionAsCapped",
-        "collMod",
         "convertToCapped",
         "copydb",
         "create",
@@ -367,9 +366,6 @@
         } while (numRetries >= 0);
     }
 
-    OverrideHelpers.prependOverrideInParallelShell(
-        "jstests/libs/override_methods/auto_retry_on_network_error.js");
-
     const connectOriginal = connect;
 
     connect = function(url, user, pass) {
@@ -392,6 +388,11 @@
             2000);      // 2 second interval.
 
         return retVal;
+    };
+
+    startParallelShell = function() {
+        throw new Error("Cowardly refusing to run test with network retries enabled when it uses " +
+                        "startParallelShell()");
     };
 
     Mongo.prototype.logout = function() {

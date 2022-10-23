@@ -14,6 +14,7 @@ env.Library(
     ],
     LIBDEPS_PRIVATE=[
         'dbcheck',
+        'image_collection_entry',
         'repl_coordinator_interface',
         'repl_settings',
         '$BUILD_DIR/mongo/base',
@@ -652,6 +653,7 @@ env.Library(
         '$BUILD_DIR/mongo/db/storage/storage_options',
         '$BUILD_DIR/mongo/util/concurrency/thread_pool',
         '$BUILD_DIR/mongo/util/net/network',
+        '$BUILD_DIR/mongo/util/processinfo',
         'initial_syncer',
         'oplog',
         'oplog_entry',
@@ -996,6 +998,7 @@ env.CppUnitTest('replication_coordinator_impl_reconfig_test',
 env.Library(
     target='repl_coordinator_interface',
     source=[
+        'always_allow_non_local_writes.cpp',
         'repl_client_info.cpp',
         'replication_coordinator.cpp',
     ],
@@ -1710,5 +1713,18 @@ env.Library(
     LIBDEPS=[
         '$BUILD_DIR/mongo/base',
         'election_reason_counter',
+    ],
+)
+
+env.Library(
+    target='image_collection_entry',
+    source=[
+        env.Idlc('image_collection_entry.idl')[0],
+    ],
+    LIBDEPS=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/logical_session_id',
+        '$BUILD_DIR/mongo/idl/idl_parser',
+        'oplog_entry',
     ],
 )

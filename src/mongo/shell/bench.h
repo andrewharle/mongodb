@@ -110,6 +110,7 @@ struct BenchRunOp {
     BSONObj query;
     bool safe = false;
     int skip = 0;
+    BSONObj sort;
     bool showError = false;
     bool showResult = false;
     std::string target;
@@ -121,6 +122,9 @@ struct BenchRunOp {
     bool useWriteCmd = false;
     BSONObj writeConcern;
     BSONObj value;
+
+    // Format: {mode: modeStr}.  Only mode field is allowed.
+    BSONObj readPrefObj;
 
     // This is an owned copy of the raw operation. All unowned members point into this.
     BSONObj myBsonOp;

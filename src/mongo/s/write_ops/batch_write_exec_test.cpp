@@ -260,7 +260,7 @@ TEST_F(BatchWriteExecTest, SingleOp) {
 
     expectInsertsReturnSuccess(std::vector<BSONObj>{BSON("x" << 1)});
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, MultiOpLarge) {
@@ -299,7 +299,7 @@ TEST_F(BatchWriteExecTest, MultiOpLarge) {
     expectInsertsReturnSuccess(docsToInsert.begin(), docsToInsert.begin() + 66576);
     expectInsertsReturnSuccess(docsToInsert.begin() + 66576, docsToInsert.end());
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, SingleOpError) {
@@ -335,7 +335,7 @@ TEST_F(BatchWriteExecTest, SingleOpError) {
 
     expectInsertsReturnError({BSON("x" << 1)}, errResponse);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 void serializeErrorToBSON(const Status& status, BSONObjBuilder* builder) {
@@ -437,7 +437,7 @@ TEST_F(BatchWriteExecTest, StaleShardVersionReturnedFromBatchWithSingleMultiWrit
         return response.toBSON();
     });
 
-    auto response = future.timed_get(kFutureTimeout);
+    auto response = future.default_timed_get();
 
     ASSERT_OK(response.getTopLevelStatus());
     ASSERT_EQ(3, response.getNModified());
@@ -552,7 +552,7 @@ TEST_F(BatchWriteExecTest,
         return response.toBSON();
     });
 
-    auto response = future.timed_get(kFutureTimeout);
+    auto response = future.default_timed_get();
     ASSERT_OK(response.getTopLevelStatus());
     ASSERT_EQ(3, response.getNModified());
 }
@@ -676,7 +676,7 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1FirstOK
         return response.toBSON();
     });
 
-    auto response = future.timed_get(kFutureTimeout);
+    auto response = future.default_timed_get();
     ASSERT_OK(response.getTopLevelStatus());
     ASSERT_EQ(2, response.getNModified());
 }
@@ -800,9 +800,108 @@ TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromMultiWriteWithShard1FirstOK
         return response.toBSON();
     });
 
-    auto response = future.timed_get(kFutureTimeout);
+    auto response = future.default_timed_get();
     ASSERT_OK(response.getTopLevelStatus());
     ASSERT_EQ(2, response.getNModified());
+}
+
+TEST_F(BatchWriteExecTest, RetryableErrorReturnedFromWriteWithShard1SSVShard2OK) {
+    BatchedCommandRequest request([&] {
+        write_ops::Update updateOp(nss);
+        updateOp.setWriteCommandBase([] {
+            write_ops::WriteCommandBase writeCommandBase;
+            writeCommandBase.setOrdered(false);
+            return writeCommandBase;
+        }());
+        updateOp.setUpdates({buildUpdate(BSON("_id" << 150), BSON("x" << 1))});
+        return updateOp;
+    }());
+    request.setWriteConcern(BSONObj());
+
+    static const auto epoch = OID::gen();
+
+    // This allows the batch to target each write operation to perform this test
+    class MultiShardTargeter : public MockNSTargeter {
+    public:
+        using MockNSTargeter::MockNSTargeter;
+
+        StatusWith<std::vector<ShardEndpoint>> targetUpdate(
+            OperationContext* opCtx, const write_ops::UpdateOpEntry& updateDoc) const override {
+            if (targetAll) {
+                return std::vector<ShardEndpoint>{
+                    ShardEndpoint(kShardName1, ChunkVersion(100, 200, epoch)),
+                    ShardEndpoint(kShardName2, ChunkVersion(101, 200, epoch))};
+            } else {
+                return std::vector<ShardEndpoint>{
+                    ShardEndpoint(kShardName2, ChunkVersion(101, 200, epoch))};
+            }
+        }
+
+        bool targetAll = true;
+    };
+
+    MultiShardTargeter multiShardNSTargeter(
+        nss,
+        {MockRange(ShardEndpoint(kShardName1, ChunkVersion(100, 200, epoch)),
+                   BSON("sk" << MINKEY),
+                   BSON("sk" << 10)),
+         MockRange(ShardEndpoint(kShardName2, ChunkVersion(101, 200, epoch)),
+                   BSON("sk" << 10),
+                   BSON("sk" << MAXKEY))});
+
+    auto future = launchAsync([&] {
+        BatchedCommandResponse response;
+        BatchWriteExecStats stats;
+        BatchWriteExec::executeBatch(
+            operationContext(), multiShardNSTargeter, request, &response, &stats);
+
+        return response;
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost1, request.target);
+
+        BatchedCommandResponse response;
+        response.setStatus(Status::OK());
+        response.setNModified(0);
+        response.setN(0);
+        response.addToErrDetails([&] {
+            WriteErrorDetail* errDetail = new WriteErrorDetail();
+            errDetail->setIndex(0);
+            errDetail->setStatus({ErrorCodes::StaleShardVersion, "Stale shard version"});
+            errDetail->setErrInfo([&] {
+                Status ssvStatus(StaleConfigInfo(nss,
+                                                 ChunkVersion(101, 200, epoch),
+                                                 ChunkVersion(105, 200, epoch)),
+                                 "Migration happened");
+                BSONObjBuilder builder;
+                serializeErrorToBSON(ssvStatus, &builder);
+                return builder.obj();
+            }());
+            return errDetail;
+        }());
+
+        // This simulates a migration of the last chunk on shard 1 to shard 2, which means that
+        // future rounds on the batchExecutor should only target shard 2
+        multiShardNSTargeter.targetAll = false;
+        return response.toBSON();
+    });
+
+    onCommandForPoolExecutor([&](const RemoteCommandRequest& request) {
+        ASSERT_EQ(kTestShardHost2, request.target);
+
+        BatchedCommandResponse response;
+        response.setStatus(Status::OK());
+        response.setNModified(1);
+        response.setN(1);
+        return response.toBSON();
+    });
+
+    auto response = future.default_timed_get();
+    ASSERT_OK(response.getTopLevelStatus());
+    ASSERT_EQ(1, response.getNModified());
+    ASSERT_EQ(1, response.getN());
+    ASSERT_FALSE(response.isErrDetailsSet());
 }
 
 //
@@ -838,7 +937,7 @@ TEST_F(BatchWriteExecTest, StaleOp) {
     expectInsertsReturnStaleVersionErrors(expected);
     expectInsertsReturnSuccess(expected);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, MultiStaleOp) {
@@ -873,7 +972,7 @@ TEST_F(BatchWriteExecTest, MultiStaleOp) {
 
     expectInsertsReturnSuccess(expected);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, TooManyStaleShardOp) {
@@ -912,7 +1011,7 @@ TEST_F(BatchWriteExecTest, TooManyStaleShardOp) {
         expectInsertsReturnStaleVersionErrors({BSON("x" << 1), BSON("x" << 2)});
     }
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, RetryableWritesLargeBatch) {
@@ -956,7 +1055,7 @@ TEST_F(BatchWriteExecTest, RetryableWritesLargeBatch) {
     expectInsertsReturnSuccess(docsToInsert.begin(), docsToInsert.begin() + 63791);
     expectInsertsReturnSuccess(docsToInsert.begin() + 63791, docsToInsert.end());
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, RetryableErrorNoTxnNumber) {
@@ -995,7 +1094,7 @@ TEST_F(BatchWriteExecTest, RetryableErrorNoTxnNumber) {
 
     expectInsertsReturnError({BSON("x" << 1), BSON("x" << 2)}, retryableErrResponse);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, RetryableErrorTxnNumber) {
@@ -1033,7 +1132,7 @@ TEST_F(BatchWriteExecTest, RetryableErrorTxnNumber) {
     expectInsertsReturnError({BSON("x" << 1), BSON("x" << 2)}, retryableErrResponse);
     expectInsertsReturnSuccess({BSON("x" << 1), BSON("x" << 2)});
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
 
 TEST_F(BatchWriteExecTest, NonRetryableErrorTxnNumber) {
@@ -1075,8 +1174,7 @@ TEST_F(BatchWriteExecTest, NonRetryableErrorTxnNumber) {
 
     expectInsertsReturnError({BSON("x" << 1), BSON("x" << 2)}, nonRetryableErrResponse);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 }
-
 }  // namespace
 }  // namespace mongo

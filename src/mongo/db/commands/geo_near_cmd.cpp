@@ -60,8 +60,8 @@
 
 namespace mongo {
 
-using std::unique_ptr;
 using std::stringstream;
+using std::unique_ptr;
 
 /**
  * The geoNear command is deprecated. Users should prefer the $near query operator, the $nearSphere
@@ -77,6 +77,9 @@ public:
     }
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kAlways;
+    }
+    bool maintenanceOk() const override {
+        return false;
     }
     bool supportsReadConcern(const std::string& dbName,
                              const BSONObj& cmdObj,
@@ -210,11 +213,27 @@ public:
         BSONObj projObj = BSON("$pt" << BSON("$meta" << QueryRequest::metaGeoNearPoint) << "$dis"
                                      << BSON("$meta" << QueryRequest::metaGeoNearDistance));
 
+        // Extract an index hint from 'cmdObj' if one was provided.
+        BSONObj hint;
+        if (auto hintElem = cmdObj["hint"]) {
+            if (hintElem.type() == BSONType::Object) {
+                hint = hintElem.embeddedObject().getOwned();
+            } else if (hintElem.type() == BSONType::String) {
+                hint = BSON("$hint" << hintElem.valueStringData());
+            } else {
+                uasserted(4722300,
+                          str::stream()
+                              << "hint must be specified as a string representing an index"
+                              << " name, or an object representing an index's key pattern");
+            }
+        }
+
         auto qr = stdx::make_unique<QueryRequest>(nss);
         qr->setFilter(rewritten);
         qr->setProj(projObj);
         qr->setLimit(numWanted);
         qr->setCollation(collation);
+        qr->setHint(std::move(hint));
         const ExtensionsCallbackReal extensionsCallback(opCtx, &nss);
         const boost::intrusive_ptr<ExpressionContext> expCtx;
         auto statusWithCQ =

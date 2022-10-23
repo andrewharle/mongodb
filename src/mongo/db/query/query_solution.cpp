@@ -151,7 +151,7 @@ void addEqualityFieldSorts(const BSONObj& sortPattern,
         sortsOut->insert(prefixBob.obj());
     }
 }
-}
+}  // namespace
 
 string QuerySolutionNode::toString() const {
     mongoutils::str::stream ss;
@@ -250,6 +250,7 @@ QuerySolutionNode* CollectionScanNode::clone() const {
     copy->direction = this->direction;
     copy->maxScan = this->maxScan;
     copy->shouldTrackLatestOplogTimestamp = this->shouldTrackLatestOplogTimestamp;
+    copy->assertMinTsHasNotFallenOffOplog = this->assertMinTsHasNotFallenOffOplog;
     copy->shouldWaitForOplogVisibility = this->shouldWaitForOplogVisibility;
 
     return copy;
@@ -529,6 +530,7 @@ void IndexScanNode::appendToString(mongoutils::str::stream* ss, int indent) cons
     *ss << "IXSCAN\n";
     addIndent(ss, indent + 1);
     *ss << "indexName = " << index.name << '\n';
+    addIndent(ss, indent + 1);
     *ss << "keyPattern = " << index.keyPattern << '\n';
     if (NULL != filter) {
         addIndent(ss, indent + 1);
@@ -921,14 +923,14 @@ void SortNode::appendToString(mongoutils::str::stream* ss, int indent) const {
 }
 
 QuerySolutionNode* SortNode::clone() const {
-    SortNode* copy = new SortNode();
-    cloneBaseData(copy);
+    auto copy = std::make_unique<SortNode>();
+    cloneBaseData(copy.get());
 
     copy->_sorts = this->_sorts;
     copy->pattern = this->pattern;
     copy->limit = this->limit;
 
-    return copy;
+    return copy.release();
 }
 
 //

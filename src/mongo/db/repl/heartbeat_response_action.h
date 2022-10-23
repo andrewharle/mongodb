@@ -53,7 +53,8 @@ public:
         StepDownSelf,
         StepDownRemotePrimary,
         PriorityTakeover,
-        CatchupTakeover
+        CatchupTakeover,
+        RetryReconfig
     };
 
     /**
@@ -82,6 +83,12 @@ public:
      * primary after the appropriate catchup takeover delay.
      */
     static HeartbeatResponseAction makeCatchupTakeoverAction();
+
+    /**
+     * Makes a new action telling the current node to attempt to find itself in its current replica
+     * set config again, in case the previous attempt's failure was due to a temporary DNS outage.
+     */
+    static HeartbeatResponseAction makeRetryReconfigAction();
 
     /**
      * Makes a new action telling the current node to step down as primary.
@@ -114,6 +121,12 @@ public:
      */
     void setAdvancedOpTime(bool advanced);
 
+    /*
+     * Sets whether or not the member has transitioned from unelectable to electable since the last
+     * heartbeat response.
+     */
+    void setBecameElectable(bool becameElectable);
+
     /**
      * Gets the action type of this action.
      */
@@ -145,11 +158,20 @@ public:
         return _advancedOpTime;
     }
 
+    /*
+     * Returns true if the heartbeat response results in the member transitioning from unelectable
+     * to electable.
+     */
+    bool getBecameElectable() const {
+        return _becameElectable;
+    }
+
 private:
     Action _action;
     int _primaryIndex;
     Date_t _nextHeartbeatStartDate;
     bool _advancedOpTime = false;
+    bool _becameElectable = false;
 };
 
 }  // namespace repl

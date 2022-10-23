@@ -94,7 +94,7 @@ namespace mongo {
 MONGO_FAIL_POINT_DEFINE(failCommand);
 MONGO_FAIL_POINT_DEFINE(rsStopGetMore);
 MONGO_FAIL_POINT_DEFINE(respondWithNotPrimaryInCommandDispatch);
-MONGO_FAIL_POINT_DEFINE(skipCheckingForNotMasterInCommandDispatch);
+MONGO_FAIL_POINT_DEFINE(skipCheckingForNotPrimaryInCommandDispatch);
 
 namespace {
 using logger::LogComponent;
@@ -131,8 +131,11 @@ const StringMap<int> sessionCheckoutWhitelist = {{"abortTransaction", 1},
                                                  {"refreshLogicalSessionCacheNow", 1},
                                                  {"update", 1}};
 
-bool shouldActivateFailCommandFailPoint(const BSONObj& data, StringData cmdName, Client* client) {
-    if (cmdName == "configureFailPoint"_sd)  // Banned even if in failCommands.
+bool shouldActivateFailCommandFailPoint(const BSONObj& data,
+                                        const CommandInvocation* invocation,
+                                        Client* client) {
+    const Command* cmd = invocation->definition();
+    if (cmd->getName() == "configureFailPoint"_sd)  // Banned even if in failCommands.
         return false;
 
     if (client->session() && (client->session()->getTags() & transport::Session::kInternalClient)) {
@@ -146,7 +149,7 @@ bool shouldActivateFailCommandFailPoint(const BSONObj& data, StringData cmdName,
     }
 
     for (auto&& failCommand : data.getObjectField("failCommands")) {
-        if (failCommand.type() == String && failCommand.valueStringData() == cmdName) {
+        if (failCommand.type() == String && cmd->hasAlias(failCommand.valueStringData())) {
             return true;
         }
     }
@@ -404,10 +407,6 @@ LogicalTime computeOperationTime(OperationContext* opCtx, LogicalTime startOpera
         replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet;
     invariant(isReplSet);
 
-    if (startOperationTime == LogicalTime::kUninitialized) {
-        return LogicalTime(replCoord->getMyLastAppliedOpTime().getTimestamp());
-    }
-
     auto operationTime = getClientOperationTime(opCtx);
     invariant(operationTime >= startOperationTime);
 
@@ -438,8 +437,9 @@ void appendClusterAndOperationTime(OperationContext* opCtx,
                                    BSONObjBuilder* commandBodyFieldsBob,
                                    BSONObjBuilder* metadataBob,
                                    LogicalTime startTime) {
-    if (repl::ReplicationCoordinator::get(opCtx)->getReplicationMode() !=
-            repl::ReplicationCoordinator::modeReplSet ||
+    auto replicationCoordinator = repl::ReplicationCoordinator::get(opCtx);
+    if (replicationCoordinator->getReplicationMode() != repl::ReplicationCoordinator::modeReplSet ||
+        !replicationCoordinator->getMemberState().readable() ||
         !LogicalClock::get(opCtx)->isEnabled()) {
         return;
     }
@@ -569,8 +569,7 @@ bool runCommandImpl(OperationContext* opCtx,
 
         auto waitForWriteConcern = [&](auto&& bb) {
             MONGO_FAIL_POINT_BLOCK_IF(failCommand, data, [&](const BSONObj& data) {
-                return shouldActivateFailCommandFailPoint(
-                           data, request.getCommandName(), opCtx->getClient()) &&
+                return shouldActivateFailCommandFailPoint(data, invocation, opCtx->getClient()) &&
                     data.hasField("writeConcernError");
             }) {
                 bb.append(data.getData()["writeConcernError"]);
@@ -635,12 +634,13 @@ bool runCommandImpl(OperationContext* opCtx,
 /**
  * Maybe uassert according to the 'failCommand' fail point.
  */
-void evaluateFailCommandFailPoint(OperationContext* opCtx, StringData commandName) {
+void evaluateFailCommandFailPoint(OperationContext* opCtx, const CommandInvocation* invocation) {
     MONGO_FAIL_POINT_BLOCK_IF(failCommand, data, [&](const BSONObj& data) {
-        return shouldActivateFailCommandFailPoint(data, commandName, opCtx->getClient()) &&
+        return shouldActivateFailCommandFailPoint(data, invocation, opCtx->getClient()) &&
             (data.hasField("closeConnection") || data.hasField("errorCode"));
     }) {
         bool closeConnection;
+        auto commandName = invocation->definition()->getName();
         if (bsonExtractBooleanField(data.getData(), "closeConnection", &closeConnection).isOK() &&
             closeConnection) {
             opCtx->getClient()->session()->end();
@@ -697,7 +697,7 @@ void execCommandDatabase(OperationContext* opCtx,
             replCoord->getReplicationMode() == repl::ReplicationCoordinator::modeReplSet,
             opCtx->getServiceContext()->getStorageEngine()->supportsDocLocking());
 
-        evaluateFailCommandFailPoint(opCtx, command->getName());
+        evaluateFailCommandFailPoint(opCtx, invocation.get());
 
         const auto dbname = request.getDatabase().toString();
         uassert(
@@ -775,7 +775,7 @@ void execCommandDatabase(OperationContext* opCtx,
         const bool iAmPrimary = replCoord->canAcceptWritesForDatabase_UNSAFE(opCtx, dbname);
 
         if (!opCtx->getClient()->isInDirectClient() &&
-            !MONGO_FAIL_POINT(skipCheckingForNotMasterInCommandDispatch)) {
+            !MONGO_FAIL_POINT(skipCheckingForNotPrimaryInCommandDispatch)) {
             auto inMultiDocumentTransaction = static_cast<bool>(sessionOptions.getAutocommit());
             auto allowed = command->secondaryAllowed(opCtx->getServiceContext());
             bool alwaysAllowed = allowed == Command::AllowedOnSecondary::kAlways;
@@ -1082,7 +1082,12 @@ DbResponse receivedQuery(OperationContext* opCtx,
                          const Message& m,
                          const ServiceEntryPointCommon::Hooks& behaviors) {
     invariant(!nss.isCommand());
+
+    // The legacy opcodes should be counted twice: as part of the overall opcodes' counts and on
+    // their own to highlight that they are being used.
     globalOpCounters.gotQuery();
+    globalOpCounters.gotQueryDeprecated();
+
     ServerReadConcernMetrics::get(opCtx)->recordReadConcern(repl::ReadConcernArgs::get(opCtx));
 
     DbMessage d(m);
@@ -1110,6 +1115,8 @@ DbResponse receivedQuery(OperationContext* opCtx,
 }
 
 void receivedKillCursors(OperationContext* opCtx, const Message& m) {
+    globalOpCounters.gotKillCursorsDeprecated();
+
     LastError::get(opCtx->getClient()).disable();
     DbMessage dbmessage(m);
     int n = dbmessage.pullInt();
@@ -1138,6 +1145,8 @@ void receivedInsert(OperationContext* opCtx, const NamespaceString& nsString, co
     auto insertOp = InsertOp::parseLegacy(m);
     invariant(insertOp.getNamespace() == nsString);
 
+    globalOpCounters.gotInsertsDeprecated(insertOp.getDocuments().size());
+
     for (const auto& obj : insertOp.getDocuments()) {
         Status status =
             AuthorizationSession::get(opCtx->getClient())->checkAuthForInsert(opCtx, nsString, obj);
@@ -1148,6 +1157,7 @@ void receivedInsert(OperationContext* opCtx, const NamespaceString& nsString, co
 }
 
 void receivedUpdate(OperationContext* opCtx, const NamespaceString& nsString, const Message& m) {
+    globalOpCounters.gotUpdateDeprecated();
     auto updateOp = UpdateOp::parseLegacy(m);
     auto& singleUpdate = updateOp.getUpdates()[0];
     invariant(updateOp.getNamespace() == nsString);
@@ -1171,6 +1181,7 @@ void receivedUpdate(OperationContext* opCtx, const NamespaceString& nsString, co
 }
 
 void receivedDelete(OperationContext* opCtx, const NamespaceString& nsString, const Message& m) {
+    globalOpCounters.gotDeleteDeprecated();
     auto deleteOp = DeleteOp::parseLegacy(m);
     auto& singleDelete = deleteOp.getDeletes()[0];
     invariant(deleteOp.getNamespace() == nsString);
@@ -1187,7 +1198,10 @@ DbResponse receivedGetMore(OperationContext* opCtx,
                            const Message& m,
                            CurOp& curop,
                            bool* shouldLogOpDebug) {
+    // The legacy opcodes should be counted twice: as part of the overall opcodes' counts and on
+    // their own to highlight that they are being used.
     globalOpCounters.gotGetMore();
+    globalOpCounters.gotGetMoreDeprecated();
     DbMessage d(m);
 
     const char* ns = d.getns();
