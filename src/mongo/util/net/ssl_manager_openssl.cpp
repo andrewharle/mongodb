@@ -470,6 +470,7 @@ private:
      * and extract server certificate notAfter date.
      * @param keyFile referencing the PEM file to be read.
      * @param subjectName as a pointer to the subject name variable being set.
+     * @param verifyHasSubjectAlternativeName to generate warning if SAN is absent.
      * @param serverNotAfter a Date_t object pointer that is valued if the
      * date is to be checked (as for a server certificate) and null otherwise.
      * @return bool showing if the function was successful.
@@ -477,6 +478,7 @@ private:
     bool _parseAndValidateCertificate(const std::string& keyFile,
                                       const std::string& keyPassword,
                                       SSLX509Name* subjectName,
+                                      bool verifyHasSubjectAlternativeName,
                                       Date_t* serverNotAfter);
 
 
@@ -522,6 +524,7 @@ private:
      * Callbacks for SSL functions.
      */
     static int password_cb(char* buf, int num, int rwflag, void* userdata);
+    static int servername_cb(SSL* s, int* al, void* arg);
     static int verify_cb(int ok, X509_STORE_CTX* ctx);
 };
 
@@ -685,7 +688,7 @@ SSLManagerOpenSSL::SSLManagerOpenSSL(const SSLParams& params, bool isServer)
 
     if (!clientPEM.empty()) {
         if (!_parseAndValidateCertificate(
-                clientPEM, clientPassword, &_sslConfiguration.clientSubjectName, NULL)) {
+                clientPEM, clientPassword, &_sslConfiguration.clientSubjectName, false, NULL)) {
             uasserted(16941, "ssl initialization problem");
         }
     }
@@ -698,6 +701,7 @@ SSLManagerOpenSSL::SSLManagerOpenSSL(const SSLParams& params, bool isServer)
         if (!_parseAndValidateCertificate(params.sslPEMKeyFile,
                                           params.sslPEMKeyPassword,
                                           &_sslConfiguration.serverSubjectName,
+                                          true,
                                           &_sslConfiguration.serverCertificateExpirationDate)) {
             uasserted(16942, "ssl initialization problem");
         }
@@ -716,6 +720,12 @@ int SSLManagerOpenSSL::password_cb(char* buf, int num, int rwflag, void* userdat
     const size_t copied = pw->copy(buf, num - 1);
     buf[copied] = '\0';
     return copied;
+}
+
+int SSLManagerOpenSSL::servername_cb(SSL* s, int* al, void* arg) {
+    // Unconditionally accept the SNI presented by the client. This will ensure that if the client
+    // later performs session resumption, subsequent connections will still have access to the SNI.
+    return SSL_TLSEXT_ERR_OK;
 }
 
 int SSLManagerOpenSSL::verify_cb(int ok, X509_STORE_CTX* ctx) {
@@ -803,6 +813,13 @@ Status SSLManagerOpenSSL::initSSLContext(SSL_CTX* context,
                  context, reinterpret_cast<unsigned char*>(&context), sizeof(context))) {
         return Status(ErrorCodes::InvalidSSLConfiguration,
                       str::stream() << "Can not store ssl session id context: "
+                                    << getSSLErrorMessage(ERR_get_error()));
+    }
+
+    // We should accept all SNI extensions advertised by clients
+    if (1 != SSL_CTX_set_tlsext_servername_callback(context, &SSLManagerOpenSSL::servername_cb)) {
+        return Status(ErrorCodes::InvalidSSLConfiguration,
+                      str::stream() << "Can not set servername callback: "
                                     << getSSLErrorMessage(ERR_get_error()));
     }
 
@@ -928,6 +945,7 @@ unsigned long long SSLManagerOpenSSL::_convertASN1ToMillis(ASN1_TIME* asn1time) 
 bool SSLManagerOpenSSL::_parseAndValidateCertificate(const std::string& keyFile,
                                                      const std::string& keyPassword,
                                                      SSLX509Name* subjectName,
+                                                     bool verifyHasSubjectAlternativeName,
                                                      Date_t* serverCertificateExpirationDate) {
     BIO* inBIO = BIO_new(BIO_s_file());
     if (inBIO == NULL) {
@@ -955,6 +973,23 @@ bool SSLManagerOpenSSL::_parseAndValidateCertificate(const std::string& keyFile,
     ON_BLOCK_EXIT(X509_free, x509);
 
     *subjectName = getCertificateSubjectX509Name(x509);
+
+    if (verifyHasSubjectAlternativeName) {
+        bool hasSan = false;
+        STACK_OF(GENERAL_NAME)* sanNames = static_cast<STACK_OF(GENERAL_NAME)*>(
+            X509_get_ext_d2i(x509, NID_subject_alt_name, nullptr, nullptr));
+        if (nullptr != sanNames) {
+            int sanNamesCount = sk_GENERAL_NAME_num(sanNames);
+            hasSan = (0 != sanNamesCount);
+            sk_GENERAL_NAME_pop_free(sanNames, GENERAL_NAME_free);
+        }
+
+        if (!hasSan) {
+            warning() << "Server certificate has no compatible Subject Alternative Name. "
+                         "This may prevent TLS clients from connecting";
+        }
+    }
+
     if (serverCertificateExpirationDate != NULL) {
         unsigned long long notBeforeMillis = _convertASN1ToMillis(X509_get_notBefore(x509));
         if (notBeforeMillis == 0) {

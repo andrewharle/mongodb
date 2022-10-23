@@ -215,7 +215,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, CorrectDocumentsFetched) {
         });
 
         ASSERT_OK(cloner.startClone(operationContext()));
-        futureStartClone.timed_get(kFutureTimeout);
+        futureStartClone.default_timed_get();
     }
 
     // Ensure the initial clone documents are available
@@ -302,7 +302,7 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, CorrectDocumentsFetched) {
     });
 
     ASSERT_OK(cloner.commitClone(operationContext()));
-    futureCommit.timed_get(kFutureTimeout);
+    futureCommit.default_timed_get();
 }
 
 TEST_F(MigrationChunkClonerSourceLegacyTest, CollectionNotFound) {
@@ -352,8 +352,10 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, FailedToEngageRecipientShard) {
         });
 
         auto startCloneStatus = cloner.startClone(operationContext());
-        ASSERT_EQ(ErrorCodes::NetworkTimeout, startCloneStatus.code());
-        futureStartClone.timed_get(kFutureTimeout);
+        // Error is converted to OperationFailed as if it's propagated to the MigrationManager
+        // it will mark the migration source as having network problems.
+        ASSERT_EQ(ErrorCodes::OperationFailed, startCloneStatus.code());
+        futureStartClone.default_timed_get();
     }
 
     // Ensure that if the recipient tries to fetch some documents, the cloner won't crash
@@ -377,6 +379,36 @@ TEST_F(MigrationChunkClonerSourceLegacyTest, FailedToEngageRecipientShard) {
 
     // Cancel clone should not send a cancellation request to the donor because we failed to engage
     // it (see comment in the startClone method)
+    cloner.cancelClone(operationContext());
+}
+
+TEST_F(MigrationChunkClonerSourceLegacyTest, RecipientShardFailsWithIsNotMaster) {
+    const std::vector<BSONObj> contents = {createCollectionDocument(99),
+                                           createCollectionDocument(100),
+                                           createCollectionDocument(199),
+                                           createCollectionDocument(200)};
+
+    createShardedCollection(contents);
+
+    MigrationChunkClonerSourceLegacy cloner(
+        createMoveChunkRequest(ChunkRange(BSON("X" << 100), BSON("X" << 200))),
+        kShardKeyPattern,
+        kDonorConnStr,
+        kRecipientConnStr.getServers()[0]);
+
+    {
+        auto futureStartClone = launchAsync([&]() {
+            onCommand([&](const RemoteCommandRequest& request) {
+                return Status(ErrorCodes::NotMaster, "Simulate failover at recipient");
+            });
+        });
+
+        auto startCloneStatus = cloner.startClone(operationContext());
+        // Error is converted to OperationFailed as if it's propagated to the MigrationManager
+        // it will mark the migration source as no longer primary.
+        ASSERT_EQ(ErrorCodes::OperationFailed, startCloneStatus.code());
+        futureStartClone.default_timed_get();
+    }
     cloner.cancelClone(operationContext());
 }
 

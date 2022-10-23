@@ -928,6 +928,9 @@ Status TopologyCoordinator::prepareHeartbeatResponseV1(Date_t now,
         return Status::OK();
     }
 
+    response->setElectable(
+        !_getMyUnelectableReason(now, StartElectionReasonEnum::kElectionTimeout));
+
     const long long v = _rsConfig.getConfigVersion();
     response->setConfigVersion(v);
     // Deliver new config if caller's version is older than ours
@@ -1120,11 +1123,11 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
         nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
         return nextAction;
     }
-    // If we're not in the config, we don't need to respond to heartbeats.
+    // This server is not in the config, either because it was removed or a DNS error finding self.
     if (_selfIndex == -1) {
-        LOG(1) << "Could not find ourself in current config so ignoring heartbeat from " << target
-               << " -- current config: " << _rsConfig.toBSON();
-        HeartbeatResponseAction nextAction = HeartbeatResponseAction::makeNoAction();
+        LOG(1) << "Could not find self in current config, retrying DNS resolution of members "
+               << target << " -- current config: " << _rsConfig.toBSON();
+        HeartbeatResponseAction nextAction = HeartbeatResponseAction::makeRetryReconfigAction();
         nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
         return nextAction;
     }
@@ -1143,6 +1146,7 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
     MemberData& hbData = _memberData.at(memberIndex);
     const MemberConfig member = _rsConfig.getMemberAt(memberIndex);
     bool advancedOpTime = false;
+    bool becameElectable = false;
     if (!hbResponse.isOK()) {
         if (isUnauthorized) {
             hbData.setAuthIssue(now);
@@ -1160,7 +1164,9 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
         ReplSetHeartbeatResponse hbr = std::move(hbResponse.getValue());
         LOG(3) << "setUpValues: heartbeat response good for member _id:" << member.getId()
                << ", msg:  " << hbr.getHbMsg();
+        auto wasUnelectable = hbData.isUnelectable();
         advancedOpTime = hbData.setUpValues(now, std::move(hbr));
+        becameElectable = wasUnelectable && !hbData.isUnelectable();
     }
 
     HeartbeatResponseAction nextAction;
@@ -1172,6 +1178,7 @@ HeartbeatResponseAction TopologyCoordinator::processHeartbeatResponse(
 
     nextAction.setNextHeartbeatStartDate(nextHeartbeatStartDate);
     nextAction.setAdvancedOpTime(advancedOpTime);
+    nextAction.setBecameElectable(becameElectable);
     return nextAction;
 }
 
@@ -3140,24 +3147,22 @@ bool TopologyCoordinator::canCompleteTransitionToPrimary(long long termWhenDrain
     }
     // Allow completing the transition to primary even when in the middle of a stepdown attempt,
     // in case the stepdown attempt fails.
-    if (_leaderMode != LeaderMode::kLeaderElect && _leaderMode != LeaderMode::kAttemptingStepDown) {
+    if (_leaderMode != LeaderMode::kLeaderElect && _leaderMode != LeaderMode::kAttemptingStepDown &&
+        _leaderMode != LeaderMode::kSteppingDown) {
         return false;
     }
 
     return true;
 }
 
-Status TopologyCoordinator::completeTransitionToPrimary(const OpTime& firstOpTimeOfTerm) {
-    if (!canCompleteTransitionToPrimary(firstOpTimeOfTerm.getTerm())) {
-        return Status(ErrorCodes::PrimarySteppedDown,
-                      "By the time this node was ready to complete its transition to PRIMARY it "
-                      "was no longer eligible to do so");
-    }
+void TopologyCoordinator::completeTransitionToPrimary(const OpTime& firstOpTimeOfTerm) {
+    invariant(canCompleteTransitionToPrimary(firstOpTimeOfTerm.getTerm()));
+
     if (_leaderMode == LeaderMode::kLeaderElect) {
         _setLeaderMode(LeaderMode::kMaster);
     }
+
     _firstOpTimeOfMyTerm = firstOpTimeOfTerm;
-    return Status::OK();
 }
 
 void TopologyCoordinator::adjustMaintenanceCountBy(int inc) {

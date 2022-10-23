@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -815,7 +815,7 @@ __txn_checkpoint(WT_SESSION_IMPL *session, const char *cfg[])
      * of the transaction table, or a thread evicting in a tree could
      * ignore the checkpoint's transaction.
      */
-    generation = __wt_gen_next(session, WT_GEN_CHECKPOINT);
+    __wt_gen_next(session, WT_GEN_CHECKPOINT, &generation);
     WT_STAT_CONN_SET(session, txn_checkpoint_generation, generation);
 
     /*
@@ -1127,7 +1127,6 @@ static void
 __drop(WT_CKPT *ckptbase, const char *name, size_t len)
 {
     WT_CKPT *ckpt;
-    u_int max_ckpt_drop;
 
     /*
      * If we're dropping internal checkpoints, match to the '.' separating the checkpoint name from
@@ -1136,20 +1135,9 @@ __drop(WT_CKPT *ckptbase, const char *name, size_t len)
      * it's one we want to drop.
      */
     if (strncmp(WT_CHECKPOINT, name, len) == 0) {
-        /*
-         * Currently, hot backup cursors block checkpoint drop, which means releasing a hot backup
-         * cursor can result in immediately attempting to drop lots of checkpoints, which involves a
-         * fair amount of work while holding locks. Limit the number of standard checkpoints dropped
-         * per checkpoint.
-         */
-        max_ckpt_drop = 0;
         WT_CKPT_FOREACH (ckptbase, ckpt)
-            if (WT_PREFIX_MATCH(ckpt->name, WT_CHECKPOINT)) {
+            if (WT_PREFIX_MATCH(ckpt->name, WT_CHECKPOINT))
                 F_SET(ckpt, WT_CKPT_DELETE);
-#define WT_MAX_CHECKPOINT_DROP 4
-                if (++max_ckpt_drop >= WT_MAX_CHECKPOINT_DROP)
-                    break;
-            }
     } else
         WT_CKPT_FOREACH (ckptbase, ckpt)
             if (WT_STRING_MATCH(ckpt->name, name, len))
@@ -1234,9 +1222,11 @@ __checkpoint_lock_dirty_tree(
     WT_CONNECTION_IMPL *conn;
     WT_DATA_HANDLE *dhandle;
     WT_DECL_RET;
+    uint64_t now;
+    u_int max_ckpt_drop;
     char *name_alloc;
     const char *name;
-    bool hot_backup_locked;
+    bool hot_backup_locked, is_drop, is_wt_ckpt, skip_ckpt;
 
     btree = S2BT(session);
     conn = S2C(session);
@@ -1244,9 +1234,6 @@ __checkpoint_lock_dirty_tree(
     dhandle = session->dhandle;
     hot_backup_locked = false;
     name_alloc = NULL;
-
-    /* Only referenced in diagnostic builds. */
-    WT_UNUSED(is_checkpoint);
 
     /*
      * Only referenced in diagnostic builds and gcc 5.1 isn't satisfied with wrapping the entire
@@ -1263,20 +1250,56 @@ __checkpoint_lock_dirty_tree(
      */
     WT_ASSERT(session, !need_tracking || WT_IS_METADATA(dhandle) || WT_META_TRACKING(session));
 
-    /* Get the list of checkpoints for this file. */
-    WT_RET(__wt_meta_ckptlist_get(session, dhandle->name, &ckptbase));
-
     /* This may be a named checkpoint, check the configuration. */
     cval.len = 0;
+    is_drop = is_wt_ckpt = false;
     if (cfg != NULL)
         WT_ERR(__wt_config_gets(session, cfg, "name", &cval));
-    if (cval.len == 0)
+    if (cval.len == 0) {
         name = WT_CHECKPOINT;
-    else {
+        is_wt_ckpt = true;
+    } else {
         WT_ERR(__checkpoint_name_ok(session, cval.str, cval.len));
         WT_ERR(__wt_strndup(session, cval.str, cval.len, &name_alloc));
         name = name_alloc;
     }
+
+    /*
+     * Determine if a drop is part of the configuration. It usually isn't, so delay processing more
+     * until we know if we need to process this tree.
+     */
+    if (cfg != NULL) {
+        cval.len = 0;
+        WT_ERR(__wt_config_gets(session, cfg, "drop", &cval));
+        if (cval.len != 0)
+            is_drop = true;
+    }
+
+    /*
+     * This is a complicated test to determine if we can avoid the expensive call of getting the
+     * list of checkpoints for this file. We want to avoid that for clean files. But on clean files
+     * we want to periodically check if we need to delete old checkpoints that may have been in use
+     * by an open cursor.
+     */
+    if (!btree->modified && !force && is_checkpoint && is_wt_ckpt && !is_drop) {
+        /* In the common case of the timer set forever, don't even check the time. */
+        skip_ckpt = true;
+        if (btree->clean_ckpt_timer != WT_BTREE_CLEAN_CKPT_FOREVER) {
+            __wt_seconds64(session, &now);
+            if (now > btree->clean_ckpt_timer)
+                skip_ckpt = false;
+        }
+        if (skip_ckpt) {
+            F_SET(btree, WT_BTREE_SKIP_CKPT);
+            goto skip;
+        }
+    }
+
+    /* If we have to process this btree for any reason, reset the timer. */
+    WT_BTREE_CLEAN_CKPT(session, btree, 0);
+
+    /* Get the list of checkpoints for this file. */
+    WT_ERR(__wt_meta_ckptlist_get(session, dhandle->name, true, &ckptbase));
 
     /* We may be dropping specific checkpoints, check the configuration. */
     if (cfg != NULL) {
@@ -1320,28 +1343,41 @@ __checkpoint_lock_dirty_tree(
     __wt_free(session, name_alloc);
     F_SET(ckpt, WT_CKPT_ADD);
 
-    /*
-     * We can't delete checkpoints if a backup cursor is open. WiredTiger checkpoints are uniquely
-     * named and it's OK to have multiple of them in the system: clear the delete flag for them, and
-     * otherwise fail. Hold the lock until we're done (blocking hot backups from starting), we don't
-     * want to race with a future hot backup.
-     */
     __wt_readlock(session, &conn->hot_backup_lock);
     hot_backup_locked = true;
-    if (conn->hot_backup)
-        WT_CKPT_FOREACH (ckptbase, ckpt) {
-            if (!F_ISSET(ckpt, WT_CKPT_DELETE))
-                continue;
-            if (WT_PREFIX_MATCH(ckpt->name, WT_CHECKPOINT)) {
+
+    /* Check that it is OK to remove all the checkpoints marked for deletion. */
+    max_ckpt_drop = 0;
+    WT_CKPT_FOREACH (ckptbase, ckpt) {
+        if (!F_ISSET(ckpt, WT_CKPT_DELETE))
+            continue;
+        is_wt_ckpt = WT_PREFIX_MATCH(ckpt->name, WT_CHECKPOINT);
+
+        /*
+         * If there is a hot backup, don't delete any WiredTiger checkpoint that could possibly have
+         * been created before the backup started. Fail if trying to delete any other named
+         * checkpoint.
+         */
+        if (conn->hot_backup_start != 0 && ckpt->sec <= conn->hot_backup_start) {
+            if (is_wt_ckpt) {
                 F_CLR(ckpt, WT_CKPT_DELETE);
                 continue;
             }
             WT_ERR_MSG(session, EBUSY,
               "checkpoint %s blocked by hot backup: it would "
-              "delete an existing checkpoint, and checkpoints "
-              "cannot be deleted during a hot backup",
+              "delete an existing named checkpoint, and such "
+              "checkpoints cannot be deleted during a hot backup",
               ckpt->name);
         }
+        /*
+         * Dropping checkpoints involves a fair amount of work while holding locks. Limit the number
+         * of WiredTiger checkpoints dropped per checkpoint.
+         */
+        if (is_wt_ckpt)
+#define WT_MAX_CHECKPOINT_DROP 4
+            if (++max_ckpt_drop >= WT_MAX_CHECKPOINT_DROP)
+                F_CLR(ckpt, WT_CKPT_DELETE);
+    }
 
     /*
      * Mark old checkpoints that are being deleted and figure out which trees we can skip in this
@@ -1364,7 +1400,8 @@ __checkpoint_lock_dirty_tree(
         WT_CKPT_FOREACH (ckptbase, ckpt) {
             if (!F_ISSET(ckpt, WT_CKPT_DELETE))
                 continue;
-
+            WT_ASSERT(session, !WT_PREFIX_MATCH(ckpt->name, WT_CHECKPOINT) ||
+                conn->hot_backup_start == 0 || ckpt->sec > conn->hot_backup_start);
             /*
              * We can't delete checkpoints referenced by a cursor. WiredTiger checkpoints are
              * uniquely named and it's OK to have multiple in the system: clear the delete flag for
@@ -1375,6 +1412,7 @@ __checkpoint_lock_dirty_tree(
                 continue;
             if (ret == EBUSY && WT_PREFIX_MATCH(ckpt->name, WT_CHECKPOINT)) {
                 F_CLR(ckpt, WT_CKPT_DELETE);
+                ret = 0;
                 continue;
             }
             WT_ERR_MSG(session, ret, "checkpoints cannot be dropped when in-use");
@@ -1393,13 +1431,14 @@ __checkpoint_lock_dirty_tree(
     WT_ASSERT(session, btree->ckpt == NULL && !F_ISSET(btree, WT_BTREE_SKIP_CKPT));
     btree->ckpt = ckptbase;
 
-    return (0);
-
+    if (0) {
 err:
-    if (hot_backup_locked)
-        __wt_readunlock(session, &conn->hot_backup_lock);
+        if (hot_backup_locked)
+            __wt_readunlock(session, &conn->hot_backup_lock);
 
-    __wt_meta_ckptlist_free(session, &ckptbase);
+        __wt_meta_ckptlist_free(session, &ckptbase);
+    }
+skip:
     __wt_free(session, name_alloc);
 
     return (ret);
@@ -1414,6 +1453,7 @@ __checkpoint_mark_skip(WT_SESSION_IMPL *session, WT_CKPT *ckptbase, bool force)
 {
     WT_BTREE *btree;
     WT_CKPT *ckpt;
+    uint64_t timer;
     int deleted;
     const char *name;
 
@@ -1462,6 +1502,19 @@ __checkpoint_mark_skip(WT_SESSION_IMPL *session, WT_CKPT *ckptbase, bool force)
               (WT_PREFIX_MATCH(name, WT_CHECKPOINT) &&
                 WT_PREFIX_MATCH((ckpt - 2)->name, WT_CHECKPOINT)))) {
             F_SET(btree, WT_BTREE_SKIP_CKPT);
+            /*
+             * If there are potentially extra checkpoints to delete, we set the timer to recheck
+             * later. If there are at most two checkpoints, the current one and possibly a previous
+             * one, then we know there are no additional ones to delete. In that case, set the timer
+             * to forever. If the table gets dirtied or a checkpoint is forced that will clear the
+             * timer.
+             */
+            if (ckpt - ckptbase > 2) {
+                __wt_seconds64(session, &timer);
+                timer += WT_MINUTE * WT_BTREE_CLEAN_MINUTES;
+                WT_BTREE_CLEAN_CKPT(session, btree, timer);
+            } else
+                WT_BTREE_CLEAN_CKPT(session, btree, WT_BTREE_CLEAN_CKPT_FOREVER);
             return (0);
         }
     }

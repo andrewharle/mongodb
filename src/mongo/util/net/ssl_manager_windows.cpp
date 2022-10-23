@@ -40,6 +40,7 @@
 #include <string>
 #include <tuple>
 #include <vector>
+#include <winhttp.h>
 
 #include "mongo/base/init.h"
 #include "mongo/base/initializer_context.h"
@@ -312,6 +313,7 @@ private:
         CERT_CHAIN_ENGINE_CONFIG userConfig;
         UniqueCertChainEngine user;
         UniqueCertStore CAstore;
+        bool hasCRL;
     };
 
     Status _initChainEngines(CAEngine* engine);
@@ -391,6 +393,8 @@ SSLManagerInterface* getSSLManager() {
 
 namespace {
 
+StatusWith<std::vector<std::string>> getSubjectAlternativeNames(PCCERT_CONTEXT cert);
+
 SSLManagerWindows::SSLManagerWindows(const SSLParams& params, bool isServer)
     : _weakValidation(params.sslWeakCertificateValidation),
       _allowInvalidCertificates(params.sslAllowInvalidCertificates),
@@ -425,6 +429,13 @@ SSLManagerWindows::SSLManagerWindows(const SSLParams& params, bool isServer)
                 _validateCertificate(_serverCertificates[0],
                                      &_sslConfiguration.serverSubjectName,
                                      &_sslConfiguration.serverCertificateExpirationDate));
+
+            auto swSans = getSubjectAlternativeNames(_serverCertificates[0]);
+            const bool hasSan = swSans.isOK() && (0 != swSans.getValue().size());
+            if (!hasSan) {
+                warning() << "Server certificate has no compatible Subject Alternative Name. "
+                             "This may prevent TLS clients from connecting";
+            }
         }
 
         // Monitor the server certificate's expiration
@@ -1288,6 +1299,7 @@ Status SSLManagerWindows::_loadCertificates(const SSLParams& params) {
 
         _clientEngine.CAstore = std::move(swChain.getValue());
     }
+    _clientEngine.hasCRL = !params.sslCRLFile.empty();
 
     const auto serverCAFile =
         params.sslClusterCAFile.empty() ? params.sslCAFile : params.sslClusterCAFile;
@@ -1299,6 +1311,7 @@ Status SSLManagerWindows::_loadCertificates(const SSLParams& params) {
 
         _serverEngine.CAstore = std::move(swChain.getValue());
     }
+    _serverEngine.hasCRL = !params.sslCRLFile.empty();
 
     if (hasCertificateSelector(params.sslCertificateSelector)) {
         auto swCert = loadAndValidateCertificateSelector(params.sslCertificateSelector);
@@ -1627,6 +1640,7 @@ Status validatePeerCertificate(const std::string& remoteHost,
                                HCERTCHAINENGINE certChainEngine,
                                bool allowInvalidCertificates,
                                bool allowInvalidHostnames,
+                               bool hasCRL,
                                SSLX509Name* peerSubjectName) {
     CERT_CHAIN_PARA certChainPara;
     memset(&certChainPara, 0, sizeof(certChainPara));
@@ -1685,6 +1699,10 @@ Status validatePeerCertificate(const std::string& remoteHost,
     chain_policy_para.cbSize = sizeof(chain_policy_para);
     chain_policy_para.pvExtraPolicyPara = &sslCertChainPolicy;
 
+    if (!hasCRL) {
+        chain_policy_para.dwFlags |= CERT_CHAIN_POLICY_IGNORE_ALL_REV_UNKNOWN_FLAGS;
+    }
+
     CERT_CHAIN_POLICY_STATUS certChainPolicyStatus;
     memset(&certChainPolicyStatus, 0, sizeof(certChainPolicyStatus));
     certChainPolicyStatus.cbSize = sizeof(certChainPolicyStatus);
@@ -1709,10 +1727,40 @@ Status validatePeerCertificate(const std::string& remoteHost,
 
     // This means the certificate chain is not valid.
     // Ignore CRYPT_E_NO_REVOCATION_CHECK since most CAs lack revocation information especially test
-    // certificates
+    // certificates. Either there needs to be a CRL, a CrlDistributionPoint in the Cert or OCSP and
+    // user-generated certs lack this information.
     if (certChainPolicyStatus.dwError != S_OK &&
         certChainPolicyStatus.dwError != CRYPT_E_NO_REVOCATION_CHECK) {
-        if (certChainPolicyStatus.dwError == CERT_E_CN_NO_MATCH || allowInvalidCertificates) {
+        bool onlyCNError = false;
+
+        // Try again to validate if the cert has any other errors besides a CN mismatch
+        if (certChainPolicyStatus.dwError == CERT_E_CN_NO_MATCH && !allowInvalidCertificates) {
+
+            // We know the CNs do not match, are there any other issues?
+            sslCertChainPolicy.fdwChecks = SECURITY_FLAG_IGNORE_CERT_CN_INVALID;
+
+            ret = CertVerifyCertificateChainPolicy(CERT_CHAIN_POLICY_SSL,
+                                                   certChainHolder.get(),
+                                                   &chain_policy_para,
+                                                   &certChainPolicyStatus);
+
+            // This means something really went wrong, this should not happen.
+            if (!ret) {
+                DWORD gle = GetLastError();
+                return Status(ErrorCodes::InvalidSSLConfiguration,
+                              str::stream() << "CertVerifyCertificateChainPolicy2 failed: "
+                                            << errnoWithDescription(gle));
+            }
+
+            if (certChainPolicyStatus.dwError == S_OK ||
+                certChainPolicyStatus.dwError == CRYPT_E_NO_REVOCATION_CHECK) {
+                onlyCNError = true;
+            }
+        }
+
+        // We need to check if the user has a cert where SANs have ip addresses label as DNS Name
+        // but only if a CN mismatch is the only error
+        if (onlyCNError || allowInvalidCertificates) {
 
             // Give the user a hint why the certificate validation failed.
             StringBuilder certificateNames;
@@ -1831,6 +1879,7 @@ StatusWith<SSLPeerInfo> SSLManagerWindows::parseAndValidatePeerCertificate(
                                                          engine->machine,
                                                          _allowInvalidCertificates,
                                                          _allowInvalidHostnames,
+                                                         engine->hasCRL,
                                                          &peerSubjectName);
     if (!validateCertMachine.isOK()) {
         // Validate against the current user store since this is easier for unprivileged users to
@@ -1840,6 +1889,7 @@ StatusWith<SSLPeerInfo> SSLManagerWindows::parseAndValidatePeerCertificate(
                                                           engine->user,
                                                           _allowInvalidCertificates,
                                                           _allowInvalidHostnames,
+                                                          engine->hasCRL,
                                                           &peerSubjectName);
         if (!validateCertUser.isOK()) {
             // Return the local machine status

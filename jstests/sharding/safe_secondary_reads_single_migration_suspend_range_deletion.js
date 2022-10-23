@@ -51,6 +51,7 @@
         _configsvrBalancerStop: {skip: "primary only"},
         _configsvrClearJumboFlag: {skip: "primary only"},
         _configsvrCommitChunkMerge: {skip: "primary only"},
+        _configsvrCommitChunksMerge: {skip: "primary only"},
         _configsvrCommitChunkMigration: {skip: "primary only"},
         _configsvrCommitChunkSplit: {skip: "primary only"},
         _configsvrCommitMovePrimary: {skip: "primary only"},
@@ -260,6 +261,7 @@
             behavior: "unshardedOnly"
         },
         handshake: {skip: "does not return user data"},
+        hello: {skip: "does not return user data"},
         hostInfo: {skip: "does not return user data"},
         insert: {skip: "primary only"},
         invalidateUserCache: {skip: "does not return user data"},
@@ -278,6 +280,7 @@
         listShards: {skip: "does not return user data"},
         lockInfo: {skip: "primary only"},
         logApplicationMessage: {skip: "primary only"},
+        logMessage: {skip: "does not return user data"},
         logRotate: {skip: "does not return user data"},
         logout: {skip: "does not return user data"},
         makeSnapshot: {skip: "does not return user data"},
@@ -386,8 +389,8 @@
         whatsmyuri: {skip: "does not return user data"}
     };
 
-    // Set the secondaries to priority 0 and votes 0 to prevent the primaries from stepping down.
-    let rsOpts = {nodes: [{rsConfig: {votes: 1}}, {rsConfig: {priority: 0, votes: 0}}]};
+    // Set the secondaries to priority 0 to prevent the primaries from stepping down.
+    let rsOpts = {nodes: [{}, {rsConfig: {priority: 0}}]};
     let st = new ShardingTest({mongos: 2, shards: {rs0: rsOpts, rs1: rsOpts}});
 
     let donorShardPrimary = st.rs0.getPrimary();

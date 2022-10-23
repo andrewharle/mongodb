@@ -255,12 +255,6 @@ void ReplicationRecoveryImpl::recoverFromOplog(OperationContext* opCtx,
     }
 
     const auto appliedThrough = _consistencyMarkers->getAppliedThrough(opCtx);
-    invariant(!stableTimestamp || stableTimestamp->isNull() || appliedThrough.isNull() ||
-                  *stableTimestamp == appliedThrough.getTimestamp(),
-              str::stream() << "Stable timestamp " << stableTimestamp->toString()
-                            << " does not equal appliedThrough timestamp "
-                            << appliedThrough.toString());
-
     if (stableTimestamp) {
         invariant(supportsRecoveryTimestamp);
         _recoverFromStableTimestamp(opCtx, *stableTimestamp, appliedThrough, topOfOplog);
@@ -330,9 +324,7 @@ void ReplicationRecoveryImpl::_recoverFromUnstableCheckpoint(OperationContext* o
     // datafiles contain any writes that were taken before the crash.
     _consistencyMarkers->setAppliedThrough(opCtx, topOfOplog);
 
-    // Force the set `appliedThrough` to become durable on disk in a checkpoint. This method would
-    // typically take a stable checkpoint, but because we're starting up from a checkpoint that
-    // has no checkpoint timestamp, the stable checkpoint "degrades" into an unstable checkpoint.
+    // Force the set `appliedThrough` to become durable on disk in a checkpoint.
     //
     // Not waiting for checkpoint durability here can result in a scenario where the node takes
     // writes and persists them to the oplog, but crashes before a stable checkpoint persists a

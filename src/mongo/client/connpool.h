@@ -105,13 +105,6 @@ public:
     }
 
     /**
-     * Sets the maximum number of in-use connections for this pool.
-     */
-    void setMaxInUse(int maxInUse) {
-        _maxInUse = maxInUse;
-    }
-
-    /**
      * Sets the socket timeout on this host, in seconds, for reporting purposes only.
      */
     void setSocketTimeout(double socketTimeout) {
@@ -181,7 +174,7 @@ public:
      * throw if a free connection cannot be acquired within that amount of
      * time. Timeout is in seconds.
      */
-    void waitForFreeConnection(int timeout, stdx::unique_lock<stdx::mutex>& lk);
+    void waitForFreeConnection(int timeout, stdx::unique_lock<stdx::mutex>& lk, int maxInUse);
 
     /**
      * Notifies any waiters that there are new connections available.
@@ -221,9 +214,6 @@ private:
 
     // The maximum number of connections we'll save in the pool
     int _maxPoolSize;
-
-    // The maximum number of connections allowed to be in-use in this pool
-    int _maxInUse;
 
     // The number of currently active connections from this pool
     int _checkedOut;
@@ -383,9 +373,15 @@ private:
     DBClientBase* _finishCreate(const std::string& ident, double socketTimeout, DBClientBase* conn);
 
     struct PoolKey {
-        PoolKey(const std::string& i, double t) : ident(i), timeout(t) {}
+        PoolKey(const std::string& i, double socketTimeoutSec)
+            : ident(i),
+              // Rounds up with presision 0.001, e.g. value between 0.99991 and 1.0008 to 1000.
+              socketTimeoutMs(static_cast<int64_t>(socketTimeoutSec * 10.001) * 100) {}
         std::string ident;
-        double timeout;
+        // To make the key to have a descrete value the double timeout
+        // is rounded up to 100 ms. This prevents from creating a potentially
+        // unlimited number of pools.
+        int64_t socketTimeoutMs;
     };
 
     struct poolKeyCompare {
@@ -402,6 +398,7 @@ private:
     // 0 effectively disables the pool
     int _maxPoolSize;
 
+    // The maximum number of connections allowed to be in-use in this pool.
     int _maxInUse;
     Minutes _idleTimeout;
 

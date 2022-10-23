@@ -113,14 +113,21 @@ bool ShardRemote::isRetriableError(ErrorCodes::Error code, RetryPolicy options) 
         return false;
     }
 
-    if (options == RetryPolicy::kNoRetry) {
-        return false;
+    switch (options) {
+        case RetryPolicy::kNoRetry: {
+            return false;
+        } break;
+
+        case RetryPolicy::kIdempotent: {
+            return ErrorCodes::isRetriableError(code);
+        } break;
+
+        case RetryPolicy::kNotIdempotent: {
+            return ErrorCodes::isNotMasterError(code);
+        } break;
     }
 
-    const auto& retriableErrors = options == RetryPolicy::kIdempotent
-        ? RemoteCommandRetryScheduler::kAllRetriableErrors
-        : RemoteCommandRetryScheduler::kNotMasterErrors;
-    return std::find(retriableErrors.begin(), retriableErrors.end(), code) != retriableErrors.end();
+    MONGO_UNREACHABLE;
 }
 
 const ConnectionString ShardRemote::getConnString() const {
@@ -139,6 +146,8 @@ void ShardRemote::updateReplSetMonitor(const HostAndPort& remoteHost,
         _targeter->markHostUnreachable(remoteHost, remoteCommandStatus);
     } else if (remoteCommandStatus == ErrorCodes::NetworkInterfaceExceededTimeLimit) {
         _targeter->markHostUnreachable(remoteHost, remoteCommandStatus);
+    } else if (ErrorCodes::isShutdownError(remoteCommandStatus.code())) {
+        _targeter->markHostShuttingDown(remoteHost, remoteCommandStatus);
     }
 }
 

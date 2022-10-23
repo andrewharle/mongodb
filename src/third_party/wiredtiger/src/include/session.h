@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -61,6 +61,9 @@ struct __wt_session_impl {
     const char *name;   /* Name */
     const char *lastop; /* Last operation */
     uint32_t id;        /* UID, offset in session array */
+
+    uint64_t operation_start_us;   /* Operation start */
+    uint64_t operation_timeout_us; /* Maximum operation period before rollback */
 
     WT_EVENT_HANDLER *event_handler; /* Application's event handlers */
 

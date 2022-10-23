@@ -13,8 +13,14 @@
  *     upgradeShards: <bool>, // defaults to true
  *     upgradeConfigs: <bool>, // defaults to true
  *     upgradeMongos: <bool>, // defaults to true
+ *     waitUntilStable: <bool>, // defaults to false since it provides a more realistic
+ *                                 approximation of real-world upgrade behaviour, even though
+ *                                 certain tests will likely want a stable cluster after upgrading.
  * }
  */
+load("jstests/multiVersion/libs/multi_rs.js");  // Used by upgradeSet.
+load("jstests/replsets/rslib.js");              // For awaitRSClientHosts.
+
 ShardingTest.prototype.upgradeCluster = function(binVersion, options) {
     options = options || {};
     if (options.upgradeShards == undefined)
@@ -23,6 +29,8 @@ ShardingTest.prototype.upgradeCluster = function(binVersion, options) {
         options.upgradeConfigs = true;
     if (options.upgradeMongos == undefined)
         options.upgradeMongos = true;
+    if (options.waitUntilStable == undefined)
+        options.waitUntilStable = false;
 
     var upgradedSingleShards = [];
 
@@ -86,10 +94,27 @@ ShardingTest.prototype.upgradeCluster = function(binVersion, options) {
         this.config = this.s.getDB("config");
         this.admin = this.s.getDB("admin");
     }
+
+    if (options.waitUntilStable) {
+        this.waitUntilStable();
+    }
+};
+
+ShardingTest.prototype.waitUntilStable = function() {
+    // Wait for the config server and shards to become available.
+    this.configRS.awaitSecondaryNodes();
+    let shardPrimaries = [];
+    for (let rs of this._rs) {
+        rs.test.awaitSecondaryNodes();
+        shardPrimaries.push(rs.test.getPrimary());
+    }
+    // Wait for the ReplicaSetMonitor on mongoS and each shard to reflect the state of all shards.
+    for (let client of[...this._mongos, ...shardPrimaries]) {
+        awaitRSClientHosts(client, shardPrimaries, {ok: true, ismaster: true});
+    }
 };
 
 ShardingTest.prototype.restartMongoses = function() {
-
     var numMongoses = this._mongos.length;
 
     for (var i = 0; i < numMongoses; i++) {

@@ -46,6 +46,7 @@
 #include "mongo/s/grid.h"
 #include "mongo/s/write_ops/batch_write_op.h"
 #include "mongo/s/write_ops/write_error_detail.h"
+#include "mongo/util/exit.h"
 #include "mongo/util/log.h"
 
 namespace mongo {
@@ -303,6 +304,12 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
                                            : OID());
                 } else {
                     // Error occurred dispatching, note it
+                    if (ErrorCodes::isShutdownError(responseStatus.code()) &&
+                        globalInShutdownDeprecated()) {
+                        // Throw an error since the mongos itself is shutting down so this should
+                        // be a top level error instead of a write error.
+                        uassertStatusOK(responseStatus);
+                    }
                     const Status status = responseStatus.withContext(
                         str::stream() << "Write results unavailable from " << shardHost);
 
@@ -364,6 +371,10 @@ void BatchWriteExec::executeBatch(OperationContext* opCtx,
         }
     }
 
+    auto nShardsOwningChunks = batchOp.getNShardsOwningChunks();
+    if (nShardsOwningChunks.is_initialized())
+        stats->noteNumShardsOwningChunks(nShardsOwningChunks.get());
+
     batchOp.buildClientResponse(clientResponse);
 
     LOG(4) << "Finished execution of write batch"
@@ -385,6 +396,10 @@ void BatchWriteExecStats::noteWriteAt(const HostAndPort& host,
     _writeOpTimes[ConnectionString(host)] = HostOpTime(opTime, electionId);
 }
 
+void BatchWriteExecStats::noteNumShardsOwningChunks(const int nShardsOwningChunks) {
+    _numShardsOwningChunks.emplace(nShardsOwningChunks);
+}
+
 const std::set<ShardId>& BatchWriteExecStats::getTargetedShards() const {
     return _targetedShards;
 }
@@ -393,4 +408,8 @@ const HostOpTimeMap& BatchWriteExecStats::getWriteOpTimes() const {
     return _writeOpTimes;
 }
 
-}  // namespace
+const boost::optional<int> BatchWriteExecStats::getNumShardsOwningChunks() const {
+    return _numShardsOwningChunks;
+}
+
+}  // namespace mongo

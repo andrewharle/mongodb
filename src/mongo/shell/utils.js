@@ -1388,30 +1388,46 @@ rs.help = function() {
         "\trs.freeze(secs)                            make a node ineligible to become primary for the time specified");
     print(
         "\trs.remove(hostportstr)                     remove a host from the replica set (disconnects)");
-    print("\trs.slaveOk()                               allow queries on secondary nodes");
+    print("\trs.secondaryOk()                               allow queries on secondary nodes");
     print();
     print("\trs.printReplicationInfo()                  check oplog size and time range");
     print(
-        "\trs.printSlaveReplicationInfo()             check replica set members and replication lag");
+        "\trs.printSecondaryReplicationInfo()             check replica set members and replication lag");
     print("\tdb.isMaster()                              check who is primary");
+    print("\tdb.hello()                              check who is primary");
     print();
     print("\treconfiguration helpers disconnect from the database so the shell will display");
     print("\tan error, even if the command succeeds.");
 };
 rs.slaveOk = function(value) {
-    return db.getMongo().setSlaveOk(value);
+    print(
+        "WARNING: slaveOk() is deprecated and may be removed in the next major release. Please use secondaryOk() instead.");
+    return db.getMongo().setSecondaryOk(value);
 };
+
+rs.secondaryOk = function(value) {
+    return db.getMongo().setSecondaryOk(value);
+};
+
 rs.status = function() {
     return db._adminCommand("replSetGetStatus");
 };
 rs.isMaster = function() {
     return db.isMaster();
 };
+rs.hello = function() {
+    return db.hello();
+};
 rs.initiate = function(c) {
     return db._adminCommand({replSetInitiate: c});
 };
 rs.printSlaveReplicationInfo = function() {
-    return db.printSlaveReplicationInfo();
+    print(
+        "WARNING: printSlaveReplicationInfo is deprecated and may be removed in the next major release. Please use printSecondaryReplicationInfo instead.");
+    return db.printSecondaryReplicationInfo();
+};
+rs.printSecondaryReplicationInfo = function() {
+    return db.printSecondaryReplicationInfo();
 };
 rs.printReplicationInfo = function() {
     return db.printReplicationInfo();
@@ -1528,7 +1544,7 @@ rs.debug = {};
 rs.debug.nullLastOpWritten = function(primary, secondary) {
     var p = connect(primary + "/local");
     var s = connect(secondary + "/local");
-    s.getMongo().setSlaveOk();
+    s.getMongo().setSecondaryOk();
 
     var secondToLast = s.oplog.rs.find().sort({$natural: -1}).limit(1).next();
     var last = p.runCommand({
@@ -1553,7 +1569,7 @@ rs.debug.getLastOpWritten = function(server) {
     if (server) {
         s = connect(server + "/local");
     }
-    s.getMongo().setSlaveOk();
+    s.getMongo().setSecondaryOk();
 
     return s.oplog.rs.find().sort({$natural: -1}).limit(1).next();
 };

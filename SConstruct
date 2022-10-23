@@ -1274,6 +1274,15 @@ if link_model == "auto":
 if env.TargetOSIs('windows') and link_model not in ['object', 'static', 'dynamic-sdk']:
     env.FatalError("Windows builds must use the 'object', 'dynamic-sdk', or 'static' link models")
 
+
+# The mongodbtoolchain currently doesn't produce working binaries if
+# you combine a dynamic build with a non-system allocator, but the
+# failure mode is non-obvious. For now, prevent people from wandering
+# inadvertantly into this trap. Remove this constraint when
+# https://jira.mongodb.org/browse/SERVER-27675 is resolved.
+if (link_model == 'dynamic') and ('mongodbtoolchain' in env['CXX']) and (env['MONGO_ALLOCATOR'] != 'system'):
+    env.FatalError('Cannot combine the MongoDB toolchain, a dynamic build, and a non-system allocator. Choose two.')
+
 # The 'object' mode for libdeps is enabled by setting _LIBDEPS to $_LIBDEPS_OBJS. The other two
 # modes operate in library mode, enabled by setting _LIBDEPS to $_LIBDEPS_LIBS.
 env['_LIBDEPS'] = '$_LIBDEPS_OBJS' if link_model == "object" else '$_LIBDEPS_LIBS'
@@ -3473,13 +3482,6 @@ if split_dwarf.exists(env):
 # compilation database entries for the configure tests, which is weird.
 env.Tool("compilation_db")
 
-# If we can, load the dagger tool for build dependency graph introspection.
-# Dagger is only supported on Linux and OSX (not Windows or Solaris).
-should_dagger = ( mongo_platform.is_running_os('osx') or mongo_platform.is_running_os('linux')  ) and "dagger" in COMMAND_LINE_TARGETS
-
-if should_dagger:
-    env.Tool("dagger")
-
 incremental_link = Tool('incremental_link')
 if incremental_link.exists(env):
     incremental_link(env)
@@ -3732,12 +3734,6 @@ env.SConscript(
 )
 
 all = env.Alias('all', ['core', 'tools', 'dbtest', 'unittests', 'integration_tests', 'benchmarks'])
-
-# run the Dagger tool if it's installed
-if should_dagger:
-    dependencyDb = env.Alias("dagger", env.Dagger('library_dependency_graph.json'))
-    # Require everything to be built before trying to extract build dependency information
-    env.Requires(dependencyDb, all)
 
 # We don't want installing files to cause them to flow into the cache,
 # since presumably we can re-install them from the origin if needed.

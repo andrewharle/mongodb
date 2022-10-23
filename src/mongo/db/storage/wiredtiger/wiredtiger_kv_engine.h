@@ -81,6 +81,8 @@ public:
 
     virtual ~WiredTigerKVEngine();
 
+    void notifyStartupComplete() override;
+
     void setRecordStoreExtraOptions(const std::string& options);
     void setSortedDataInterfaceExtraOptions(const std::string& options);
 
@@ -188,6 +190,8 @@ public:
     virtual void setStableTimestamp(Timestamp stableTimestamp) override;
 
     virtual void setInitialDataTimestamp(Timestamp initialDataTimestamp) override;
+
+    Timestamp getInitialDataTimestamp() const override;
 
     /**
      * This method will set the oldest timestamp and commit timestamp to the input value. Callers

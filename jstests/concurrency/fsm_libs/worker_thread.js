@@ -52,6 +52,10 @@ var workerThread = (function() {
                 mongo = new Mongo(connectionString);
             }
 
+            // Retry operations that fail due to in-progress background operations. Load this early
+            // so that later overrides can be retried.
+            load('jstests/libs/override_methods/implicitly_retry_on_background_op_in_progress.js');
+
             if (typeof args.sessionOptions !== 'undefined') {
                 let initialClusterTime;
                 let initialOperationTime;
@@ -141,6 +145,10 @@ var workerThread = (function() {
                     Object.assign(TestData, newOptions);
 
                     load('jstests/libs/override_methods/auto_retry_on_network_error.js');
+
+                    // After a step-up to primary, background index builds started on a secondary
+                    // may not be complete. Use this override to ensure causality.
+                    load('jstests/libs/override_methods/causally_consistent_index_builds.js');
                 }
 
                 // Operations that run after a "dropDatabase" command has been issued may fail with

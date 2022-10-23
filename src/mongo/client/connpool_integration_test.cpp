@@ -82,6 +82,9 @@ TEST(ConnectionPoolTest, ConnectionPoolMaxInUseConnectionsTest) {
     {
         stdx::unique_lock<stdx::mutex> lk(mutex);
         cv.wait(lk, [&] { return counter == 1; });
+        // We expect this wait to time out as the condition is never true.
+        auto ret = cv.wait_for(lk, stdx::chrono::seconds{1}, [&] { return counter == 2; });
+        ASSERT_FALSE(ret) << "Thread is expected to be blocked";
     }
 
     // Return one to the pool, thread should be un-blocked.
@@ -113,7 +116,10 @@ TEST(ConnectionPoolTest, ConnectionPoolMaxInUseTimeoutTest) {
 
     // Try creating a new connection with a 1-second timeout, should block,
     // then should time out.
+    Timer t;
     ASSERT_THROWS(pool.get(host, 1), AssertionException);
+    // The timeout should be respected, throws after 1 second.
+    ASSERT_GT(t.millis(), 800);
 
     pool.release(host, conn1);
     pool.release(host, conn2);
@@ -177,6 +183,53 @@ TEST(ConnectionPoolTest, ConnectionPoolShutdownLogicTest) {
     pool.release(host, conn1);
     pool.release(host, conn2);
 }
+
+#ifndef _WIN32
+
+// Tests that internal condition variable is properly notified.
+TEST(ConnectionPoolTest, ConnectionPoolConditionNotifyTest) {
+    DBConnectionPool pool;
+
+    auto fixture = unittest::getFixtureConnectionString();
+    auto host = fixture.getServers()[0].toString();
+
+    pool.setMaxInUse(1);
+
+    // Check out maxInUse connections.
+    auto conn1 = pool.get(host, 100);
+    ASSERT(conn1);
+
+    stdx::condition_variable cv;
+    stdx::mutex mutex;
+    bool aboutToGetConnection = false;
+
+    // Release the conn1 asynchronously, expect the internal condition to be notified.
+    stdx::thread t([&] {
+        stdx::unique_lock<stdx::mutex> lk(mutex);
+        cv.wait(lk, [&] { return aboutToGetConnection; });
+        lk.release();
+        // Small chance of race is intentional, if the conn1 is released before
+        // conn2 is requested, the test is still valid.
+        stdx::this_thread::sleep_for(stdx::chrono::milliseconds(10));
+        std::cerr << "Releasing first connection..." << std::endl;
+        pool.decrementEgress(host, conn1);
+        delete conn1;
+    });
+
+    {
+        stdx::unique_lock<stdx::mutex> lk(mutex);
+        aboutToGetConnection = true;
+        cv.notify_all();
+    }
+
+    auto conn2 = pool.get(host, 100);
+    ASSERT(conn2);
+    t.join();
+
+    pool.release(host, conn2);
+}
+
+#endif
 
 }  // namespace
 

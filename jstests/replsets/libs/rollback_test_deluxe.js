@@ -205,7 +205,13 @@ function RollbackTestDeluxe(name = "FiveNodeDoubleRollbackTest", replSet) {
 
         // Wait for collection drops to complete so that we don't get spurious failures during
         // consistency checks.
-        rst.nodes.forEach(TwoPhaseDropCollectionTest.waitForAllCollectionDropsToComplete);
+        rst.nodes.forEach(node => {
+            if (node.getDB('admin').isMaster('admin').arbiterOnly === true) {
+                log(`Skipping waiting for collection drops on arbiter ${node.host}`);
+                return;
+            }
+            TwoPhaseDropCollectionTest.waitForAllCollectionDropsToComplete(node);
+        });
 
         const name = rst.name;
         // Check collection counts except when unclean shutdowns are allowed, as such a shutdown is
@@ -453,6 +459,36 @@ function RollbackTestDeluxe(name = "FiveNodeDoubleRollbackTest", replSet) {
     };
 
     /**
+     * Insert on primary until its lastApplied >= the rollback node's. Useful for testing rollback
+     * via refetch, which completes rollback recovery when new lastApplied >= old top of oplog.
+     */
+    this.awaitPrimaryAppliedSurpassesRollbackApplied = function() {
+        log(`Waiting for lastApplied on sync source ${curPrimary.host} to surpass lastApplied` +
+            ` on rollback node ${rollbackSecondary.host}`);
+
+        function lastApplied(node) {
+            const reply = assert.commandWorked(node.adminCommand({replSetGetStatus: 1}));
+            return reply.optimes.appliedOpTime.ts;
+        }
+
+        const rollbackApplied = lastApplied(rollbackSecondary);
+        assert.soon(() => {
+            const primaryApplied = lastApplied(curPrimary);
+            jsTestLog(`lastApplied on sync source ${curPrimary.host}:` +
+                      ` ${tojson(primaryApplied)}, lastApplied on rollback node ${
+                          rollbackSecondary.host}:` +
+                      ` ${tojson(rollbackApplied)}`);
+
+            if (timestampCmp(primaryApplied, rollbackApplied) >= 0) {
+                return true;
+            }
+
+            let crudColl = curPrimary.getDB("test")["awaitPrimaryAppliedSurpassesRollbackApplied"];
+            assert.commandWorked(crudColl.insertOne({}));
+        }, "primary's lastApplied never surpassed rollback node's");
+    };
+
+    /**
      * Transition to the second stage of rollback testing, where we isolate the old primary and the
      * rollback secondary from the rest of the replica set. The arbiters are reconnected to the
      * secondary on standby to elect it as the new primary.
@@ -507,6 +543,14 @@ function RollbackTestDeluxe(name = "FiveNodeDoubleRollbackTest", replSet) {
             assert.commandWorked(rollbackSecondary.adminCommand("replSetGetRBID")).rbid;
         lastStandbySecondaryRBID =
             assert.commandWorked(standbySecondary.adminCommand("replSetGetRBID")).rbid;
+
+        const isMajorityReadConcernEnabledOnRollbackNode =
+            assert.commandWorked(rollbackSecondary.adminCommand({serverStatus: 1}))
+                .storageEngine.supportsCommittedReads;
+        const isInMemory = jsTest.options().storageEngine === "inMemory";
+        if (!isMajorityReadConcernEnabledOnRollbackNode || isInMemory) {
+            this.awaitPrimaryAppliedSurpassesRollbackApplied();
+        }
 
         return curPrimary;
     };

@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -537,8 +537,9 @@ __wt_txn_checkpoint_log(WT_SESSION_IMPL *session, bool full, uint32_t flags, WT_
          * connection close, only during a full checkpoint. A clean close may not update any
          * metadata LSN and we do not want to archive in that case.
          */
-        if (!conn->hot_backup && (!FLD_ISSET(conn->log_flags, WT_CONN_LOG_RECOVER_DIRTY) ||
-                                   FLD_ISSET(conn->log_flags, WT_CONN_LOG_FORCE_DOWNGRADE)) &&
+        if (conn->hot_backup_start == 0 &&
+          (!FLD_ISSET(conn->log_flags, WT_CONN_LOG_RECOVER_DIRTY) ||
+              FLD_ISSET(conn->log_flags, WT_CONN_LOG_FORCE_DOWNGRADE)) &&
           txn->full_ckpt)
             __wt_log_ckpt(session, ckpt_lsn);
 
@@ -703,8 +704,8 @@ __txn_printlog(WT_SESSION_IMPL *session, WT_ITEM *rawrec, WT_LSN *lsnp, WT_LSN *
  *     Print the log in a human-readable format.
  */
 int
-__wt_txn_printlog(WT_SESSION *wt_session, const char *ofile, uint32_t flags)
-  WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
+__wt_txn_printlog(WT_SESSION *wt_session, const char *ofile, uint32_t flags, WT_LSN *start_lsn,
+  WT_LSN *end_lsn) WT_GCC_FUNC_ATTRIBUTE((visibility("default")))
 {
     WT_DECL_RET;
     WT_FSTREAM *fs;
@@ -721,8 +722,9 @@ __wt_txn_printlog(WT_SESSION *wt_session, const char *ofile, uint32_t flags)
     WT_ERR(__wt_fprintf(session, fs, "[\n"));
     args.fs = fs;
     args.flags = flags;
-    WT_ERR(__wt_log_scan(session, NULL, WT_LOGSCAN_FIRST, __txn_printlog, &args));
-    ret = __wt_fprintf(session, fs, "\n]\n");
+    WT_ERR(__wt_log_scan(session, start_lsn, end_lsn, 0x0, __txn_printlog, &args));
+    if (!LF_ISSET(WT_TXN_PRINTLOG_MSG))
+        ret = __wt_fprintf(session, fs, "\n]\n");
 
 err:
     if (ofile != NULL)

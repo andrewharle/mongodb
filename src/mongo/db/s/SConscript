@@ -33,8 +33,8 @@ env.Library(
         'active_migrations_registry.cpp',
         'active_move_primaries_registry.cpp',
         'active_shard_collection_registry.cpp',
+        'auto_split_vector.cpp',
         'chunk_move_write_concern_options.cpp',
-        'chunk_splitter.cpp',
         'collection_range_deleter.cpp',
         'collection_sharding_runtime.cpp',
         'collection_sharding_state_factory_shard.cpp',
@@ -134,7 +134,7 @@ env.Library(
 env.Library(
     target='type_shard_identity',
     source=[
-        env.Idlc('add_shard_cmd.idl')[0], 
+        env.Idlc('add_shard_cmd.idl')[0],
         'type_shard_identity.cpp',
     ],
     LIBDEPS=[
@@ -220,6 +220,7 @@ env.Library(
 env.Library(
     target='sharding_commands_d',
     source=[
+        'auto_split_vector_command.cpp',
         'check_sharding_index_command.cpp',
         'cleanup_orphaned_cmd.cpp',
         'clone_catalog_data_command.cpp',
@@ -236,6 +237,7 @@ env.Library(
         'config/configsvr_drop_database_command.cpp',
         'config/configsvr_enable_sharding_command.cpp',
         'config/configsvr_merge_chunk_command.cpp',
+        'config/configsvr_merge_chunks_command.cpp',
         'config/configsvr_move_chunk_command.cpp',
         'config/configsvr_move_primary_command.cpp',
         'config/configsvr_remove_shard_command.cpp',
@@ -303,6 +305,7 @@ env.CppUnitTest(
         'active_migrations_registry_test.cpp',
         'active_move_primaries_registry_test.cpp',
         'active_shard_collection_registry_test.cpp',
+        'auto_split_vector_test.cpp',
         'catalog_cache_loader_mock.cpp',
         'implicit_create_collection_test.cpp',
         'migration_chunk_cloner_source_legacy_test.cpp',

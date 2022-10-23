@@ -6,7 +6,7 @@ env = env.Clone()
 
 generateActionTypes = env.Command(
     target=[
-        'action_type.h', 'action_type.cpp'
+        'action_type_gen.h', 'action_type_gen.cpp'
     ],
     source=[
         'generate_action_types.py',
@@ -131,6 +131,17 @@ env.Library(
 )
 
 env.Library(
+    target='auth_options',
+    source=[
+        'auth_options.cpp',
+    ],
+    LIBDEPS_PRIVATE=[
+        '$BUILD_DIR/mongo/base',
+        '$BUILD_DIR/mongo/db/server_parameters',
+    ],
+)
+
+env.Library(
     target='role_graph_update',
     source=[
         'role_graph_update.cpp',
@@ -154,6 +165,7 @@ env.Library(
     LIBDEPS=[
         'address_restriction',
         'auth',
+        'auth_options',
         'auth_rolename',
         'authentication_restriction',
         'authorization_manager_global',
@@ -183,7 +195,7 @@ env.Library(
     target='authprivilege',
     source=[
         'action_set.cpp',
-        'action_type.cpp',
+        'action_type_gen.cpp',
         'impersonation_session.cpp',
         'privilege.cpp',
         'privilege_parser.cpp',

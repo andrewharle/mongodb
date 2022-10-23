@@ -97,6 +97,9 @@ MONGO_FAIL_POINT_DEFINE(initialSyncHangBeforeCreatingOplog);
 // Failpoint which stops the applier.
 MONGO_FAIL_POINT_DEFINE(rsSyncApplyStop);
 
+// Failpoint which causes the initial sync function to hang after cloning all databases.
+MONGO_FAIL_POINT_DEFINE(initialSyncHangAfterDataCloning);
+
 namespace {
 using namespace executor;
 using CallbackArgs = executor::TaskExecutor::CallbackArgs;
@@ -444,12 +447,17 @@ void InitialSyncer::_tearDown_inlock(OperationContext* opCtx,
 void InitialSyncer::_startInitialSyncAttemptCallback(
     const executor::TaskExecutor::CallbackArgs& callbackArgs,
     std::uint32_t initialSyncAttempt,
-    std::uint32_t initialSyncMaxAttempts) {
-    auto status = _checkForShutdownAndConvertStatus_inlock(
-        callbackArgs,
-        str::stream() << "error while starting initial sync attempt " << (initialSyncAttempt + 1)
-                      << " of "
-                      << initialSyncMaxAttempts);
+    std::uint32_t initialSyncMaxAttempts) noexcept {
+    auto status = [&] {
+        stdx::lock_guard<stdx::mutex> lock(_mutex);
+        return _checkForShutdownAndConvertStatus_inlock(
+            callbackArgs,
+            str::stream() << "error while starting initial sync attempt "
+                          << (initialSyncAttempt + 1)
+                          << " of "
+                          << initialSyncMaxAttempts);
+    }();
+
     if (!status.isOK()) {
         _finishInitialSyncAttempt(status);
         return;
@@ -509,7 +517,7 @@ void InitialSyncer::_chooseSyncSourceCallback(
     const executor::TaskExecutor::CallbackArgs& callbackArgs,
     std::uint32_t chooseSyncSourceAttempt,
     std::uint32_t chooseSyncSourceMaxAttempts,
-    std::shared_ptr<OnCompletionGuard> onCompletionGuard) {
+    std::shared_ptr<OnCompletionGuard> onCompletionGuard) noexcept try {
     stdx::unique_lock<stdx::mutex> lock(_mutex);
     // Cancellation should be treated the same as other errors. In this case, the most likely cause
     // of a failed _chooseSyncSourceCallback() task is a cancellation triggered by
@@ -591,6 +599,10 @@ void InitialSyncer::_chooseSyncSourceCallback(
         return;
     }
     _getBaseRollbackIdHandle = scheduleResult.getValue();
+} catch (const DBException&) {
+    // Report exception as an initial syncer failure.
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
+    onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, exceptionToStatus());
 }
 
 Status InitialSyncer::_truncateOplogAndDropReplicatedDatabases() {
@@ -690,10 +702,8 @@ void InitialSyncer::_lastOplogEntryFetcherCallbackForBeginTimestamp(
         ReadPreferenceSetting::secondaryPreferredMetadata(),
         RemoteCommandRequest::kNoTimeout /* find network timeout */,
         RemoteCommandRequest::kNoTimeout /* getMore network timeout */,
-        RemoteCommandRetryScheduler::makeRetryPolicy(
-            numInitialSyncOplogFindAttempts.load(),
-            executor::RemoteCommandRequest::kNoTimeout,
-            RemoteCommandRetryScheduler::kAllRetriableErrors));
+        RemoteCommandRetryScheduler::makeRetryPolicy<ErrorCategory::RetriableError>(
+            numInitialSyncOplogFindAttempts.load(), executor::RemoteCommandRequest::kNoTimeout));
     Status scheduleStatus = _fCVFetcher->schedule();
     if (!scheduleStatus.isOK()) {
         _fCVFetcher.reset();
@@ -776,7 +786,6 @@ void InitialSyncer::_fcvFetcherCallback(const StatusWith<Fetcher::QueryResponse>
 
     invariant(!result.getValue().documents.empty());
     LOG(2) << "Setting begin timestamp to " << _initialSyncState->beginTimestamp
-           << " using last oplog entry: " << redact(result.getValue().documents.front())
            << ", ns: " << _opts.localOplogNS;
 
 
@@ -894,7 +903,14 @@ void InitialSyncer::_databasesClonerCallback(const Status& databaseClonerFinishS
         onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, status);
         return;
     }
-
+    if (MONGO_FAIL_POINT(initialSyncHangAfterDataCloning)) {
+        // This log output is used in js tests so please leave it.
+        log() << "initial sync - initialSyncHangAfterDataCloning fail point "
+                 "enabled. Blocking until fail point is disabled.";
+        while (MONGO_FAIL_POINT(initialSyncHangAfterDataCloning)) {
+            mongo::sleepsecs(1);
+        }
+    }
     status = _scheduleLastOplogEntryFetcher_inlock(
         [=](const StatusWith<mongo::Fetcher::QueryResponse>& status,
             mongo::Fetcher::NextAction*,
@@ -975,7 +991,7 @@ void InitialSyncer::_lastOplogEntryFetcherCallbackForStopTimestamp(
 
 void InitialSyncer::_getNextApplierBatchCallback(
     const executor::TaskExecutor::CallbackArgs& callbackArgs,
-    std::shared_ptr<OnCompletionGuard> onCompletionGuard) {
+    std::shared_ptr<OnCompletionGuard> onCompletionGuard) noexcept try {
     stdx::lock_guard<stdx::mutex> lock(_mutex);
     auto status =
         _checkForShutdownAndConvertStatus_inlock(callbackArgs, "error getting next applier batch");
@@ -1060,6 +1076,10 @@ void InitialSyncer::_getNextApplierBatchCallback(
         onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, status);
         return;
     }
+} catch (const DBException&) {
+    // Report exception as an initial syncer failure.
+    stdx::unique_lock<stdx::mutex> lock(_mutex);
+    onCompletionGuard->setResultAndCancelRemainingWork_inlock(lock, exceptionToStatus());
 }
 
 void InitialSyncer::_multiApplierCallback(const Status& multiApplierStatus,
@@ -1307,19 +1327,17 @@ Status InitialSyncer::_scheduleLastOplogEntryFetcher_inlock(Fetcher::CallbackFn 
     BSONObj query = BSON(
         "find" << _opts.remoteOplogNS.coll() << "sort" << BSON("$natural" << -1) << "limit" << 1);
 
-    _lastOplogEntryFetcher =
-        stdx::make_unique<Fetcher>(_exec,
-                                   _syncSource,
-                                   _opts.remoteOplogNS.db().toString(),
-                                   query,
-                                   callback,
-                                   ReadPreferenceSetting::secondaryPreferredMetadata(),
-                                   RemoteCommandRequest::kNoTimeout /* find network timeout */,
-                                   RemoteCommandRequest::kNoTimeout /* getMore network timeout */,
-                                   RemoteCommandRetryScheduler::makeRetryPolicy(
-                                       numInitialSyncOplogFindAttempts.load(),
-                                       executor::RemoteCommandRequest::kNoTimeout,
-                                       RemoteCommandRetryScheduler::kAllRetriableErrors));
+    _lastOplogEntryFetcher = std::make_unique<Fetcher>(
+        _exec,
+        _syncSource,
+        _opts.remoteOplogNS.db().toString(),
+        query,
+        callback,
+        ReadPreferenceSetting::secondaryPreferredMetadata(),
+        RemoteCommandRequest::kNoTimeout /* find network timeout */,
+        RemoteCommandRequest::kNoTimeout /* getMore network timeout */,
+        RemoteCommandRetryScheduler::makeRetryPolicy<ErrorCategory::RetriableError>(
+            numInitialSyncOplogFindAttempts.load(), executor::RemoteCommandRequest::kNoTimeout));
     Status scheduleStatus = _lastOplogEntryFetcher->schedule();
     if (!scheduleStatus.isOK()) {
         _lastOplogEntryFetcher.reset();

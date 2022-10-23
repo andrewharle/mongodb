@@ -4,7 +4,6 @@
 //
 
 var Explainable = (function() {
-
     var parseVerbosity = function(verbosity) {
         // Truthy non-strings are interpreted as "allPlansExecution" verbosity.
         if (verbosity && (typeof verbosity !== "string")) {
@@ -16,12 +15,7 @@ var Explainable = (function() {
             return "queryPlanner";
         }
 
-        // If we're here, then the verbosity is a string. We reject invalid strings.
-        if (verbosity !== "queryPlanner" && verbosity !== "executionStats" &&
-            verbosity !== "allPlansExecution") {
-            throw Error("explain verbosity must be one of {" + "'queryPlanner'," +
-                        "'executionStats'," + "'allPlansExecution'}");
-        }
+        // All verbosity strings are passed through. Server validates if it is a known option.
 
         return verbosity;
     };
@@ -32,6 +26,16 @@ var Explainable = (function() {
         }
 
         return explainResult;
+    };
+
+    var buildExplainCmd = function(innerCmd, verbosity) {
+        var explainCmd = {"explain": innerCmd, "verbosity": verbosity};
+        // If "maxTimeMS" is set on innerCmd, it needs to be propagated to the top-level
+        // of explainCmd so that it has the intended effect.
+        if (innerCmd.hasOwnProperty("maxTimeMS")) {
+            explainCmd.maxTimeMS = innerCmd.maxTimeMS;
+        }
+        return explainCmd;
     };
 
     function constructor(collection, verbosity) {
@@ -116,7 +120,7 @@ var Explainable = (function() {
 
                 let aggCmd = Object.extend(
                     {"aggregate": this._collection.getName(), "pipeline": pipeline}, extraOptsCopy);
-                let explainCmd = {"explain": aggCmd, "verbosity": this._verbosity};
+                let explainCmd = buildExplainCmd(aggCmd, this._verbosity);
                 let explainResult = this._collection.runReadCommand(explainCmd);
                 return throwOrReturn(explainResult);
             }
@@ -139,7 +143,7 @@ var Explainable = (function() {
 
         this.findAndModify = function(params) {
             var famCmd = Object.extend({"findAndModify": this._collection.getName()}, params);
-            var explainCmd = {"explain": famCmd, "verbosity": this._verbosity};
+            var explainCmd = buildExplainCmd(famCmd, this._verbosity);
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };
@@ -162,8 +166,11 @@ var Explainable = (function() {
             if (options && options.hasOwnProperty("collation")) {
                 distinctCmd.collation = options.collation;
             }
+            if (options && options.hasOwnProperty("maxTimeMS")) {
+                distinctCmd.maxTimeMS = options.maxTimeMS;
+            }
 
-            var explainCmd = {explain: distinctCmd, verbosity: this._verbosity};
+            var explainCmd = buildExplainCmd(distinctCmd, this._verbosity);
             var explainResult = this._collection.runReadCommand(explainCmd);
             return throwOrReturn(explainResult);
         };

@@ -90,6 +90,7 @@ void checkOplogFormatVersion(OperationContext* opCtx, const std::string& uri) {
 }
 }  // namespace
 
+MONGO_FAIL_POINT_DEFINE(WTCompactRecordStoreEBUSY);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictException);
 MONGO_FAIL_POINT_DEFINE(WTWriteConflictExceptionForReads);
 
@@ -855,6 +856,9 @@ bool WiredTigerRecordStore::findRecord(OperationContext* opCtx,
 
 void WiredTigerRecordStore::deleteRecord(OperationContext* opCtx, const RecordId& id) {
     dassert(opCtx->lockState()->isWriteLocked());
+    // SERVER-48453: Initialize the next record id counter before deleting. This ensures we won't
+    // reuse record ids, which can be problematic for the _mdb_catalog.
+    _initNextIdIfNeeded(opCtx);
 
     // Deletes should never occur on a capped collection because truncation uses
     // WT_SESSION::truncate().
@@ -1513,6 +1517,15 @@ Status WiredTigerRecordStore::compact(OperationContext* opCtx,
         WT_SESSION* s = WiredTigerRecoveryUnit::get(opCtx)->getSession()->getSession();
         opCtx->recoveryUnit()->abandonSnapshot();
         int ret = s->compact(s, getURI().c_str(), "timeout=0");
+        if (MONGO_unlikely(WTCompactRecordStoreEBUSY.shouldFail())) {
+            ret = EBUSY;
+        }
+
+        if (ret == EBUSY) {
+            return Status(ErrorCodes::Interrupted,
+                          str::stream() << "Compaction interrupted on " << getURI().c_str()
+                                        << " due to cache eviction pressure");
+        }
         invariantWTOK(ret);
     }
     return Status::OK();
@@ -1703,6 +1716,15 @@ void WiredTigerRecordStore::_initNextIdIfNeeded(OperationContext* opCtx) {
     stdx::lock_guard<stdx::mutex> lk(_initNextIdMutex);
     if (_nextIdNum.load() > 0) {
         return;
+    }
+
+    // During startup recovery, the collectionAlwaysNeedsSizeAdjustment flag is not set by default
+    // for the sake of efficiency. However, if we reach this point, we may need to set it in order
+    // to ensure that capped deletes can occur on documents inserted earlier in startup recovery.
+    if (inReplicationRecovery(getGlobalServiceContext()) &&
+        !sizeRecoveryState(getGlobalServiceContext())
+             .collectionAlwaysNeedsSizeAdjustment(getIdent())) {
+        checkSize(opCtx);
     }
 
     // Need to start at 1 so we are always higher than RecordId::min()

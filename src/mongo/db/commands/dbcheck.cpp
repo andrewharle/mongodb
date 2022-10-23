@@ -481,7 +481,8 @@ private:
                                                   {},
                                                   kUninitializedStmtId,
                                                   {},
-                                                  OplogSlot());
+                                                  OplogSlot(),
+                                                  {});
                 uow.commit();
                 return result;
             });
@@ -497,6 +498,10 @@ public:
 
     AllowedOnSecondary secondaryAllowed(ServiceContext*) const override {
         return AllowedOnSecondary::kNever;
+    }
+
+    bool maintenanceOk() const override {
+        return false;
     }
 
     virtual bool adminOnly() const {

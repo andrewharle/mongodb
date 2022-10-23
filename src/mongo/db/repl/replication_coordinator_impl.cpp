@@ -49,6 +49,7 @@
 #include "mongo/db/logical_time.h"
 #include "mongo/db/logical_time_validator.h"
 #include "mongo/db/operation_context_noop.h"
+#include "mongo/db/repl/always_allow_non_local_writes.h"
 #include "mongo/db/repl/check_quorum_for_config_change.h"
 #include "mongo/db/repl/data_replicator_external_state_initial_sync.h"
 #include "mongo/db/repl/elect_cmd_runner.h"
@@ -108,9 +109,6 @@ using NextAction = Fetcher::NextAction;
 namespace {
 
 const char kLocalDB[] = "local";
-// Overrides _canAcceptLocalWrites for the decorated OperationContext.
-const OperationContext::Decoration<bool> alwaysAllowNonLocalWrites =
-    OperationContext::declareDecoration<bool>();
 
 MONGO_EXPORT_SERVER_PARAMETER(numInitialSyncAttempts, int, 10);
 
@@ -132,30 +130,6 @@ MONGO_INITIALIZER(periodicNoopIntervalSecs)(InitializerContext*) {
     }
     return Status::OK();
 }
-
-/**
- * Allows non-local writes despite _canAcceptNonlocalWrites being false on a single OperationContext
- * while in scope.
- *
- * Resets to original value when leaving scope so it is safe to nest.
- */
-class AllowNonLocalWritesBlock {
-    MONGO_DISALLOW_COPYING(AllowNonLocalWritesBlock);
-
-public:
-    AllowNonLocalWritesBlock(OperationContext* opCtx)
-        : _opCtx(opCtx), _initialState(alwaysAllowNonLocalWrites(_opCtx)) {
-        alwaysAllowNonLocalWrites(_opCtx) = true;
-    }
-
-    ~AllowNonLocalWritesBlock() {
-        alwaysAllowNonLocalWrites(_opCtx) = _initialState;
-    }
-
-private:
-    OperationContext* const _opCtx;
-    const bool _initialState;
-};
 
 void lockAndCall(stdx::unique_lock<stdx::mutex>* lk, const stdx::function<void()>& fn) {
     if (!lk->owns_lock()) {
@@ -667,7 +641,7 @@ void ReplicationCoordinatorImpl::_finishLoadLocalConfig(
         _performPostMemberStateUpdateAction(action);
     }
 
-    if (!isArbiter) {
+    if (!isArbiter && myIndex.getValue() != -1) {
         _externalState->startThreads(_settings);
         _startDataReplication(opCtx.get());
     }
@@ -677,6 +651,11 @@ void ReplicationCoordinatorImpl::_stopDataReplication(OperationContext* opCtx) {
     std::shared_ptr<InitialSyncer> initialSyncerCopy;
     {
         stdx::lock_guard<stdx::mutex> lk(_mutex);
+        if (!_startedSteadyStateReplication) {
+            return;
+        }
+
+        _startedSteadyStateReplication = false;
         _initialSyncer.swap(initialSyncerCopy);
     }
     if (initialSyncerCopy) {
@@ -696,15 +675,24 @@ void ReplicationCoordinatorImpl::_stopDataReplication(OperationContext* opCtx) {
 
 void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
                                                        stdx::function<void()> startCompleted) {
+    stdx::unique_lock<stdx::mutex> lk(_mutex);
+    if (_startedSteadyStateReplication) {
+        return;
+    }
+
+    _startedSteadyStateReplication = true;
+
     // Check to see if we need to do an initial sync.
-    const auto lastOpTime = getMyLastAppliedOpTime();
+    const auto lastOpTime = _getMyLastAppliedOpTime_inlock();
     const auto needsInitialSync =
         lastOpTime.isNull() || _externalState->isInitialSyncFlagSet(opCtx);
     if (!needsInitialSync) {
         // Start steady replication, since we already have data.
         // ReplSetConfig has been installed, so it's either in STARTUP2 or REMOVED.
-        auto memberState = getMemberState();
+        auto memberState = _getMemberState_inlock();
         invariant(memberState.startup2() || memberState.removed());
+
+        lk.unlock();
         invariant(setFollowerMode(MemberState::RS_RECOVERING));
         _externalState->startSteadyStateReplication(opCtx, this);
         return;
@@ -758,8 +746,6 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
     std::shared_ptr<InitialSyncer> initialSyncerCopy;
     try {
         {
-            // Must take the lock to set _initialSyncer, but not call it.
-            stdx::lock_guard<stdx::mutex> lock(_mutex);
             if (_inShutdown) {
                 log() << "Initial Sync not starting because replication is shutting down.";
                 return;
@@ -776,6 +762,7 @@ void ReplicationCoordinatorImpl::_startDataReplication(OperationContext* opCtx,
         }
         // InitialSyncer::startup() must be called outside lock because it uses features (eg.
         // setting the initial sync flag) which depend on the ReplicationCoordinatorImpl.
+        lk.unlock();
         uassertStatusOK(initialSyncerCopy->startup(opCtx, numInitialSyncAttempts.load()));
     } catch (...) {
         auto status = exceptionToStatus();
@@ -1061,12 +1048,7 @@ void ReplicationCoordinatorImpl::signalDrainComplete(OperationContext* opCtx,
         OpTime firstOpTime = _externalState->onTransitionToPrimary(opCtx, isV1ElectionProtocol());
         lk.lock();
 
-        auto status = _topCoord->completeTransitionToPrimary(firstOpTime);
-        if (status.code() == ErrorCodes::PrimarySteppedDown) {
-            log() << "Transition to primary failed" << causedBy(status);
-            return;
-        }
-        invariant(status);
+        _topCoord->completeTransitionToPrimary(firstOpTime);
     }
 
     // Must calculate the commit level again because firstOpTimeOfMyTerm wasn't set when we logged
@@ -1982,7 +1964,7 @@ bool ReplicationCoordinatorImpl::canAcceptWritesForDatabase_UNSAFE(OperationCont
     //
     // Stand-alone nodes and drained replica set primaries can always accept writes.  Writes are
     // always permitted to the "local" database.
-    if (_canAcceptNonLocalWrites.loadRelaxed() || alwaysAllowNonLocalWrites(*opCtx)) {
+    if (_canAcceptNonLocalWrites.loadRelaxed() || alwaysAllowNonLocalWrites(opCtx)) {
         return true;
     }
     if (dbName == kLocalDB) {
@@ -2011,7 +1993,7 @@ bool ReplicationCoordinatorImpl::canAcceptWritesFor_UNSAFE(OperationContext* opC
     // If we can accept non local writes (ie we're PRIMARY) then we must not be in ROLLBACK.
     // This check is redundant of the check of _memberState below, but since this can be checked
     // without locking, we do it as an optimization.
-    if (_canAcceptNonLocalWrites.loadRelaxed() || alwaysAllowNonLocalWrites(*opCtx)) {
+    if (_canAcceptNonLocalWrites.loadRelaxed() || alwaysAllowNonLocalWrites(opCtx)) {
         return true;
     }
 
@@ -2084,6 +2066,9 @@ bool ReplicationCoordinatorImpl::isInPrimaryOrSecondaryState() const {
 
 bool ReplicationCoordinatorImpl::shouldRelaxIndexConstraints(OperationContext* opCtx,
                                                              const NamespaceString& ns) {
+    if (ReplSettings::shouldRecoverFromOplogAsStandalone()) {
+        return true;
+    }
     return !canAcceptWritesFor(opCtx, ns);
 }
 
@@ -2775,6 +2760,17 @@ ReplicationCoordinatorImpl::_updateMemberStateFromTopologyCoordinator_inlock(
         _cancelPriorityTakeover_inlock();
     }
 
+    // Ensure replication is running if we are no longer REMOVED.
+    if (_memberState.removed() && !newState.arbiter()) {
+        log() << "Scheduling a task to begin or continue replication";
+        _scheduleWorkAt(_replExecutor->now(),
+                        [=](const mongo::executor::TaskExecutor::CallbackArgs& cbData) {
+                            _externalState->startThreads(_settings);
+                            auto opCtx = cc().makeOperationContext();
+                            _startDataReplication(opCtx.get());
+                        });
+    }
+
     log() << "transition to " << newState << " from " << _memberState << rsLog;
     // Initializes the featureCompatibilityVersion to the latest value, because arbiters do not
     // receive the replicated version. This is to avoid bugs like SERVER-32639.
@@ -3054,47 +3050,50 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig_inlock(OperationContext* opCtx,
         log() << "**          in a future version." << startupWarningsLog;
     }
 
-    // Warn if running --nojournal and writeConcernMajorityJournalDefault = true
+    // Warn if using the in-memory (ephemeral) storage engine or running running --nojournal with
+    // writeConcernMajorityJournalDefault=true.
     StorageEngine* storageEngine = opCtx->getServiceContext()->getStorageEngine();
-    if (storageEngine && !storageEngine->isDurable() &&
-        (newConfig.getWriteConcernMajorityShouldJournal() &&
-         (!oldConfig.isInitialized() || !oldConfig.getWriteConcernMajorityShouldJournal()))) {
-        log() << startupWarningsLog;
-        log() << "** WARNING: This replica set node is running without journaling enabled but the "
-              << startupWarningsLog;
-        log() << "**          writeConcernMajorityJournalDefault option to the replica set config "
-              << startupWarningsLog;
-        log() << "**          is set to true. The writeConcernMajorityJournalDefault "
-              << startupWarningsLog;
-        log() << "**          option to the replica set config must be set to false "
-              << startupWarningsLog;
-        log() << "**          or w:majority write concerns will never complete."
-              << startupWarningsLog;
-        log() << "**          In addition, this node's memory consumption may increase until all"
-              << startupWarningsLog;
-        log() << "**          available free RAM is exhausted." << startupWarningsLog;
-        log() << startupWarningsLog;
-    }
-
-    // Warn if using the in-memory (ephemeral) storage engine with
-    // writeConcernMajorityJournalDefault = true
-    if (storageEngine && storageEngine->isEphemeral() &&
-        (newConfig.getWriteConcernMajorityShouldJournal() &&
-         (!oldConfig.isInitialized() || !oldConfig.getWriteConcernMajorityShouldJournal()))) {
-        log() << startupWarningsLog;
-        log() << "** WARNING: This replica set node is using in-memory (ephemeral) storage with the"
-              << startupWarningsLog;
-        log() << "**          writeConcernMajorityJournalDefault option to the replica set config "
-              << startupWarningsLog;
-        log() << "**          set to true. The writeConcernMajorityJournalDefault option to the "
-              << startupWarningsLog;
-        log() << "**          replica set config must be set to false " << startupWarningsLog;
-        log() << "**          or w:majority write concerns will never complete."
-              << startupWarningsLog;
-        log() << "**          In addition, this node's memory consumption may increase until all"
-              << startupWarningsLog;
-        log() << "**          available free RAM is exhausted." << startupWarningsLog;
-        log() << startupWarningsLog;
+    if (storageEngine && newConfig.getWriteConcernMajorityShouldJournal() &&
+        (!oldConfig.isInitialized() || !oldConfig.getWriteConcernMajorityShouldJournal())) {
+        if (storageEngine->isEphemeral()) {
+            log() << startupWarningsLog;
+            log() << "** WARNING: This replica set node is using in-memory (ephemeral) storage "
+                     "with the"
+                  << startupWarningsLog;
+            log() << "**          writeConcernMajorityJournalDefault option to the replica set "
+                     "config "
+                  << startupWarningsLog;
+            log()
+                << "**          set to true. The writeConcernMajorityJournalDefault option to the "
+                << startupWarningsLog;
+            log() << "**          replica set config must be set to false " << startupWarningsLog;
+            log() << "**          or w:majority write concerns will never complete."
+                  << startupWarningsLog;
+            log()
+                << "**          In addition, this node's memory consumption may increase until all"
+                << startupWarningsLog;
+            log() << "**          available free RAM is exhausted." << startupWarningsLog;
+            log() << startupWarningsLog;
+        } else if (!storageEngine->isDurable()) {
+            log() << startupWarningsLog;
+            log() << "** WARNING: This replica set node is running without journaling enabled but "
+                     "the "
+                  << startupWarningsLog;
+            log() << "**          writeConcernMajorityJournalDefault option to the replica set "
+                     "config "
+                  << startupWarningsLog;
+            log() << "**          is set to true. The writeConcernMajorityJournalDefault "
+                  << startupWarningsLog;
+            log() << "**          option to the replica set config must be set to false "
+                  << startupWarningsLog;
+            log() << "**          or w:majority write concerns will never complete."
+                  << startupWarningsLog;
+            log()
+                << "**          In addition, this node's memory consumption may increase until all"
+                << startupWarningsLog;
+            log() << "**          available free RAM is exhausted." << startupWarningsLog;
+            log() << startupWarningsLog;
+        }
     }
 
     log() << "New replica set config in use: " << _rsConfig.toBSON() << rsLog;
@@ -3116,6 +3115,9 @@ ReplicationCoordinatorImpl::_setCurrentRSConfig_inlock(OperationContext* opCtx,
         // Don't send heartbeats if we're not in the config, if we get re-added one of the
         // nodes in the set will contact us.
         _startHeartbeats_inlock();
+    } else {
+        // If we're still REMOVED, clear the seedList.
+        _seedList.clear();
     }
     _updateLastCommittedOpTime_inlock();
 
@@ -3504,6 +3506,11 @@ Status ReplicationCoordinatorImpl::processReplSetRequestVotes(
         // than voting in a term we don't plan to stay alive in, refuse to vote.
         if (_inTerminalShutdown) {
             return Status(ErrorCodes::ShutdownInProgress, "In the process of shutting down");
+        }
+
+        if (_selfIndex == -1) {
+            return Status(ErrorCodes::InvalidReplicaSetConfig,
+                          "Invalid replica set config, or this node is not a member");
         }
 
         _topCoord->processReplSetRequestVotes(args, response);
