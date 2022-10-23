@@ -129,7 +129,7 @@ error_code("UnrecoverableRollbackError", 127)
 error_code("LockNotFound", 128)
 error_code("LockStateChangeFailed", 129)
 error_code("SymbolNotFound", 130)
-error_code("RLPInitializationFailed", 131)
+#error_code("RLPInitializationFailed", 131) # Removed in 4.2
 error_code("OBSOLETE_ConfigServersInconsistent", 132)
 error_code("FailedToSatisfyReadPreference", 133)
 error_code("ReadConcernMajorityNotAvailableYet", 134)
@@ -267,6 +267,9 @@ error_code("DataModifiedByRepair", 269);
 error_code("RepairedReplicaSetNode", 270);
 error_code("AlarmAlreadyFulfilled", 277)
 error_code("ChangeStreamFatalError", 280)
+
+error_code("OplogQueryMinTsMissing", 326)
+
 # Error codes 4000-8999 are reserved.
 
 # Non-sequential error codes (for compatibility only)
@@ -329,3 +332,18 @@ error_class("ExceededTimeLimitError", ["ExceededTimeLimit", "MaxTimeMSExpired", 
 error_class("SnapshotError", ["SnapshotTooOld", "SnapshotUnavailable", "StaleChunkHistory"])
 
 error_class("NonResumableChangeStreamError", ["ChangeStreamFatalError"])
+error_class("RetriableError", [
+    "NotMaster",
+    "NotMasterNoSlaveOk",
+    "NotMasterOrSecondary",
+    "InterruptedDueToReplStateChange",
+    "PrimarySteppedDown",
+    "WriteConcernFailed",
+    "HostUnreachable",
+    "HostNotFound",
+    "NetworkTimeout",
+    "SocketException",
+    "ShutdownInProgress",
+    "InterruptedAtShutdown",
+    "BalancerInterrupted",
+])

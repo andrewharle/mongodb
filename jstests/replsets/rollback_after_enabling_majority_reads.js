@@ -11,6 +11,7 @@
     "use strict";
 
     load("jstests/replsets/libs/rollback_test.js");
+    load("jstests/replsets/rslib.js");
 
     TestData.rollbackShutdowns = true;
     const name = "rollback_after_enabling_majority_reads";
@@ -23,7 +24,7 @@
     replTest.startSet();
     let config = replTest.getReplSetConfig();
     config.members[2].arbiterOnly = true;
-    replTest.initiate(config);
+    replTest.initiateWithHighElectionTimeout(config);
     let rollbackTest = new RollbackTest(name, replTest);
 
     let rollbackNode = rollbackTest.transitionToRollbackOperations();
@@ -38,6 +39,17 @@
     rollbackTest.restartNode(0, 15, {enableMajorityReadConcern: "true"});
     // Make sure the primary has not changed.
     assert.neq(rollbackTest.getPrimary(), rollbackNode);
+
+    // Wait for rollback node to transition to SECONDARY after restarting it so that we don't
+    // fail calls to replSetGetStatus in awaitPrimaryAppliedSurpassesRollbackApplied.
+    waitForState(rollbackNode, ReplSetTest.State.SECONDARY);
+
+    // The first rollback attempt with EMRC=true will fassert, so we expect the actual rollback to
+    // occur with EMRC=false. Before the second rollback (via refetch) occurs, we must ensure that
+    // the sync source's lastApplied is greater than the rollback node's. Otherwise, the rollback
+    // node will never transition to SECONDARY since the rollback node's lastApplied will be less
+    // than the initialDataTS. See SERVER-48518 for a more detailed explanation of this behavior.
+    rollbackTest.awaitPrimaryAppliedSurpassesRollbackApplied();
 
     // The rollback crashes because we have not yet set a stable timestamp.
     jsTest.log("Attempt to roll back. This will fassert.");
@@ -64,9 +76,12 @@
         }
     }
 
+    // Ensure that the secondary has completed rollback by waiting for its last optime to equal the
+    // primary's.
+    replTest.awaitReplication(null /* timeout */, null /* secondaryOpTimeType */, [rollbackNode]);
+
     // Fix counts for "local.startup_log", since they are corrupted by this rollback.
     // transitionToSteadyStateOperations() checks collection counts.
-    replTest.waitForState(rollbackNode, ReplSetTest.State.SECONDARY);
     assert.commandWorked(rollbackNode.getDB("local").runCommand({validate: "startup_log"}));
     rollbackTest.transitionToSteadyStateOperations();
 

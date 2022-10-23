@@ -68,21 +68,21 @@ class ShardCollectionTestBase : public ConfigServerTestFixture {
 protected:
     void expectSplitVector(const HostAndPort& shardHost,
                            const ShardKeyPattern& keyPattern,
-                           const BSONObj& splitPoints) {
+                           const BSONArray& splitPoints) {
         onCommand([&](const RemoteCommandRequest& request) {
             ASSERT_EQUALS(shardHost, request.target);
             string cmdName = request.cmdObj.firstElement().fieldName();
-            ASSERT_EQUALS("splitVector", cmdName);
-            ASSERT_EQUALS(kNamespace.ns(),
-                          request.cmdObj["splitVector"].String());  // splitVector uses full ns
+            ASSERT_EQUALS("autoSplitVector", cmdName);
+            // autoSplitVector concatenates the collection name to the command's db
+            const auto receivedNs =
+                request.dbname + '.' + request.cmdObj["autoSplitVector"].String();
+            ASSERT_EQUALS(kNamespace.ns(), receivedNs);
 
             ASSERT_BSONOBJ_EQ(keyPattern.toBSON(), request.cmdObj["keyPattern"].Obj());
             ASSERT_BSONOBJ_EQ(keyPattern.getKeyPattern().globalMin(), request.cmdObj["min"].Obj());
             ASSERT_BSONOBJ_EQ(keyPattern.getKeyPattern().globalMax(), request.cmdObj["max"].Obj());
             ASSERT_EQUALS(64 * 1024 * 1024ULL,
                           static_cast<uint64_t>(request.cmdObj["maxChunkSizeBytes"].numberLong()));
-            ASSERT_EQUALS(0, request.cmdObj["maxSplitPoints"].numberLong());
-            ASSERT_EQUALS(0, request.cmdObj["maxChunkObjects"].numberLong());
 
             ASSERT_BSONOBJ_EQ(
                 ReadPreferenceSetting(ReadPreference::PrimaryPreferred).toContainingBSON(),
@@ -206,7 +206,7 @@ TEST_F(ConfigServerShardCollectionTest, RangeSharding_ForMapReduce_NoInitialSpli
     // TODO SERVER-29451: add hooks to the mock storage engine to expect reads and writes.
     expectSetShardVersion(shardHost, shard, kNamespace, boost::none /* expected ChunkVersion */);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 
     checkWrittenChunks(
         {ChunkType(kNamespace,
@@ -280,7 +280,7 @@ TEST_F(ConfigServerShardCollectionTest, RangeSharding_ForMapReduce_WithInitialSp
     // TODO SERVER-29451: add hooks to the mock storage engine to expect reads and writes.
     expectSetShardVersion(shard0Host, shard0, kNamespace, boost::none /* expected ChunkVersion */);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 
     checkWrittenChunks({ChunkType(kNamespace,
                                   ChunkRange{keyPattern.getKeyPattern().globalMin(), splitPoint0},
@@ -338,7 +338,7 @@ TEST_F(ConfigServerShardCollectionTest, RangeSharding_NoInitialSplitPoints_NoSpl
     });
 
     // Respond to the splitVector command sent to the shard to figure out initial split points.
-    expectSplitVector(shardHost, keyPattern, BSONObj());
+    expectSplitVector(shardHost, keyPattern, BSONArray());
 
     // Expect the set shard version for that namespace.
     // We do not check for a specific ChunkVersion, because we cannot easily know the OID that was
@@ -346,7 +346,7 @@ TEST_F(ConfigServerShardCollectionTest, RangeSharding_NoInitialSplitPoints_NoSpl
     // TODO SERVER-29451: add hooks to the mock storage engine to expect reads and writes.
     expectSetShardVersion(shardHost, shard, kNamespace, boost::none /* expected ChunkVersion */);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 
     checkWrittenChunks(
         {ChunkType(kNamespace,
@@ -404,7 +404,7 @@ TEST_F(ConfigServerShardCollectionTest, RangeSharding_NoInitialSplitPoints_WithS
     // TODO SERVER-29451: add hooks to the mock storage engine to expect reads and writes.
     expectSetShardVersion(shardHost, shard, kNamespace, boost::none);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 
     checkWrittenChunks({ChunkType(kNamespace,
                                   ChunkRange{keyPattern.getKeyPattern().globalMin(), splitPoint0},
@@ -472,7 +472,7 @@ TEST_F(ConfigServerShardCollectionTest, RangeSharding_WithInitialSplitPoints_NoS
     // TODO SERVER-29451: add hooks to the mock storage engine to expect reads and writes.
     expectSetShardVersion(shardHost, shard, kNamespace, boost::none);
 
-    future.timed_get(kFutureTimeout);
+    future.default_timed_get();
 
     checkWrittenChunks({ChunkType(kNamespace,
                                   ChunkRange{keyPattern.getKeyPattern().globalMin(), splitPoint0},
@@ -569,7 +569,7 @@ TEST_F(CreateFirstChunksTest, NonEmptyCollection_SplitPoints_FromSplitVector_Man
 
     expectSplitVector(connStr.getServers()[0], kShardKeyPattern, BSON_ARRAY(BSON("x" << 0)));
 
-    const auto& firstChunks = future.timed_get(kFutureTimeout);
+    const auto& firstChunks = future.default_timed_get();
     ASSERT_EQ(2U, firstChunks.chunks.size());
     ASSERT_EQ(kShards[1].getName(), firstChunks.chunks[0].getShard());
     ASSERT_EQ(kShards[1].getName(), firstChunks.chunks[1].getShard());
@@ -614,7 +614,7 @@ TEST_F(CreateFirstChunksTest, NonEmptyCollection_SplitPoints_FromClient_ManyChun
                                                               collectionIsEmpty);
     });
 
-    const auto& firstChunks = future.timed_get(kFutureTimeout);
+    const auto& firstChunks = future.default_timed_get();
     ASSERT_EQ(2U, firstChunks.chunks.size());
     ASSERT_EQ(kShards[1].getName(), firstChunks.chunks[0].getShard());
     ASSERT_EQ(kShards[1].getName(), firstChunks.chunks[1].getShard());
@@ -691,7 +691,7 @@ TEST_F(CreateFirstChunksTest, EmptyCollection_SplitPoints_FromClient_ManyChunksD
                                                               collectionIsEmpty);
     });
 
-    const auto& firstChunks = future.timed_get(kFutureTimeout);
+    const auto& firstChunks = future.default_timed_get();
     ASSERT_EQ(3U, firstChunks.chunks.size());
     ASSERT_EQ(kShards[0].getName(), firstChunks.chunks[0].getShard());
     ASSERT_EQ(kShards[1].getName(), firstChunks.chunks[1].getShard());
@@ -737,7 +737,7 @@ TEST_F(CreateFirstChunksTest, EmptyCollection_NoSplitPoints_OneChunkToPrimary) {
                                                               collectionIsEmpty);
     });
 
-    const auto& firstChunks = future.timed_get(kFutureTimeout);
+    const auto& firstChunks = future.default_timed_get();
     ASSERT_EQ(1U, firstChunks.chunks.size());
     ASSERT_EQ(kShards[1].getName(), firstChunks.chunks[0].getShard());
 }

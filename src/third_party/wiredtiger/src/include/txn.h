@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -297,6 +297,9 @@ struct __wt_txn {
     uint32_t ckpt_nsnapshot;
     WT_ITEM *ckpt_snapshot;
     bool full_ckpt;
+
+    /* Timeout */
+    uint64_t operation_timeout_us;
 
     const char *rollback_reason; /* If rollback, the reason */
 

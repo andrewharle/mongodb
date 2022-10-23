@@ -32,18 +32,20 @@
 
 #include <atomic>
 #include <memory>
-#include <memory>
 #include <set>
 #include <string>
 
 #include "mongo/base/disallow_copying.h"
 #include "mongo/base/string_data.h"
 #include "mongo/client/mongo_uri.h"
+#include "mongo/client/replica_set_monitor_stats.h"
+#include "mongo/client/replica_set_monitor_transport.h"
 #include "mongo/executor/task_executor.h"
 #include "mongo/platform/atomic_word.h"
 #include "mongo/stdx/functional.h"
 #include "mongo/util/net/hostandport.h"
 #include "mongo/util/time_support.h"
+#include "mongo/util/timer.h"
 
 namespace mongo {
 
@@ -70,9 +72,14 @@ public:
      *
      * seeds must not be empty.
      */
-    ReplicaSetMonitor(StringData name, const std::set<HostAndPort>& seeds);
+    ReplicaSetMonitor(StringData name,
+                      const std::set<HostAndPort>& seeds,
+                      ReplicaSetMonitorTransportPtr transport,
+                      std::shared_ptr<ReplicaSetMonitorManagerStats> managerStats);
 
-    ReplicaSetMonitor(const MongoURI& uri);
+    ReplicaSetMonitor(const MongoURI& uri,
+                      ReplicaSetMonitorTransportPtr transport,
+                      std::shared_ptr<ReplicaSetMonitorManagerStats> managerStats);
 
     /**
      * Schedules the initial refresh task into task executor.
@@ -186,10 +193,13 @@ public:
     /**
      * Creates a new ReplicaSetMonitor, if it doesn't already exist.
      */
-    static std::shared_ptr<ReplicaSetMonitor> createIfNeeded(const std::string& name,
-                                                             const std::set<HostAndPort>& servers);
+    static std::shared_ptr<ReplicaSetMonitor> createIfNeeded(
+        const std::string& name,
+        const std::set<HostAndPort>& servers,
+        ReplicaSetMonitorTransportPtr transport);
 
-    static std::shared_ptr<ReplicaSetMonitor> createIfNeeded(const MongoURI& uri);
+    static std::shared_ptr<ReplicaSetMonitor> createIfNeeded(
+        const MongoURI& uri, ReplicaSetMonitorTransportPtr transport);
 
     /**
      * gets a cached Monitor per name. If the monitor is not found and createFromSeed is false,
@@ -249,7 +259,12 @@ public:
     /**
      * Returns the refresh period that is given to all new SetStates.
      */
-    static Seconds getDefaultRefreshPeriod();
+    static Seconds getRefreshPeriod();
+
+    /**
+     * Returns the timeout for a single hello request.
+     */
+    static Milliseconds getHelloTimeout();
 
     //
     // internal types (defined in replica_set_monitor_internal.h)
@@ -263,8 +278,11 @@ public:
 
     /**
      * Allows tests to set initial conditions and introspect the current state.
+     * This constructor is used only in tests.
      */
-    explicit ReplicaSetMonitor(const SetStatePtr& initialState) : _state(initialState) {}
+    explicit ReplicaSetMonitor(const SetStatePtr& initialState,
+                               std::shared_ptr<ReplicaSetMonitorManagerStats> managerStats =
+                                   std::make_shared<ReplicaSetMonitorManagerStats>());
     ~ReplicaSetMonitor();
 
     /**
@@ -300,6 +318,9 @@ private:
     const SetStatePtr _state;
     executor::TaskExecutor* _executor;
     AtomicBool _isRemovedFromManager{false};
+    ReplicaSetMonitorTransportPtr _rsmTransport;
+
+    std::shared_ptr<ReplicaSetMonitorStats> _stats;
 };
 
 
@@ -342,7 +363,10 @@ public:
      *
      * If no scan is in-progress, this function is responsible for setting up a new scan.
      */
-    explicit Refresher(const SetStatePtr& setState);
+    explicit Refresher(const SetStatePtr& setState,
+                       executor::TaskExecutor* executor,
+                       ReplicaSetMonitorTransport* transport,
+                       ReplicaSetMonitorStats* stats);
 
     struct NextStep {
         enum StepKind {
@@ -370,7 +394,10 @@ public:
      * Call this if a host returned from getNextStep successfully replied to an isMaster call.
      * Negative latencyMicros are ignored.
      */
-    void receivedIsMaster(const HostAndPort& from, int64_t latencyMicros, const BSONObj& reply);
+    void receivedIsMaster(const HostAndPort& from,
+                          int64_t latencyMicros,
+                          const BSONObj& reply,
+                          bool verbose);
 
     /**
      * Call this if a host returned from getNextStep failed to reply to an isMaster call.
@@ -394,14 +421,16 @@ private:
      * Applies _scan->unconfirmedReplies to confirmed nodes.
      * Does not update this host's node in _set->nodes.
      */
-    Status receivedIsMasterFromMaster(const HostAndPort& from, const IsMasterReply& reply);
+    Status receivedIsMasterFromMaster(const HostAndPort& from,
+                                      const IsMasterReply& reply,
+                                      bool verbose);
 
     /**
      * Adjusts the _scan work queue based on information from this host.
      * This should only be called with replies from non-masters.
      * Does not update _set at all.
      */
-    void receivedIsMasterBeforeFoundMaster(const IsMasterReply& reply);
+    void receivedIsMasterBeforeFoundMaster(const IsMasterReply& reply, bool verbose);
 
     /**
      * Shared implementation of refreshUntilMatches and refreshAll.
@@ -413,6 +442,10 @@ private:
     // Both pointers are never NULL
     SetStatePtr _set;
     ScanStatePtr _scan;  // May differ from _set->currentScan if a new scan has started.
+
+    executor::TaskExecutor* _executor;
+    ReplicaSetMonitorTransport* _rsmTransport;
+    ReplicaSetMonitorStats* const _stats;
 };
 
 }  // namespace mongo

@@ -61,20 +61,25 @@ namespace {
 
 Milliseconds kDefaultRefreshWaitTime(30 * 1000);
 Milliseconds kRefreshIntervalIfErrored(200);
-Milliseconds kMaxRefreshWaitTime(10 * 60 * 1000);
+Milliseconds kMaxRefreshWaitTimeIfErrored(10 * 60 * 1000);
+// Never wait more than the number of milliseconds in 20 days to avoid sleeping for a number greater
+// than can fit in a signed 32 bit integer.
+// 20 days = 1000 * 60 * 60 * 24 * 20 = 1,728,000,000 vs signed integer max of 2,147,483,648.
+Milliseconds kMaxRefreshWaitTimeOnSuccess(Hours(24) * 20);
 
 // Prevents the refresher thread from waiting longer than the given number of milliseconds, even on
 // a successful refresh.
 MONGO_FAIL_POINT_DEFINE(maxKeyRefreshWaitTimeOverrideMS);
 
-/**
- * Returns the amount of time to wait until the monitoring thread should attempt to refresh again.
- */
+}  // unnamed namespace
+
+namespace keys_collection_manager_util {
+
 Milliseconds howMuchSleepNeedFor(const LogicalTime& currentTime,
                                  const LogicalTime& latestExpiredAt,
                                  const Milliseconds& interval) {
-    auto currentSecs = currentTime.asTimestamp().getSecs();
-    auto expiredSecs = latestExpiredAt.asTimestamp().getSecs();
+    auto currentSecs = Seconds(currentTime.asTimestamp().getSecs());
+    auto expiredSecs = Seconds(latestExpiredAt.asTimestamp().getSecs());
 
     if (currentSecs >= expiredSecs) {
         // This means that the last round didn't generate a usable key for the current time.
@@ -82,16 +87,12 @@ Milliseconds howMuchSleepNeedFor(const LogicalTime& currentTime,
         return kRefreshIntervalIfErrored;
     }
 
-    auto millisBeforeExpire = 1000 * (expiredSecs - currentSecs);
+    Milliseconds millisBeforeExpire = Milliseconds(expiredSecs) - Milliseconds(currentSecs);
 
-    if (interval.count() <= millisBeforeExpire) {
-        return interval;
-    }
-
-    return Milliseconds(millisBeforeExpire);
+    return std::min({millisBeforeExpire, interval, kMaxRefreshWaitTimeOnSuccess});
 }
 
-}  // unnamed namespace
+}  // namespace keys_collection_manager_util
 
 KeysCollectionManager::KeysCollectionManager(std::string purpose,
                                              std::unique_ptr<KeysCollectionClient> client,
@@ -260,13 +261,13 @@ void KeysCollectionManager::PeriodicRunner::_doPeriodicRefresh(ServiceContext* s
                     _hasSeenKeys = true;
                 }
 
-                nextWakeup =
-                    howMuchSleepNeedFor(currentTime, latestKey.getExpiresAt(), refreshInterval);
+                nextWakeup = keys_collection_manager_util::howMuchSleepNeedFor(
+                    currentTime, latestKey.getExpiresAt(), refreshInterval);
             } else {
                 errorCount += 1;
                 nextWakeup = Milliseconds(kRefreshIntervalIfErrored.count() * errorCount);
-                if (nextWakeup > kMaxRefreshWaitTime) {
-                    nextWakeup = kMaxRefreshWaitTime;
+                if (nextWakeup > kMaxRefreshWaitTimeIfErrored) {
+                    nextWakeup = kMaxRefreshWaitTimeIfErrored;
                 }
             }
         }

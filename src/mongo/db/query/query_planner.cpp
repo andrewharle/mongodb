@@ -58,8 +58,8 @@
 
 namespace mongo {
 
-using std::unique_ptr;
 using std::numeric_limits;
+using std::unique_ptr;
 
 namespace dps = ::mongo::dotted_path_support;
 
@@ -137,6 +137,12 @@ string optionString(size_t options) {
                 break;
             case QueryPlannerParams::OPLOG_SCAN_WAIT_FOR_VISIBLE:
                 ss << "OPLOG_SCAN_WAIT_FOR_VISIBLE ";
+                break;
+            case QueryPlannerParams::ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG:
+                ss << "ASSERT_MIN_TS_HAS_NOT_FALLEN_OFF_OPLOG ";
+                break;
+            case QueryPlannerParams::ENUMERATE_OR_CHILDREN_LOCKSTEP:
+                ss << "ENUMERATE_OR_CHILDREN_LOCKSTEP ";
                 break;
             case QueryPlannerParams::DEFAULT:
                 MONGO_UNREACHABLE;
@@ -441,13 +447,13 @@ StatusWith<std::unique_ptr<QuerySolution>> QueryPlanner::planFromCache(
     const CanonicalQuery& query,
     const QueryPlannerParams& params,
     const CachedSolution& cachedSoln) {
-    invariant(!cachedSoln.plannerData.empty());
+    invariant(cachedSoln.plannerData);
 
     // A query not suitable for caching should not have made its way into the cache.
     invariant(PlanCache::shouldCacheQuery(query));
 
     // Look up winning solution in cached solution's array.
-    const SolutionCacheData& winnerCacheData = *cachedSoln.plannerData[0];
+    const auto& winnerCacheData = *cachedSoln.plannerData;
 
     if (SolutionCacheData::WHOLE_IXSCAN_SOLN == winnerCacheData.solnType) {
         // The solution can be constructed by a scan over the entire index.
@@ -544,7 +550,7 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
     // If the query requests a tailable cursor, the only solution is a collscan + filter with
     // tailable set on the collscan.
     if (isTailable) {
-        if (!QueryPlannerCommon::hasNode(query.root(), MatchExpression::GEO_NEAR) && canTableScan) {
+        if (canTableScan) {
             auto soln = buildCollscanSoln(query, isTailable, params);
             if (soln) {
                 out.push_back(std::move(soln));
@@ -822,12 +828,15 @@ StatusWith<std::vector<std::unique_ptr<QuerySolution>>> QueryPlanner::plan(
         enumParams.intersect = params.options & QueryPlannerParams::INDEX_INTERSECTION;
         enumParams.root = query.root();
         enumParams.indices = &relevantIndices;
+        enumParams.enumerateOrChildrenLockstep =
+            params.options & QueryPlannerParams::ENUMERATE_OR_CHILDREN_LOCKSTEP;
 
-        PlanEnumerator isp(enumParams);
-        isp.init().transitional_ignore();
+        PlanEnumerator planEnumerator(enumParams);
+        uassertStatusOKWithContext(planEnumerator.init(), "failed to initialize plan enumerator");
 
         unique_ptr<MatchExpression> nextTaggedTree;
-        while ((nextTaggedTree = isp.getNext()) && (out.size() < params.maxIndexedSolutions)) {
+        while ((nextTaggedTree = planEnumerator.getNext()) &&
+               (out.size() < params.maxIndexedSolutions)) {
             LOG(5) << "About to build solntree from tagged tree:" << endl
                    << redact(nextTaggedTree->toString());
 

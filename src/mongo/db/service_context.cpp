@@ -43,6 +43,7 @@
 #include "mongo/db/storage/recovery_unit_noop.h"
 #include "mongo/stdx/list.h"
 #include "mongo/stdx/memory.h"
+#include "mongo/transport/baton.h"
 #include "mongo/transport/service_entry_point.h"
 #include "mongo/transport/session.h"
 #include "mongo/transport/transport_layer.h"
@@ -97,9 +98,10 @@ bool isMMAPV1() {
 }
 
 ServiceContext::ServiceContext()
-    : _tickSource(stdx::make_unique<SystemTickSource>()),
-      _fastClockSource(stdx::make_unique<SystemClockSource>()),
-      _preciseClockSource(stdx::make_unique<SystemClockSource>()) {}
+    : _opIdRegistry(UniqueOperationIdRegistry::create()),
+      _tickSource(std::make_unique<SystemTickSource>()),
+      _fastClockSource(std::make_unique<SystemClockSource>()),
+      _preciseClockSource(std::make_unique<SystemClockSource>()) {}
 
 ServiceContext::~ServiceContext() {
     stdx::lock_guard<stdx::mutex> lk(_mutex);
@@ -240,12 +242,21 @@ void ServiceContext::ClientDeleter::operator()(Client* client) const {
 }
 
 ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Client* client) {
-    auto opCtx = std::make_unique<OperationContext>(client, _nextOpId.fetchAndAdd(1));
+    auto opCtx = std::make_unique<OperationContext>(client, _opIdRegistry->acquireSlot());
+
     if (client->session()) {
         _numCurrentOps.addAndFetch(1);
     }
 
+    auto numOpsGuard = MakeGuard([&] {
+        if (client->session()) {
+            _numCurrentOps.subtractAndFetch(1);
+        }
+    });
+
     onCreate(opCtx.get(), _clientObservers);
+    auto onCreateGuard = MakeGuard([&] { onDestroy(opCtx.get(), _clientObservers); });
+
     if (!opCtx->lockState()) {
         opCtx->setLockState(std::make_unique<LockerNoop>());
     }
@@ -253,10 +264,15 @@ ServiceContext::UniqueOperationContext ServiceContext::makeOperationContext(Clie
         opCtx->setRecoveryUnit(new RecoveryUnitNoop(),
                                WriteUnitOfWork::RecoveryUnitState::kNotInUnitOfWork);
     }
+
     {
         stdx::lock_guard<Client> lk(*client);
         client->setOperationContext(opCtx.get());
     }
+
+    numOpsGuard.Dismiss();
+    onCreateGuard.Dismiss();
+
     return UniqueOperationContext(opCtx.release());
 };
 
@@ -270,6 +286,11 @@ void ServiceContext::OperationContextDeleter::operator()(OperationContext* opCtx
         stdx::lock_guard<Client> lk(*client);
         client->resetOperationContext();
     }
+
+    if (auto baton = opCtx->getBaton()) {
+        baton->detach();
+    }
+
     onDestroy(opCtx, service->_clientObservers);
     delete opCtx;
 }

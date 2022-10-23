@@ -131,7 +131,8 @@ protected:
                            osi,
                            stmtId,
                            link,
-                           OplogSlot());
+                           OplogSlot(),
+                           {});
     }
 
     void bumpTxnNumberFromDifferentOpCtx(Session* session, TxnNumber newTxnNum) {
@@ -529,7 +530,8 @@ TEST_F(SessionTest, ErrorOnlyWhenStmtIdBeingCheckedIsNotInCache) {
                                   osi,
                                   1,
                                   {},
-                                  OplogSlot());
+                                  OplogSlot(),
+                                  {});
         session.onWriteOpCompletedOnPrimary(opCtx(), txnNum, {1}, opTime, wallClockTime);
         wuow.commit();
 
@@ -556,7 +558,8 @@ TEST_F(SessionTest, ErrorOnlyWhenStmtIdBeingCheckedIsNotInCache) {
                                   osi,
                                   kIncompleteHistoryStmtId,
                                   link,
-                                  OplogSlot());
+                                  OplogSlot(),
+                                  {});
 
         session.onWriteOpCompletedOnPrimary(
             opCtx(), txnNum, {kIncompleteHistoryStmtId}, opTime, wallClockTime);
@@ -921,6 +924,84 @@ TEST_F(SessionTest, CannotSpecifyStartTransactionOnInProgressTxn) {
                        ErrorCodes::ConflictingOperationInProgress);
 }
 
+TEST_F(SessionTest, OlderTransactionFailsOnSessionWithNewerTransaction) {
+    // Will start the transaction.
+    const auto sessionId = makeLogicalSessionIdForTest();
+    Session session(sessionId);
+    session.refreshFromStorageIfNeeded(opCtx());
+
+    const bool autocommit = false;
+    const bool startTransaction = true;
+    const TxnNumber txnNum = 20;
+    session.beginOrContinueTxn(opCtx(), txnNum, autocommit, startTransaction, "testDB", "insert");
+
+    StringBuilder sb;
+    sb << "Cannot start transaction 19 on session " << sessionId
+       << " because a newer transaction with txnNumber 20 has already started on this session.";
+    ASSERT_THROWS_WHAT(session.beginOrContinueTxn(
+                           opCtx(), txnNum - 1, autocommit, startTransaction, "testDB", "insert"),
+                       AssertionException,
+                       sb.str());
+    ASSERT(session.getLastWriteOpTime(txnNum).isNull());
+}
+
+TEST_F(SessionTest, OldRetryableWriteFailsOnSessionWithNewerTransaction) {
+    // Will start the transaction.
+    const auto sessionId = makeLogicalSessionIdForTest();
+    Session session(sessionId);
+    session.refreshFromStorageIfNeeded(opCtx());
+
+    const bool autocommit = false;
+    const bool startTransaction = true;
+    const TxnNumber txnNum = 20;
+    session.beginOrContinueTxn(opCtx(), txnNum, autocommit, startTransaction, "testDB", "insert");
+
+    StringBuilder sb;
+    sb << "Retryable write with txnNumber 19 is prohibited on session " << sessionId
+       << " because a newer transaction with txnNumber 20 has already started on this session.";
+    ASSERT_THROWS_WHAT(session.beginOrContinueTxn(
+                           opCtx(), txnNum - 1, boost::none, boost::none, "testDB", "insert"),
+                       AssertionException,
+                       sb.str());
+    ASSERT(session.getLastWriteOpTime(txnNum).isNull());
+}
+
+TEST_F(SessionTest, OlderRetryableWriteFailsOnSessionWithNewerRetryableWrite) {
+    const auto sessionId = makeLogicalSessionIdForTest();
+    Session session(sessionId);
+    session.refreshFromStorageIfNeeded(opCtx());
+    const TxnNumber txnNum = 22;
+
+    StringBuilder sb;
+    sb << "Retryable write with txnNumber 21 is prohibited on session " << sessionId
+       << " because a newer retryable write with txnNumber 22 has already started on this session.";
+    session.beginOrContinueTxn(opCtx(), txnNum, boost::none, boost::none, "testDB", "insert");
+    ASSERT_THROWS_WHAT(session.beginOrContinueTxn(
+                           opCtx(), txnNum - 1, boost::none, boost::none, "testDB", "insert"),
+                       AssertionException,
+                       sb.str());
+    ASSERT(session.getLastWriteOpTime(txnNum).isNull());
+}
+
+TEST_F(SessionTest, OldTransactionFailsOnSessionWithNewerRetryableWrite) {
+    const auto sessionId = makeLogicalSessionIdForTest();
+    Session session(sessionId);
+    session.refreshFromStorageIfNeeded(opCtx());
+
+    const TxnNumber txnNum = 22;
+    const auto autocommit = false;
+
+    StringBuilder sb;
+    sb << "Cannot start transaction 21 on session " << sessionId
+       << " because a newer retryable write with txnNumber 22 has already started on this session.";
+    session.beginOrContinueTxn(opCtx(), txnNum, boost::none, boost::none, "testDB", "insert");
+    ASSERT_THROWS_WHAT(session.beginOrContinueTxn(
+                           opCtx(), txnNum - 1, autocommit, boost::none, "testDB", "insert"),
+                       AssertionException,
+                       sb.str());
+    ASSERT(session.getLastWriteOpTime(txnNum).isNull());
+}
+
 TEST_F(SessionTest, AutocommitRequiredOnEveryTxnOp) {
     const auto sessionId = makeLogicalSessionIdForTest();
     Session session(sessionId);
@@ -1002,7 +1083,7 @@ TEST_F(SessionTest, AbortClearsStoredStatements) {
     // The transaction machinery cannot store an empty locker.
     { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
     session.stashTransactionResources(opCtx());
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     ASSERT_TRUE(session.transactionOperationsForTest().empty());
     ASSERT_TRUE(session.transactionIsAborted());
 }
@@ -1041,7 +1122,7 @@ TEST_F(SessionTest, EmptyTransactionAbort) {
     // The transaction machinery cannot store an empty locker.
     { Lock::GlobalLock lk(opCtx(), MODE_IX, Date_t::now(), Lock::InterruptBehavior::kThrow); }
     session.stashTransactionResources(opCtx());
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     ASSERT_TRUE(session.transactionIsAborted());
 }
 
@@ -1056,7 +1137,7 @@ TEST_F(SessionTest, ConcurrencyOfUnstashAndAbort) {
     session.beginOrContinueTxn(opCtx(), txnNum, false, true, "testDB", "find");
 
     // The transaction may be aborted without checking out the session.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // An unstash after an abort should uassert.
     ASSERT_THROWS_CODE(session.unstashTransactionResources(opCtx(), "find"),
@@ -1104,7 +1185,7 @@ TEST_F(SessionTest, ConcurrencyOfStashAndAbort) {
     session.unstashTransactionResources(opCtx(), "find");
 
     // The transaction may be aborted without checking out the session.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // A stash after an abort should be a noop.
     session.stashTransactionResources(opCtx());
@@ -1147,7 +1228,7 @@ TEST_F(SessionTest, ConcurrencyOfAddTransactionOperationAndAbort) {
     session.unstashTransactionResources(opCtx(), "insert");
 
     // The transaction may be aborted without checking out the session.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // An addTransactionOperation() after an abort should uassert.
     auto operation = repl::OplogEntry::makeInsertOperation(kNss, kUUID, BSON("TestValue" << 0));
@@ -1194,7 +1275,7 @@ TEST_F(SessionTest, ConcurrencyOfEndTransactionAndRetrieveOperationsAndAbort) {
     session.unstashTransactionResources(opCtx(), "insert");
 
     // The transaction may be aborted without checking out the session.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // An endTransactionAndRetrieveOperations() after an abort should uassert.
     ASSERT_THROWS_CODE(session.endTransactionAndRetrieveOperations(opCtx()),
@@ -1240,7 +1321,7 @@ TEST_F(SessionTest, ConcurrencyOfCommitTransactionAndAbort) {
     session.unstashTransactionResources(opCtx(), "commitTransaction");
 
     // The transaction may be aborted without checking out the session.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // An commitTransaction() after an abort should uassert.
     ASSERT_THROWS_CODE(
@@ -1350,7 +1431,7 @@ TEST_F(SessionTest, IncrementTotalAbortedUponAbort) {
     unsigned long long beforeAbortCount =
         ServerTransactionsMetrics::get(opCtx())->getTotalAborted();
 
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // Assert that the aborted counter is incremented by 1.
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getTotalAborted(), beforeAbortCount + 1U);
@@ -1381,7 +1462,7 @@ TEST_F(SessionTest, TrackTotalOpenTransactionsWithAbort) {
               beforeTransactionStart + 1U);
 
     // Tests that aborting a transaction decrements the open transactions counter by 1.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentOpen(), beforeTransactionStart);
 }
 
@@ -1498,7 +1579,7 @@ TEST_F(SessionTest, TrackTotalActiveAndInactiveTransactionsWithStashedAbort) {
               beforeInactiveCounter + 1U);
 
     // Tests that aborting a stashed transaction decrements the inactive counter only.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentActive(), beforeActiveCounter);
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentInactive(), beforeInactiveCounter);
 }
@@ -1530,7 +1611,7 @@ TEST_F(SessionTest, TrackTotalActiveAndInactiveTransactionsWithUnstashedAbort) {
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentInactive(), beforeInactiveCounter);
 
     // Tests that aborting a stashed transaction decrements the active counter only.
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentActive(), beforeActiveCounter);
     ASSERT_EQ(ServerTransactionsMetrics::get(opCtx())->getCurrentInactive(), beforeInactiveCounter);
 }
@@ -1648,7 +1729,7 @@ TEST_F(TransactionsMetricsTest, SingleTransactionStatsDurationShouldBeSetUponAbo
     sleepmillis(10);
 
     unsigned long long timeBeforeTxnAbort = curTimeMicros64();
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     unsigned long long timeAfterTxnAbort = curTimeMicros64();
 
     ASSERT_GTE(session.getSingleTransactionStats()->getDuration(curTimeMicros64()),
@@ -1718,7 +1799,7 @@ TEST_F(TransactionsMetricsTest, SingleTransactionStatsDurationShouldKeepIncreasi
     ASSERT_GT(session.getSingleTransactionStats()->getDuration(curTimeMicros64()),
               txnDurationAfterStart);
     sleepmillis(10);
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     // Sleep here to allow enough time to elapse.
     sleepmillis(10);
 
@@ -1798,7 +1879,7 @@ TEST_F(TransactionsMetricsTest, TimeActiveMicrosShouldBeSetUponUnstashAndAbort) 
     session.unstashTransactionResources(opCtx(), "insert");
     // Sleep here to allow enough time to elapse.
     sleepmillis(10);
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // Time active should have increased.
     ASSERT_GT(session.getSingleTransactionStats()->getTimeActiveMicros(curTimeMicros64()),
@@ -1827,7 +1908,7 @@ TEST_F(TransactionsMetricsTest, TimeActiveMicrosShouldNotBeSetUponAbortOnly) {
     ASSERT_EQ(session.getSingleTransactionStats()->getTimeActiveMicros(curTimeMicros64()),
               Microseconds{0});
 
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     // Time active should not have increased.
     ASSERT_EQ(session.getSingleTransactionStats()->getTimeActiveMicros(curTimeMicros64()),
@@ -2156,7 +2237,7 @@ TEST_F(TransactionsMetricsTest, TimeInactiveMicrosShouldBeSetUponUnstashAndAbort
               timeInactiveSoFar);
 
     session.unstashTransactionResources(opCtx(), "insert");
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
 
     timeInactiveSoFar =
         session.getSingleTransactionStats()->getTimeInactiveMicros(curTimeMicros64());
@@ -2659,7 +2740,7 @@ TEST_F(TransactionsMetricsTest, LogTransactionInfoAfterSlowStashedAbort) {
     sleepmillis(5 * serverGlobalParams.slowMS);
 
     startCapturingLogMessages();
-    session.abortArbitraryTransaction();
+    session.abortArbitraryTransaction(opCtx());
     stopCapturingLogMessages();
 
     std::string expectedTransactionInfo = "transaction " +

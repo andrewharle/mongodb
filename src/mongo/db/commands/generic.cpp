@@ -152,10 +152,10 @@ public:
                      const string& ns,
                      const BSONObj& cmdObj,
                      BSONObjBuilder& result) {
-        // sort the commands before building the result BSON
+        // Sort the command names before building the result BSON.
         std::vector<Command*> commands;
         for (const auto command : globalCommandRegistry()->allCommands()) {
-            // don't show oldnames
+            // Don't show oldnames
             if (command.first == command.second->getName())
                 commands.push_back(command.second);
         }
@@ -164,25 +164,67 @@ public:
         });
 
         BSONObjBuilder b(result.subobjStart("commands"));
-        for (const auto& c : commands) {
-            BSONObjBuilder temp(b.subobjStart(c->getName()));
-            temp.append("help", c->help());
+        for (const auto& command : commands) {
+            BSONObjBuilder temp(b.subobjStart(command->getName()));
+            temp.append("help", command->help());
             temp.append("slaveOk",
-                        c->secondaryAllowed(opCtx->getServiceContext()) ==
+                        command->secondaryAllowed(opCtx->getServiceContext()) ==
                             Command::AllowedOnSecondary::kAlways);
-            temp.append("adminOnly", c->adminOnly());
-            // optionally indicates that the command can be forced to run on a slave/secondary
-            if (c->secondaryAllowed(opCtx->getServiceContext()) ==
+            temp.append("adminOnly", command->adminOnly());
+            // Optionally indicates that the command can be forced to run on a secondary.
+            if (command->secondaryAllowed(opCtx->getServiceContext()) ==
                 Command::AllowedOnSecondary::kOptIn)
                 temp.append("slaveOverrideOk", true);
             temp.done();
         }
+
         b.done();
 
         return 1;
     }
 
 } listCommandsCmd;
+
+class CmdLogMessage : public BasicCommand {
+public:
+    CmdLogMessage() : BasicCommand("logMessage") {}
+
+    std::string help() const final {
+        return "Send a message to the server log";
+    }
+
+    bool supportsWriteConcern(const BSONObj& cmd) const final {
+        return false;
+    }
+
+    AllowedOnSecondary secondaryAllowed(ServiceContext*) const final {
+        return AllowedOnSecondary::kAlways;
+    }
+
+    bool adminOnly() const final {
+        return true;
+    }
+
+    void addRequiredPrivileges(const std::string& dbname,
+                               const BSONObj& cmdObj,
+                               std::vector<Privilege>* out) const final {
+        out->push_back(
+            Privilege(ResourcePattern::forClusterResource(), ActionType::applicationMessage));
+    }
+
+    bool run(OperationContext* opCtx,
+             const std::string& ns,
+             const BSONObj& cmdObj,
+             BSONObjBuilder& result) final {
+        auto msgElem = cmdObj["logMessage"];
+        uassert(ErrorCodes::BadValue, "logMessage must be a string", msgElem.type() == String);
+
+        log() << "logMessage: " << msgElem.valueStringData();
+        return true;
+    }
+};
+
+MONGO_REGISTER_TEST_COMMAND(CmdLogMessage);
 
 }  // namespace
 }  // namespace mongo

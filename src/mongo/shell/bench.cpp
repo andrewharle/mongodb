@@ -35,6 +35,7 @@
 #include "mongo/shell/bench.h"
 
 #include <pcrecpp.h>
+#include <string>
 
 #include "mongo/client/dbclientcursor.h"
 #include "mongo/db/namespace_string.h"
@@ -131,6 +132,16 @@ BSONObj fixQuery(const BSONObj& obj, BsonTemplateEvaluator& btl) {
     return b.obj();
 }
 
+/**
+ * Adds a '$orderby' to the query document. Useful when running on the legacy reads path.
+ */
+BSONObj makeQueryLegacyCompatible(const BSONObj& query, const BSONObj& sortSpec) {
+    BSONObjBuilder bob;
+    bob.append("$query", query);
+    bob.append("$orderby", sortSpec);
+    return bob.obj();
+}
+
 bool runCommandWithSession(DBClientBase* conn,
                            const std::string& dbname,
                            const BSONObj& cmdObj,
@@ -220,16 +231,22 @@ int runQueryWithReadCommands(DBClientBase* conn,
                              const boost::optional<LogicalSessionIdToClient>& lsid,
                              boost::optional<TxnNumber> txnNumber,
                              std::unique_ptr<QueryRequest> qr,
+                             BSONObj readPrefObj,
                              BSONObj* objOut) {
     const auto dbName = qr->nss().db().toString();
 
     BSONObj findCommandResult;
+    BSONObjBuilder findCommandBuilder;
+    qr->asFindCommand(&findCommandBuilder);
+    if (!readPrefObj.isEmpty()) {
+        findCommandBuilder.append("$readPreference", readPrefObj);
+    }
     uassert(ErrorCodes::CommandFailed,
             str::stream() << "find command failed; reply was: " << findCommandResult,
             runCommandWithSession(
                 conn,
                 dbName,
-                qr->asFindCommand(),
+                findCommandBuilder.obj(),
                 // read command with txnNumber implies performing reads in a
                 // multi-statement transaction
                 txnNumber ? kStartTransactionOption | kMultiStatementTransactionOption : kNoOptions,
@@ -335,9 +352,9 @@ void BenchRunConfig::initializeToDefaults() {
 }
 
 BenchRunConfig* BenchRunConfig::createFromBson(const BSONObj& args) {
-    BenchRunConfig* config = new BenchRunConfig();
+    auto config = std::make_unique<BenchRunConfig>();
     config->initializeFromBson(args);
-    return config;
+    return config.release();
 }
 
 BenchRunOp opFromBson(const BSONObj& op) {
@@ -499,6 +516,16 @@ BenchRunOp opFromBson(const BSONObj& op) {
                                   << opType,
                     (opType == "find") || (opType == "query"));
             myOp.skip = arg.numberInt();
+        } else if (name == "sort") {
+            uassert(ErrorCodes::BadValue,  // TODO
+                    str::stream()
+                        << "Field 'sort' is only valid for query, fineOne and find. Op type is "
+                        << opType,
+                    (opType == "findOne") || (opType == "query") || (opType == "find"));
+            uassert(ErrorCodes::BadValue,
+                    "Expected sort to be an object",
+                    arg.type() == BSONType::Object);
+            myOp.sort = arg.Obj();
         } else if (name == "showError") {
             myOp.showError = arg.trueValue();
         } else if (name == "showResult") {
@@ -539,6 +566,27 @@ BenchRunOp opFromBson(const BSONObj& op) {
             BSONObjBuilder valBuilder;
             valBuilder.append(arg);
             myOp.value = valBuilder.obj();
+        } else if (name == "readPrefMode") {
+            uassert(
+                ErrorCodes::InvalidOptions,
+                str::stream() << "Field 'readPrefMode' is only valid for find op types. Type is "
+                              << opType,
+                (opType == "find") || (opType == "query") || (opType == "findOne"));
+            uassert(ErrorCodes::BadValue,
+                    str::stream() << "Field 'readPrefMode' should be a string, instead it's type: "
+                                  << typeName(arg.type()),
+                    arg.type() == BSONType::String);
+
+            extern ReadPreference ReadPreferenceMode_parse(StringData);
+            ReadPreference mode;
+            try {
+                mode = ReadPreferenceMode_parse(arg.str());
+            } catch (DBException& e) {
+                e.addContext("benchRun(): Could not parse readPrefMode argument");
+                throw;
+            }
+
+            myOp.readPrefObj = ReadPreferenceSetting(mode).toInnerBSON();
         } else {
             uassert(34394, str::stream() << "Benchrun op has unsupported field: " << name, false);
         }
@@ -903,6 +951,7 @@ void BenchRunOp::executeOnce(DBClientBase* conn,
                 qr->setProj(this->projection);
                 qr->setLimit(1LL);
                 qr->setWantMore(false);
+                qr->setSort(this->sort);
                 if (config.useSnapshotReads) {
                     qr->setReadConcern(readConcernSnapshot);
                 }
@@ -915,8 +964,12 @@ void BenchRunOp::executeOnce(DBClientBase* conn,
                     txnNumberForOp = state->txnNumber;
                     state->inProgressMultiStatementTxn = true;
                 }
-                runQueryWithReadCommands(conn, lsid, txnNumberForOp, std::move(qr), &result);
+                runQueryWithReadCommands(
+                    conn, lsid, txnNumberForOp, std::move(qr), readPrefObj, &result);
             } else {
+                if (!this->sort.isEmpty()) {
+                    fixedQuery = makeQueryLegacyCompatible(std::move(fixedQuery), this->sort);
+                }
                 BenchRunEventTrace _bret(&state->stats->findOneCounter);
                 result = conn->findOne(
                     this->ns, fixedQuery, nullptr, DBClientCursor::QueryOptionLocal_forceOpQuery);
@@ -992,6 +1045,10 @@ void BenchRunOp::executeOnce(DBClientBase* conn,
                 if (this->batchSize) {
                     qr->setBatchSize(this->batchSize);
                 }
+                if (!this->sort.isEmpty()) {
+                    qr->setSort(this->sort);
+                }
+                BSONObjBuilder readConcernBuilder;
                 if (config.useSnapshotReads) {
                     qr->setReadConcern(readConcernSnapshot);
                 }
@@ -1004,9 +1061,12 @@ void BenchRunOp::executeOnce(DBClientBase* conn,
                     txnNumberForOp = state->txnNumber;
                     state->inProgressMultiStatementTxn = true;
                 }
-                count =
-                    runQueryWithReadCommands(conn, lsid, txnNumberForOp, std::move(qr), nullptr);
+                count = runQueryWithReadCommands(
+                    conn, lsid, txnNumberForOp, std::move(qr), readPrefObj, nullptr);
             } else {
+                if (!this->sort.isEmpty()) {
+                    fixedQuery = makeQueryLegacyCompatible(std::move(fixedQuery), this->sort);
+                }
                 // Use special query function for exhaust query option.
                 if (this->options & QueryOption_Exhaust) {
                     BenchRunEventTrace _bret(&state->stats->queryCounter);

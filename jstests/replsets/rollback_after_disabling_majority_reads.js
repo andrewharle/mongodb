@@ -1,6 +1,6 @@
 /**
  * This test demonstrates that a rollback immediately after disabling majority reads succeeds.
- * @tags: [requires_persistence]
+ * @tags: [requires_persistence, requires_journaling]
  */
 (function() {
     "use strict";
@@ -18,7 +18,7 @@
     replTest.startSet();
     let config = replTest.getReplSetConfig();
     config.members[2].arbiterOnly = true;
-    replTest.initiate(config);
+    replTest.initiateWithHighElectionTimeout(config);
     const rollbackTest = new RollbackTest(name, replTest);
 
     const rollbackNode = rollbackTest.transitionToRollbackOperations();

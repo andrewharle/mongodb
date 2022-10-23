@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -377,7 +377,7 @@ __log_archive_once(WT_SESSION_IMPL *session, uint32_t backup_file)
      */
     __wt_readlock(session, &conn->hot_backup_lock);
     locked = true;
-    if (!conn->hot_backup || backup_file != 0) {
+    if (conn->hot_backup_start == 0 || backup_file != 0) {
         for (i = 0; i < logcount; i++) {
             WT_ERR(__wt_log_extract_lognum(session, logfiles[i], &lognum));
             if (lognum < min_lognum)
@@ -481,7 +481,7 @@ __wt_log_truncate_files(WT_SESSION_IMPL *session, WT_CURSOR *cursor, bool force)
     conn = S2C(session);
     if (!FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED))
         return (0);
-    if (!force && F_ISSET(conn, WT_CONN_SERVER_LOG) &&
+    if (!force && FLD_ISSET(conn->server_flags, WT_CONN_SERVER_LOG) &&
       FLD_ISSET(conn->log_flags, WT_CONN_LOG_ARCHIVE))
         WT_RET_MSG(session, EINVAL, "Attempt to archive manually while a server is running");
 
@@ -525,7 +525,7 @@ __log_file_server(void *arg)
     log = conn->log;
     locked = false;
     yield_count = 0;
-    while (F_ISSET(conn, WT_CONN_SERVER_LOG)) {
+    while (FLD_ISSET(conn->server_flags, WT_CONN_SERVER_LOG)) {
         /*
          * If there is a log file to close, make sure any outstanding write operations have
          * completed, then fsync and close it.
@@ -560,9 +560,9 @@ __log_file_server(void *arg)
                  * file system may not support truncate: both are OK, it's just more work during
                  * cursor traversal.
                  */
-                if (!conn->hot_backup) {
+                if (conn->hot_backup_start == 0) {
                     __wt_readlock(session, &conn->hot_backup_lock);
-                    if (!conn->hot_backup && conn->log_cursors == 0)
+                    if (conn->hot_backup_start == 0 && conn->log_cursors == 0)
                         WT_ERR_ERROR_OK(
                           __wt_ftruncate(session, close_fh, close_end_lsn.l.offset), ENOTSUP);
                     __wt_readunlock(session, &conn->hot_backup_lock);
@@ -800,7 +800,7 @@ __log_wrlsn_server(void *arg)
     log = conn->log;
     yield = 0;
     WT_INIT_LSN(&prev);
-    while (F_ISSET(conn, WT_CONN_SERVER_LOG)) {
+    while (FLD_ISSET(conn->server_flags, WT_CONN_SERVER_LOG)) {
         /*
          * Write out any log record buffers if anything was done since last time. Only call the
          * function to walk the slots if the system is not idle. On an idle system the alloc_lsn
@@ -870,7 +870,7 @@ __log_server(void *arg)
      * records sitting in the buffer over the time it takes to sync out an earlier file.
      */
     did_work = true;
-    while (F_ISSET(conn, WT_CONN_SERVER_LOG)) {
+    while (FLD_ISSET(conn->server_flags, WT_CONN_SERVER_LOG)) {
         /*
          * Slots depend on future activity. Force out buffered writes in case we are idle. This
          * cannot be part of the wrlsn thread because of interaction advancing the write_lsn and a
@@ -894,7 +894,7 @@ __log_server(void *arg)
                  * have agreed not to rename or remove any files in the database directory.
                  */
                 __wt_readlock(session, &conn->hot_backup_lock);
-                if (!conn->hot_backup)
+                if (conn->hot_backup_start == 0)
                     ret = __log_prealloc_once(session);
                 __wt_readunlock(session, &conn->hot_backup_lock);
                 WT_ERR(ret);
@@ -1003,7 +1003,7 @@ __wt_logmgr_open(WT_SESSION_IMPL *session)
     if (!FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED))
         return (0);
 
-    F_SET(conn, WT_CONN_SERVER_LOG);
+    FLD_SET(conn->server_flags, WT_CONN_SERVER_LOG);
 
     /*
      * Start the log close thread. It is not configurable. If logging is enabled, this thread runs.
@@ -1072,7 +1072,7 @@ __wt_logmgr_destroy(WT_SESSION_IMPL *session)
 
     conn = S2C(session);
 
-    F_CLR(conn, WT_CONN_SERVER_LOG);
+    FLD_CLR(conn->server_flags, WT_CONN_SERVER_LOG);
 
     if (!FLD_ISSET(conn->log_flags, WT_CONN_LOG_ENABLED)) {
         /*

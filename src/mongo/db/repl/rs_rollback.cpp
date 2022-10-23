@@ -73,6 +73,8 @@
 #include "mongo/db/repl/rslog.h"
 #include "mongo/db/s/shard_identity_rollback_notifier.h"
 #include "mongo/db/session_catalog.h"
+#include "mongo/s/client/shard_registry.h"
+#include "mongo/s/grid.h"
 #include "mongo/util/exit.h"
 #include "mongo/util/fail_point_service.h"
 #include "mongo/util/log.h"
@@ -890,6 +892,7 @@ Status _syncRollback(OperationContext* opCtx,
 
     FixUpInfo how;
     log() << "Starting rollback. Sync source: " << rollbackSource.getSource() << rsLog;
+    how.localTopOfOplog = replCoord->getMyLastAppliedOpTime();
     how.rbid = rollbackSource.getRollbackId();
     uassert(
         40506, "Upstream node rolled back. Need to retry our rollback.", how.rbid == requiredRBID);
@@ -1430,6 +1433,19 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
     log() << "Rollback deleted " << deletes << " documents and updated " << updates
           << " documents.";
 
+    // Rolling back via refetch, we set initialDataTimestamp to max(local oplog top, source's oplog
+    // top), then roll back. Data is inconsistent until lastApplied >= initialDataTimestamp.
+    auto syncSourceTopOfOplog =
+        OpTime::parseFromOplogEntry(rollbackSource.getLastOperation()).getValue().getTimestamp();
+
+    log() << "Setting initialDataTimestamp to the max of local top of oplog and sync source "
+             "top of oplog. Local top of oplog: "
+          << fixUpInfo.localTopOfOplog.getTimestamp()
+          << ", sync source top of oplog: " << syncSourceTopOfOplog;
+
+    opCtx->getServiceContext()->getStorageEngine()->setInitialDataTimestamp(
+        std::max(fixUpInfo.localTopOfOplog.getTimestamp(), syncSourceTopOfOplog));
+
     log() << "Truncating the oplog at " << fixUpInfo.commonPoint.toString() << " ("
           << fixUpInfo.commonPointOurDiskloc << "), non-inclusive";
 
@@ -1463,6 +1479,14 @@ void rollback_internal::syncFixUp(OperationContext* opCtx,
 
     if (auto validator = LogicalTimeValidator::get(opCtx)) {
         validator->resetKeyManagerCache();
+    }
+
+    // Force the config server to update its shard registry on next access. Otherwise it may have
+    // the stale data that has been just rolled back.
+    if (serverGlobalParams.clusterRole == ClusterRole::ConfigServer) {
+        if (auto shardRegistry = Grid::get(opCtx)->shardRegistry()) {
+            shardRegistry->clearEntries();
+        }
     }
 
     // Reload the lastAppliedOpTime and lastDurableOpTime value in the replcoord and the

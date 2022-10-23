@@ -46,9 +46,23 @@ MONGO_EXPORT_SERVER_PARAMETER(internalQueryCacheSize, int, 5000);
 
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryCacheFeedbacksStored, int, 20);
 
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryCacheMaxSizeBytesBeforeStripDebugInfo,
+                              long long,
+                              512 * 1024 * 1024)
+    ->withValidator([](const long long& newVal) {
+        if (newVal < 0) {
+            return Status(
+                ErrorCodes::Error(4036100),
+                "internalQueryCacheMaxSizeBytesBeforeStripDebugInfo must be non-negative");
+        }
+        return Status::OK();
+    });
+
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryCacheEvictionRatio, double, 10.0);
 
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryPlannerMaxIndexedSolutions, int, 64);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryEnumerationPreferLockstepOrEnumeration, bool, false);
 
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryEnumerationMaxOrSolutions, int, 10);
 
@@ -71,6 +85,15 @@ MONGO_EXPORT_SERVER_PARAMETER(internalQueryExecYieldIterations, int, 128);
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryExecYieldPeriodMS, int, 10);
 
 MONGO_EXPORT_SERVER_PARAMETER(internalQueryFacetBufferSizeBytes, int, 100 * 1024 * 1024);
+
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryFacetMaxOutputDocSizeBytes, long long, 100 * 1024 * 1024)
+    ->withValidator([](const long long& newVal) {
+        if (newVal <= 0) {
+            return Status(ErrorCodes::BadValue,
+                          "internalQueryFacetMaxOutputDocSizeBytes must be positive");
+        }
+        return Status::OK();
+    });
 
 MONGO_EXPORT_SERVER_PARAMETER(internalLookupStageIntermediateDocumentMaxSizeBytes,
                               long long,
@@ -112,5 +135,26 @@ MONGO_EXPORT_SERVER_PARAMETER(internalQueryMaxAddToSetBytes, int, 100 * 1024 * 1
             return Status(ErrorCodes::BadValue, "internalQueryMaxAddToSetBytes must be positive");
         }
         return Status::OK();
+    });
+
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryMaxRangeBytes, int, 100 * 1024 * 1024)
+    ->withValidator([](const int& newVal) {
+        if (newVal <= 0) {
+            return Status(ErrorCodes::BadValue, "internalQueryMaxRangeBytes must be positive");
+        }
+        return Status::OK();
+    });
+
+MONGO_EXPORT_SERVER_PARAMETER(internalQueryExplainSizeThresholdBytes, int, 10 * 1024 * 1024)
+    ->withValidator([](const int& newVal) {
+        if (newVal <= 0) {
+            return Status(ErrorCodes::BadValue,
+                          "internalQueryExplainSizeThresholdBytes must be positive");
+        } else if (newVal > BSONObjMaxInternalSize) {
+            return Status(ErrorCodes::BadValue,
+                          "internalQueryExplainSizeThresholdBytes cannot exceed max BSON size");
+        } else {
+            return Status::OK();
+        }
     });
 }  // namespace mongo

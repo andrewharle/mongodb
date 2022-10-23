@@ -1,5 +1,5 @@
 /*-
- * Copyright (c) 2014-2019 MongoDB, Inc.
+ * Copyright (c) 2014-present MongoDB, Inc.
  * Copyright (c) 2008-2014 WiredTiger, Inc.
  *	All rights reserved.
  *
@@ -16,6 +16,7 @@ int
 __wt_connection_open(WT_CONNECTION_IMPL *conn, const char *cfg[])
 {
     WT_SESSION_IMPL *session;
+    time_t most_recent;
 
     /* Default session. */
     session = conn->default_session;
@@ -38,6 +39,9 @@ __wt_connection_open(WT_CONNECTION_IMPL *conn, const char *cfg[])
      * allocate into a stack variable and then assign it on success.
      */
     conn->default_session = session;
+
+    __wt_seconds(session, &most_recent);
+    conn->ckpt_most_recent = (uint64_t)most_recent;
 
     /*
      * Publish: there must be a barrier to ensure the connection structure fields are set before

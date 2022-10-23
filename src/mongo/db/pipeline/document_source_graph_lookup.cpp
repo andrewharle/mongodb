@@ -76,8 +76,8 @@ std::unique_ptr<LiteParsedDocumentSourceForeignCollections> DocumentSourceGraphL
     PrivilegeVector privileges{
         Privilege(ResourcePattern::forExactNamespace(nss), ActionType::find)};
 
-    return stdx::make_unique<LiteParsedDocumentSourceForeignCollections>(std::move(nss),
-                                                                         std::move(privileges));
+    return stdx::make_unique<LiteParsedDocumentSourceForeignCollections>(
+        spec.fieldName(), std::move(nss), std::move(privileges));
 }
 
 REGISTER_DOCUMENT_SOURCE(graphLookup,
@@ -481,6 +481,10 @@ DocumentSourceGraphLookUp::DocumentSourceGraphLookUp(
         expCtx->copyWith(resolvedNamespace.ns,
                          boost::none,
                          expCtx->getCollator() ? expCtx->getCollator()->clone() : nullptr);
+
+    _fromExpCtx->variables = expCtx->variables;
+    _fromExpCtx->variablesParseState =
+        expCtx->variablesParseState.copyWith(expCtx->variables.useIdGenerator());
 
     // We append an additional BSONObj to '_fromPipeline' as a placeholder for the $match stage
     // we'll eventually construct from the input document.

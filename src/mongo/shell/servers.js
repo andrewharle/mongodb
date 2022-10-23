@@ -1106,7 +1106,9 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
                 }
 
                 // Disable background cache refreshing to avoid races in tests
-                argArray.push(...['--setParameter', "disableLogicalSessionCacheRefresh=true"]);
+                if (!argArrayContainsSetParameterValue('disableLogicalSessionCacheRefresh=')) {
+                    argArray.push(...['--setParameter', "disableLogicalSessionCacheRefresh=true"]);
+                }
             }
 
             // Since options may not be backward compatible, mongos options are not
@@ -1114,12 +1116,20 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
             if (programName.endsWith('mongos')) {
                 // apply setParameters for mongos
                 if (jsTest.options().setParametersMongos) {
-                    var params = jsTest.options().setParametersMongos.split(",");
-                    if (params && params.length > 0) {
-                        params.forEach(function(p) {
-                            if (p)
-                                argArray.push(...['--setParameter', p]);
-                        });
+                    let params = jsTest.options().setParametersMongos;
+                    for (let paramName of Object.keys(params)) {
+                        // Only set the 'logComponentVerbosity' parameter if it has not already
+                        // been specified in the given argument array. This means that any
+                        // 'logComponentVerbosity' settings passed through via TestData will
+                        // always be overridden by settings passed directly to MongoRunner from
+                        // within the shell.
+                        if (paramName === "logComponentVerbosity" &&
+                            argArrayContains("logComponentVerbosity")) {
+                            continue;
+                        }
+                        const paramVal = params[paramName];
+                        const setParamStr = paramName + "=" + JSON.stringify(paramVal);
+                        argArray.push(...['--setParameter', setParamStr]);
                     }
                 }
             } else if (baseProgramName === 'mongod') {
@@ -1131,8 +1141,8 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
                     }
                 }
 
-                // New mongod-specific options in 4.0.x
-                if (!programMajorMinorVersion || programMajorMinorVersion >= 400) {
+                // New mongod-specific options in 4.0.20
+                if (!programMajorMinorVersion || programMajorMinorVersion > 4020) {
                     if (jsTest.options().transactionLifetimeLimitSeconds !== undefined) {
                         if (!argArrayContainsSetParameterValue(
                                 "transactionLifetimeLimitSeconds=")) {
@@ -1141,6 +1151,13 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
                                     "transactionLifetimeLimitSeconds=" +
                                         jsTest.options().transactionLifetimeLimitSeconds]);
                         }
+                    }
+
+                    if ((jsTest.options().setParameters === undefined ||
+                         jsTest.options().setParameters['minNumChunksForSessionsCollection'] ===
+                             undefined) &&
+                        !argArrayContainsSetParameterValue('minNumChunksForSessionsCollection=')) {
+                        argArray.push(...['--setParameter', "minNumChunksForSessionsCollection=1"]);
                     }
                 }
 
@@ -1201,6 +1218,10 @@ var MongoRunner, _startMongod, startMongoProgram, runMongoProgram, startMongoPro
                             // within the shell.
                             if (paramName === "logComponentVerbosity" &&
                                 argArrayContains("logComponentVerbosity")) {
+                                continue;
+                            }
+                            if (paramName === "storeFindAndModifyImagesInSideCollection" &&
+                                argArrayContains("storeFindAndModifyImagesInSideCollection")) {
                                 continue;
                             }
                             const paramVal = params[paramName];

@@ -419,7 +419,8 @@ KVStorageEngine::reconcileCatalogAndIdents(OperationContext* opCtx) {
             // will return the index to be rebuilt.
             if (indexMetaData.isBackgroundSecondaryBuild && (!foundIdent || !indexMetaData.ready)) {
                 log()
-                    << "Expected background index build did not complete, rebuilding. Collection: "
+                    << "Expected background index build did not complete, rebuilding in foreground"
+                       " - see SERVER-43097. Collection: "
                     << coll << " Index: " << indexName;
                 ret.emplace_back(coll, indexName);
                 continue;
@@ -476,6 +477,10 @@ void KVStorageEngine::cleanShutdown() {
 KVStorageEngine::~KVStorageEngine() {}
 
 void KVStorageEngine::finishInit() {}
+
+void KVStorageEngine::notifyStartupComplete() {
+    _engine->notifyStartupComplete();
+}
 
 RecoveryUnit* KVStorageEngine::newRecoveryUnit() {
     if (!_engine) {
@@ -633,8 +638,11 @@ void KVStorageEngine::setStableTimestamp(Timestamp stableTimestamp) {
 }
 
 void KVStorageEngine::setInitialDataTimestamp(Timestamp initialDataTimestamp) {
-    _initialDataTimestamp = initialDataTimestamp;
     _engine->setInitialDataTimestamp(initialDataTimestamp);
+}
+
+Timestamp KVStorageEngine::getInitialDataTimestamp() const {
+    return _engine->getInitialDataTimestamp();
 }
 
 void KVStorageEngine::setOldestTimestamp(Timestamp oldestTimestamp) {

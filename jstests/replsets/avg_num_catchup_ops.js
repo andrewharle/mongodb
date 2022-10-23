@@ -11,14 +11,11 @@
     load("jstests/replsets/rslib.js");
 
     const name = jsTestName();
-    const rst = new ReplSetTest({name: name, nodes: 3, useBridge: true});
+    const rst = new ReplSetTest(
+        {name: name, nodes: 3, useBridge: true, settings: {catchUpTimeoutMillis: 4 * 60 * 1000}});
 
     rst.startSet();
-    const confSettings = {
-        catchUpTimeoutMillis: 4 * 60 * 1000,
-    };
-
-    rst.initiateWithHighElectionTimeout(confSettings);
+    rst.initiateWithHighElectionTimeout();
     rst.awaitSecondaryNodes();
     rst.awaitReplication();
 
@@ -51,8 +48,7 @@
     assert.eq(testNodeServerStatus.electionMetrics.averageCatchUpOps, 4);
 
     // Step up another node temporarily.
-    const tempPrimary = rst.stepUpNoAwaitReplication(rst.getSecondaries()[0]);
-    assert.eq(tempPrimary, rst.getPrimary());
+    const tempPrimary = rst.stepUp(rst.getSecondaries()[0]);
     rst.awaitReplication();
 
     // Step up the testNode and force it to catchup again.

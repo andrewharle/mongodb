@@ -53,6 +53,7 @@ var stopReplicationAndEnforceNewPrimaryToCatchUp;
         assert.commandWorked(syncingNode.adminCommand({replSetSyncFrom: desiredSyncSource.name}));
         restartServerReplication(syncingNode);
         rst.awaitSyncSource(syncingNode, desiredSyncSource);
+        rst.awaitReplication();
     };
 
     /**
@@ -481,7 +482,8 @@ var stopReplicationAndEnforceNewPrimaryToCatchUp;
         const latestOpOnOldPrimary = getLatestOp(oldPrimary);
 
         // New primary wins immediately, but needs to catch up.
-        const newPrimary = rst.stepUpNoAwaitReplication(node);
+        const newPrimary =
+            rst.stepUp(node, {awaitReplicationBeforeStepUp: false, awaitWritablePrimary: false});
         const latestOpOnNewPrimary = getLatestOp(newPrimary);
         // Check this node is not writable.
         assert.eq(newPrimary.getDB("test").isMaster().ismaster, false);

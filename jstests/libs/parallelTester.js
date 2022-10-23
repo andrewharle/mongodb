@@ -184,6 +184,7 @@ if (typeof _threadInject != "undefined") {
             "set_param1.js",          // changes global state
             "geo_update_btree2.js",   // SERVER-11132 test disables table scans
             "update_setOnInsert.js",  // SERVER-9982
+            "autocomplete.js",        // SERVER-41117
 
             // This overwrites MinKey/MaxKey's singleton which breaks
             // any other test that uses MinKey/MaxKey
@@ -228,11 +229,16 @@ if (typeof _threadInject != "undefined") {
             "remove8.js",
             "rename4.js",
             "storefunc.js",
+
+            // Can fail if isMaster takes too long on a loaded machine.
+            "dbadmin.js",
         ]);
 
         // The following tests cannot run when shell readMode is legacy.
         if (db.getMongo().readMode() === "legacy") {
             var requires_find_command = [
+                "merge_sort_collation.js",
+                "verify_update_mods.js",
                 "views/views_aggregation.js",
                 "views/views_change.js",
                 "views/views_drop.js",
@@ -391,11 +397,19 @@ if (typeof _threadInject != "undefined") {
         for (var i in params) {
             var param = params[i];
             var test = param.shift();
+
+            // Make a shallow copy of TestData so we can override the test name to
+            // prevent tests on different threads that to use jsTestName() as the
+            // collection name from colliding.
+            const clonedTestData = Object.assign({}, TestData);
+            clonedTestData.testName = `ParallelTesterThread${i}`;
+
             var t;
             if (newScopes)
-                t = new ScopedThread(wrapper, test, param, {TestData: TestData});
+                t = new ScopedThread(wrapper, test, param, {TestData: clonedTestData});
             else
-                t = new Thread(wrapper, test, param, {TestData: TestData});
+                t = new Thread(wrapper, test, param, {TestData: clonedTestData});
+
             runners.push(t);
         }
 
