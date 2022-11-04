@@ -1,0 +1,47 @@
+name: Build monogdb for debian buster
+
+on:
+  workflow_dispatch:
+
+jobs:
+
+  build:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - name: Install the pre-requisites
+        run:  sudo apt-get update && sudo apt-get install sbuild-debian-developer-setup git-buildpackage debhelper
+      
+      - name: Create sbuild environment
+        run: |
+              sudo sbuild-debian-developer-setup --distribution=debian --suite=buster && \
+              sudo sbuild-adduser runner && newgrp sbuild
+        
+      - name: Checkout & Build
+        run: |
+            gbp clone --debian-branch=pre_masterv3 https://github.com/andrewharle/mongodb.git && \
+            cd mongodb && \
+            sudo gbp buildpackage --git-ignore-new --git-upstream-tag='v%(version)s' \
+            --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --chroot=buster-amd64-sbuild \
+            --host=armhf --profiles=cross && \
+            cd ..
+      
+      - name: Rename Files in Compliance with Artifacts
+        run: find . -maxdepth 1 -type f -exec sh -c "echo \$(basename {}) | sed -e 's/[ \t:\/\\\"<>|*?]/-/g' -e 's/--*/-/g'| xargs mv {}" \;
+      
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v3
+        with:
+          name: Deb packages
+          path: |
+            ./*.deb
+            ./*.build
+            ./*.tar.xz
+            ./*.dsc 
+            ./*.build 
+            ./*.buildinfo
+            ./*.changes
+            !./*dbgsym*.deb
