@@ -2,4 +2,6 @@ hardened-build.patch
 strip-test-binaries.patch
 mozjs45-arm.patch
 fix-gcc-and-fpermissive.patch
-0005-Fix-CVE-2019-10906-Jinja-2.10.patch
+PythonSecurity.Patch
+IntelRDFPMathLib20U1_armfix.patch
+fix-gcc-warnings.patch

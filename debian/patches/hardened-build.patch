@@ -7,7 +7,7 @@ Subject: hardened-build
  1 file changed, 5 insertions(+)
 
 diff --git a/SConstruct b/SConstruct
-index b0bb2ce..9965eac 100644
+index a044515..6e18f16 100644
 --- a/SConstruct
 +++ b/SConstruct
 @@ -977,6 +977,11 @@ envDict = dict(BUILD_ROOT=buildDir,
