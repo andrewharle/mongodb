@@ -1,3 +1,14 @@
+mongodb (1:4.0.28-1) experimental; urgency=medium
+
+  * New upstream version 4.0.28
+  * Fix gbp.conf, wrongly omitted dirs in upstream
+  * Mongodb source URL is no longer valid. Localhost enabled (for now)
+  * Various patches to cleanup build.  * Added hardened build flags for GCC.
+  * Suppressed various superfluous gcc warnings/notes.* Applied various Python security patches to keep dependabot happy.
+  * Tidyed up IntelRDFPMathLib20U1 build.
+
+ -- Andrew Harle <46223597+andrewharle@users.noreply.github.com>  Mon, 07 Nov 2022 13:56:09 +0000
+
 mongodb (1:4.0.17~rc0-2) experimental; urgency=medium
 
   * New upstream version 4.0.17~rc0
