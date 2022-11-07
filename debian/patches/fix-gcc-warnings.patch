@@ -1,0 +1,21 @@
+From: Andrew Harle <46223597+andrewharle@users.noreply.github.com>
+Date: Mon, 07 Nov 2022 11:33:13 +0100
+Subject: Suppress GCC warnings
+ SERVER-36611 warning suppression for gcc-8.2 : https://jira.mongodb.org/browse/SERVER-36611
+ Suppress note: parameter passing for argument of type 'x' changed in GCC 7.1
+ 
+--- mongodb-4.0.28.orig/SConstruct
++++ mongodb-4.0.28/SConstruct
+@@ -2208,6 +2208,12 @@ def doConfigure(myenv):
+         # exceptionToStatus(). See https://bugs.llvm.org/show_bug.cgi?id=34804
+         AddToCCFLAGSIfSupported(myenv, "-Wno-exceptions")
+ 
++        # These warnings begin in gcc-8.2 and we should get rid of these disables at some point.
++        AddToCCFLAGSIfSupported(env, '-Wno-format-truncation')
++        AddToCXXFLAGSIfSupported(env, '-Wno-class-memaccess')
++
++        # Suppress note: parameter passing for argument of type x changed in GCC 7.1
++        AddToCXXFLAGSIfSupported(env, '-Wno-psabi')
+ 
+         # Check if we can set "-Wnon-virtual-dtor" when "-Werror" is set. The only time we can't set it is on
+         # clang 3.4, where a class with virtual function(s) and a non-virtual destructor throws a warning when

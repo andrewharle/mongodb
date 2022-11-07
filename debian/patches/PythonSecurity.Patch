@@ -1,0 +1,61 @@
+From: dependabot, Andrew Harle <46223597+andrewharle@users.noreply.github.com>
+Date: Mon, 07 Nov 2022 11:33:13 +0100
+Subject: GitHub Dependabot Python security advisories
+ Bumps psutil from 5.4.3 to 5.6.7.
+ Bumps pyyaml from 5.1 to 5.4.
+ Bumps pyjwt from 1.5.3 to 2.4.0.
+ Bumps jinja2 from 2.10 to 2.11.3.
+ Bumps pylint from 1.8.3 to 2.7.0
+
+--- mongodb-4.0.28.orig/buildscripts/requirements.txt
++++ mongodb-4.0.28/buildscripts/requirements.txt
+@@ -3,26 +3,26 @@ lazy-object-proxy == 1.4.1
+ boto3 == 1.5.27
+ cryptography >= 2.0.0,<=2.3.1
+ jira == 1.0.10
+-pyjwt == 1.5.3
++pyjwt == 2.4.0
+ # Other
+-pyyaml == 5.1
++pyyaml == 5.4
+ unittest-xml-reporting == 2.1.0
+ # Linters
+ yapf == 0.21.0
+ mypy == 0.580 ; python_version > "3"
+ # typing in Python 2 for mypy
+ typing == 3.6.1; python_version < "3"
+-pylint == 1.8.3
++pylint == 2.7.0
+ pydocstyle == 2.1.1
+ # resmoke.py
+ -r resmokelib/requirements.txt
+ # generate_error_codes.py
+ cheetah3 == 3.0.0; python_version < "3"
+-jinja2 == 2.10
++jinja2 == 2.11.3
+ mock == 2.0.0
+ click ~= 7.0
+ evergreen.py == 0.3.9
+ shrub.py == 0.2.0
+ structlog ~= 19.1.0
+-psutil == 5.4.3
++psutil == 5.6.7
+ oauthlib == 3.1.0
+--- mongodb-4.0.28.orig/buildscripts/resmokelib/requirements.txt
++++ mongodb-4.0.28/buildscripts/resmokelib/requirements.txt
+@@ -3,6 +3,6 @@ pyOpenSSL == 19.0.0
+ pymongo >= 3.0, < 4.0
+ pypiwin32 == 219 ; sys_platform == "win32" and python_version < "3"
+ pypiwin32 == 223 ; sys_platform == "win32" and python_version > "3"
+-PyYAML == 5.1
++PyYAML == 5.4
+ requests >= 2.16.1
+ subprocess32 >= 3.2.7 ; os_name == "posix" and python_version < "3"
+--- mongodb-4.0.28.orig/pytests/requirements.txt
++++ mongodb-4.0.28/pytests/requirements.txt
+@@ -1,4 +1,4 @@
+ # powertest
+ boto3 == 1.5.27
+-psutil == 5.4.3
++psutil == 5.6.7
+ pymongo ==  3.6.1
