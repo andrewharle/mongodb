@@ -3,6 +3,7 @@ Date: Mon, 31 Oct 2022 09:17:21 +0100
 Subject: Various fixes for IntelRDFPMathLib20U1
   Copied from BSD.
 
+
 --- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/LIBRARY/makefile
 +++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/LIBRARY/makefile
 @@ -348,12 +348,12 @@ $(OBJ_DIR)/bid32_sqrt.$O   :: $(SRC_DIR)
