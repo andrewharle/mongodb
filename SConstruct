@@ -977,6 +977,11 @@ envDict = dict(BUILD_ROOT=buildDir,
                INSTALL_DIR=installDir,
                CONFIG_HEADER_DEFINES={},
                LIBDEPS_TAG_EXPANSIONS=[],
+
+               CFLAGS=os.environ.get("CFLAGS", "-O3").split(),
+               CXXFLAGS=os.environ.get("CXXFLAGS", "-O3").split(),
+               CPPFLAGS=os.environ.get("CPPFLAGS", "").split(),
+               LINKFLAGS=os.environ.get("LDFLAGS", "").split(),
                )
 
 env = Environment(variables=env_vars, **envDict)
@@ -2203,6 +2208,12 @@ def doConfigure(myenv):
         # exceptionToStatus(). See https://bugs.llvm.org/show_bug.cgi?id=34804
         AddToCCFLAGSIfSupported(myenv, "-Wno-exceptions")
 
+        # These warnings begin in gcc-8.2 and we should get rid of these disables at some point.
+        AddToCCFLAGSIfSupported(env, '-Wno-format-truncation')
+        AddToCXXFLAGSIfSupported(env, '-Wno-class-memaccess')
+
+        # Suppress note: parameter passing for argument of type x changed in GCC 7.1
+        AddToCXXFLAGSIfSupported(env, '-Wno-psabi')
 
         # Check if we can set "-Wnon-virtual-dtor" when "-Werror" is set. The only time we can't set it is on
         # clang 3.4, where a class with virtual function(s) and a non-virtual destructor throws a warning when

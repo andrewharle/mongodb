@@ -27,7 +27,7 @@
   THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
 
-
+#include <stdlib.h>
 #include "bid_internal.h"
 
 #define BID32_NAN 0x7c000000ul
