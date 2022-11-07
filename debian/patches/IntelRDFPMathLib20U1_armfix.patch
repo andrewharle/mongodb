@@ -1,0 +1,123 @@
+From: Andrew Harle <46223597+andrewharle@users.noreply.github.com>
+Date: Mon, 31 Oct 2022 09:17:21 +0100
+Subject: Various fixes for IntelRDFPMathLib20U1
+  Copied from BSD.
+
+--- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/LIBRARY/makefile
++++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/LIBRARY/makefile
+@@ -348,12 +348,12 @@ $(OBJ_DIR)/bid32_sqrt.$O   :: $(SRC_DIR)
+ $(OBJ_DIR)/bid32_div.$O    :: $(SRC_DIR)/bid_div_macros.h
+ 
+ $(BID_TRANS_OBJS)    :: $(OBJ_DIR)/%.$O : $(SRC_DIR)/%.c $(SRC_DIR)/bid_trans.h
+-	$(CC) -c $(FO)$@ $(CFLAGS) $(BID_BLD_FLAGS) $<
++    $(CC) -c $(FO)$@ $(CPPFLAGS) $(CFLAGS) $(BID_BLD_FLAGS) $<
+ 	
+ 
+ $(BID_INTERNAL_OBJS) :: $(OBJ_DIR)/%.$O : $(SRC_DIR)/%.c \
+                         $(SRC_DIR)/bid_internal.h
+-	$(CC) -c $(FO)$@ $(CFLAGS) $(BID_BLD_FLAGS) $<
++	$(CC) -c $(FO)$@ $(CPPFLAGS) $(CFLAGS) $(BID_BLD_FLAGS) $<
+ 
+ $(SRC_DIR)/bid_trans.h : $(SRC_DIR)/bid_internal.h
+ 	touch $@
+@@ -398,7 +398,7 @@ realCleanLib : cleanLib
+ F128_PLATFORM_FLAGS := $(foreach n, IML_HOST_ARCH IML_HOST_OS CC_NAME \
+                         ,-D$(call ToLower,$($n)))
+ 
+-F128_CFLAGS := $(CFLAGS_OPT) -DUSE_NATIVE_QUAD_TYPE=0 $(F128_PLATFORM_FLAGS)
++F128_CFLAGS := $(CFLAGS) -DUSE_NATIVE_QUAD_TYPE=0 $(F128_PLATFORM_FLAGS)
+ 
+ F128_HDR_NAMES := bessel cons int  lgamma powi sqrt     bid  erf inv_hyper \
+                   log    pow  trig cbrt   exp  inv_trig mod
+@@ -429,7 +429,7 @@ $(OBJ_DIR)/dpml_exception.$O :: $(call P
+ $(F128_HDR_OBJS) :: $(OBJ_DIR)/dpml_ux_%.$O : $(F128_DIR)/dpml_%_x.h
+ 
+ $(F128_OBJS) :: $(OBJ_DIR)/%.$O : $(F128_DIR)/%.c $(F128_DIR)/dpml_ux.h
+-	$(CC) -c $(FO)$@ $(F128_CFLAGS) $<
++	$(CC) -c $(FO)$@ $(CPPFLAGS) $(F128_CFLAGS) $<
+ 
+ 	
+ # =============================================================================
+--- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/LIBRARY/makefile.iml_head
++++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/LIBRARY/makefile.iml_head
+@@ -344,9 +344,9 @@ else
+     endif
+ endif
+ 
+-ARCH_ALIAS := x86  ia64 EM64T x86_64 i686 amd64 Intel64 sun4u s390x
+-ARCH_LIST  := IA32 IA64 EFI2  EFI2   IA32 EFI2  EFI2    EFI2	s390x
+-ARCH_TYPE  := IA32 IA64 EFI2  EFI2   IA32 EFI2  EFI2    EFI2	s390x
++ARCH_ALIAS := x86  ia64 EM64T x86_64 i686 amd64 Intel64 sun4u s390x other
++ARCH_LIST  := IA32 IA64 EFI2  EFI2   IA32 EFI2  EFI2    EFI2	s390x   EFI2
++ARCH_TYPE  := IA32 IA64 EFI2  EFI2   IA32 EFI2  EFI2    EFI2	s390x   EFI2
+ ARCH_TYPES := IA32 IA64 EFI2 s390x
+ 
+ UARCH_LIST := SSE GSSE LRB LRB2
+--- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid128_pow.c
++++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid128_pow.c
+@@ -27,6 +27,7 @@
+   THE POSSIBILITY OF SUCH DAMAGE.
+ ******************************************************************************/
+ 
++#include <stdlib.h>
+ #include "bid_trans.h"
+ 
+ static BID_UINT128 BID128_0 = {BID128_LH_INIT( 0x0000000000000000ull, 0x3040000000000000ull )};
+--- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid32_pow.c
++++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid32_pow.c
+@@ -27,7 +27,7 @@
+   THE POSSIBILITY OF SUCH DAMAGE.
+ ******************************************************************************/
+ 
+-
++#include <stdlib.h>
+ #include "bid_internal.h"
+ 
+ #define BID32_NAN 0x7c000000ul
+--- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid64_pow.c
++++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid64_pow.c
+@@ -27,7 +27,7 @@
+   THE POSSIBILITY OF SUCH DAMAGE.
+ ******************************************************************************/
+ 
+-
++#include <stdlib.h>
+ #include "bid_trans.h"
+ 
+ #define BID64_0 0x31c0000000000000ull
+--- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid_functions.h
++++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/LIBRARY/src/bid_functions.h
+@@ -36,20 +36,9 @@
+ #ifndef _BID_FUNCTIONS_H
+ #define _BID_FUNCTIONS_H
+ 
+-#if !defined (__GNUC__) || defined(__QNX__)
+ #include <wchar.h>
+-#endif
+ #include <ctype.h>
+-
+-#if 0 // MongoDB Modification -- just `#include <stddef.h>`
+-// Fix system header issue on Sun solaris and define required type by ourselves
+-#if !defined(_WCHAR_T) && !defined(_WCHAR_T_DEFINED) && !defined(__QNX__)
+-typedef int   wchar_t;
+-#endif
+-#else
+ #include <stddef.h>
+-#endif
+-
+ 
+ #ifdef IN_LIBGCC2
+ // When we are built as the part of the gcc runtime library, libgcc,
+--- mongodb-4.0.28.orig/src/third_party/IntelRDFPMathLib20U1/SConscript
++++ mongodb-4.0.28/src/third_party/IntelRDFPMathLib20U1/SConscript
+@@ -306,8 +306,8 @@ if processor == 'i386':
+     cpp_defines['IA32'] = '1'
+     cpp_defines['ia32'] = '1'
+ elif processor == 'arm':
+-    cpp_defines['IA32'] = '1'
+-    cpp_defines['ia32'] = '1'
++    cpp_defines['efi2'] = '1'
++    cpp_defines['EFI2'] = '1'
+ elif processor == "aarch64":
+     cpp_defines['efi2'] = '1'
+     cpp_defines['EFI2'] = '1'
