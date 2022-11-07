@@ -27,6 +27,7 @@
   THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
 
+#include <stdlib.h>
 #include "bid_trans.h"
 
 static BID_UINT128 BID128_0 = {BID128_LH_INIT( 0x0000000000000000ull, 0x3040000000000000ull )};

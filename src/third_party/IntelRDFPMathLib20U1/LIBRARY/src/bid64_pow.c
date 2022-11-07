@@ -27,7 +27,7 @@
   THE POSSIBILITY OF SUCH DAMAGE.
 ******************************************************************************/
 
-
+#include <stdlib.h>
 #include "bid_trans.h"
 
 #define BID64_0 0x31c0000000000000ull
