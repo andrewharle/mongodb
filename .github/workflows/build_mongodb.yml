@@ -51,6 +51,7 @@ jobs:
             cd ..
       
       - name: Rename Files in Compliance with Artifacts
+        if: ${{ always() }}
         run: find . -maxdepth 1 -type f -exec sh -c "echo \$(basename {}) | sed -e 's/[ \t:\/\\\"<>|*?]/-/g' -e 's/--*/-/g'| xargs mv {}" \;
       
       - name: Upload artifacts
