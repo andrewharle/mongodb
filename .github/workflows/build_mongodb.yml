@@ -11,7 +11,8 @@ on:
           options:
           - debian/buster
           - debian/stretch
-          - master 
+          - master
+          - debian/buster_arm64
         arch_select:
           description: 'Architecture to Build for'
           required: true
