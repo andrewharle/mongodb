@@ -12,6 +12,16 @@ on:
           - debian/buster
           - debian/stretch
           - master 
+        arch_select:
+          description: 'Architecture to Build for'
+          required: true
+          default: 'armhf' 
+          type: choice
+          options:
+          - armhf
+          - arm64
+          - amd64
+          - i686
 
 jobs:
 
@@ -36,7 +46,7 @@ jobs:
             cd mongodb && \
             sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
             --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --chroot=buster-amd64-sbuild \
-            --host=armhf --profiles=cross && \
+            --host=${{ github.event.inputs.arch_select }} --profiles=cross && \
             cd ..
       
       - name: Rename Files in Compliance with Artifacts
