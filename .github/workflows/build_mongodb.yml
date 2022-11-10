@@ -54,6 +54,7 @@ jobs:
         run: find . -maxdepth 1 -type f -exec sh -c "echo \$(basename {}) | sed -e 's/[ \t:\/\\\"<>|*?]/-/g' -e 's/--*/-/g'| xargs mv {}" \;
       
       - name: Upload artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@v3
         with:
           name: Deb packages
