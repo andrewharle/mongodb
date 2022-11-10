@@ -40,6 +40,13 @@ jobs:
         run: |
               sudo sbuild-debian-developer-setup --distribution=debian --suite=buster && \
               sudo sbuild-adduser runner && newgrp sbuild
+              
+      - name: Free disk space
+        run: |
+          df --human-readable
+          sudo apt clean
+          docker rmi $(docker image ls --all --quiet)
+          rm -rf "$AGENT_TOOLSDIRECTORY"
         
       - name: Checkout & Build
         run: |
