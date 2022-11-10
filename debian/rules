@@ -42,6 +42,10 @@ ifeq (32, $(DEB_HOST_ARCH_BITS))
 COMMON_OPTIONS += --wiredtiger=off --mmapv1=on
 endif
 
+ifeq (arm64, $(DEB_HOST_ARCH_CPU))
+COMMON_OPTIONS += CCFLAGS=-march=armv8-a+crc
+endif
+
 override_dh_auto_clean:
 	scons --keep-going --clean $(COMMON_OPTIONS) .
 	find $(CURDIR)/ -name "*.pyc" -delete
@@ -53,9 +57,16 @@ override_dh_auto_build:
 	scons $(COMMON_OPTIONS) core tools
 
 ifeq (,$(filter nocheck,$(DEB_BUILD_OPTIONS)))
+ifeq (32, $(DEB_HOST_ARCH_BITS))
 override_dh_auto_test:
 	scons $(COMMON_OPTIONS) dbtest unittests
-	python ./buildscripts/resmoke.py --dbpathPrefix="$(CURDIR)/debian/tmp-test" --suites=dbtest,unittests --storageEngine=mmapv1
+	python ./buildscripts/resmoke.py --dbpathPrefix="$(CURDIR)/debian/tmp-test" --suites=dbtest,unittests --jobs=$(PROCS) --storageEngine=mmapv1
+else
+override_dh_auto_test:
+	scons $(COMMON_OPTIONS) dbtest unittests
+	python ./buildscripts/resmoke.py --dbpathPrefix="$(CURDIR)/debian/tmp-test" --suites=dbtest,unittests --jobs=$(PROCS)
+endif
+	
 .PHONY: override_dh_auto_test
 endif
 

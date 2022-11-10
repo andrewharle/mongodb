@@ -1,0 +1,2 @@
+tar-ignore = "(^|\/).github.*"
+extend-diff-ignore = "(^|\/).github.*"
