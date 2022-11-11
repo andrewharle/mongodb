@@ -41,9 +41,6 @@ jobs:
               sudo sbuild-debian-developer-setup --distribution=debian --suite=buster && \
               sudo sbuild-adduser runner && newgrp sbuild
       
-      - name: Maximize build disk space
-        uses: easimon/maximize-build-space@v6
-      
       - name: Free disk space
         run: |
           df --human-readable
