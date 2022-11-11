@@ -40,13 +40,42 @@ jobs:
         run: |
               sudo sbuild-debian-developer-setup --distribution=debian --suite=buster && \
               sudo sbuild-adduser runner && newgrp sbuild
-              
+      
+      - name: Maximize build disk space
+        uses: easimon/maximize-build-space@v6
+      
       - name: Free disk space
         run: |
           df --human-readable
           sudo apt clean
           docker rmi $(docker image ls --all --quiet)
           rm -rf "$AGENT_TOOLSDIRECTORY"
+          df --human-readable
+          
+      - name: Set Swap
+        shell: bash
+        run: |
+            echo "Memory and swap (before):"
+            free -h
+            echo
+            swapon --show
+            echo
+            export SWAP_FILE=$(swapon --show=NAME | tail -n 1)
+            sudo swapoff $SWAP_FILE
+            sudo rm $SWAP_FILE
+            sudo fallocate -l 4096M $SWAP_FILE
+            sudo chmod 600 $SWAP_FILE
+            sudo mkswap $SWAP_FILE
+            sudo swapon $SWAP_FILE
+            
+      - name: Swap space report after modification
+        shell: bash
+        run: |
+          echo "Memory and swap (after):"
+          free -h
+          echo
+          swapon --show
+          echo
         
       - name: Checkout & Build
         run: |
