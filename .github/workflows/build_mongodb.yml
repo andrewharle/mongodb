@@ -81,6 +81,8 @@ jobs:
             sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
             --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --chroot=buster-amd64-sbuild \
             --host=${{ github.event.inputs.arch_select }} --profiles=cross && \
+            sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
+            --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --chroot=buster-amd64-sbuild && \
             cd ..
       
       - name: Rename Files in Compliance with Artifacts
