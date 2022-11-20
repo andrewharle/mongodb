@@ -13,20 +13,15 @@ on:
           - debian/stretch
           - master
           - debian/buster_arm64
-        arch_select:
-          description: 'Architecture to Build for'
-          required: true
-          default: 'armhf' 
-          type: choice
-          options:
-          - armhf
-          - arm64
-          - amd64
-          - i686
 
 jobs:
 
   build:
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [armhf, arm64, amd64, i686]
+        
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -78,13 +73,13 @@ jobs:
         run: |
             gbp clone --debian-branch=${{ github.event.inputs.branch_select }} https://github.com/andrewharle/mongodb.git && \
             cd mongodb && \
-            if [[ "$(dpkg-architecture -q DEB_BUILD_ARCH)" == "${{ github.event.inputs.arch_select }}" ]]; then
+            if [[ "$(dpkg-architecture -q DEB_BUILD_ARCH)" == "${{ matrix.arch }}" ]]; then
              sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
              --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --no-clean-source --chroot=buster-amd64-sbuild
             else
              sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
              --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --chroot=buster-amd64-sbuild \
-             --host=${{ github.event.inputs.arch_select }} --profiles=cross
+             --host=${{ matrix.arch }} --profiles=cross
             fi
             && cd ..
       
