@@ -82,7 +82,7 @@ jobs:
              --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --no-clean-source --chroot=buster-amd64-sbuild \
              --host=${{ matrix.arch }} --profiles=cross
             fi
-            && cd ..
+            cd ..
       
       - name: Rename Files in Compliance with Artifacts
         if: ${{ always() }}
