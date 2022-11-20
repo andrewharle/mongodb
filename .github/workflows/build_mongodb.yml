@@ -20,7 +20,8 @@ jobs:
     strategy:
       fail-fast: true
       matrix:
-        arch: [armhf, arm64, amd64, i386]
+        #arch: [armhf, arm64, amd64, i386]
+        arch: [arm64, amd64]
         
     runs-on: ubuntu-latest
     permissions:
