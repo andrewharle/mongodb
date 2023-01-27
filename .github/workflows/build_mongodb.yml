@@ -10,12 +10,15 @@ on:
           type: choice
           options:
           - debian/buster
-          - debian/stretch
-          - master 
 
 jobs:
 
   build:
+    strategy:
+      fail-fast: true
+      matrix:
+        arch: [armhf, arm64, amd64]
+        
     runs-on: ubuntu-latest
     permissions:
       contents: read
@@ -23,26 +26,67 @@ jobs:
 
     steps:
       - name: Install the pre-requisites
-        run:  sudo apt-get update && sudo apt-get install sbuild-debian-developer-setup git-buildpackage debhelper
+        run:  sudo apt-get update && sudo apt-get install sbuild-debian-developer-setup git-buildpackage debhelper ubuntu-dev-tools
       
       - name: Create sbuild environment
         run: |
-              sudo sbuild-debian-developer-setup --distribution=debian --suite=buster && \
+              sudo sbuild-createchroot buster /srv/chroot/buster-amd64-sbuild http://localhost:3142/deb.debian.org/debian && \
               sudo sbuild-adduser runner && newgrp sbuild
+      
+      - name: Free disk space
+        run: |
+          df --human-readable
+          sudo apt clean
+          docker rmi $(docker image ls --all --quiet)
+          rm -rf "$AGENT_TOOLSDIRECTORY"
+          df --human-readable
+          
+      - name: Set Swap
+        shell: bash
+        run: |
+            echo "Memory and swap (before):"
+            free -h
+            echo
+            swapon --show
+            echo
+            export SWAP_FILE=$(swapon --show=NAME | tail -n 1)
+            sudo swapoff $SWAP_FILE
+            sudo rm $SWAP_FILE
+            sudo fallocate -l 2G $SWAP_FILE
+            sudo chmod 600 $SWAP_FILE
+            sudo mkswap $SWAP_FILE
+            sudo swapon $SWAP_FILE
+            
+      - name: Swap space report after modification
+        shell: bash
+        run: |
+          echo "Memory and swap (after):"
+          free -h
+          echo
+          swapon --show
+          echo
         
       - name: Checkout & Build
         run: |
             gbp clone --debian-branch=${{ github.event.inputs.branch_select }} https://github.com/andrewharle/mongodb.git && \
             cd mongodb && \
-            sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
-            --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --chroot=buster-amd64-sbuild \
-            --host=armhf --profiles=cross && \
+            git checkout ${{ github.event.inputs.branch_select }} && \
+            if [[ "$(dpkg-architecture -q DEB_BUILD_ARCH)" == "${{ matrix.arch }}" ]]; then
+             sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
+             --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --verbose --no-clean-source --chroot=buster-amd64-sbuild
+            else
+             sudo gbp buildpackage --git-debian-branch=${{ github.event.inputs.branch_select }} --git-upstream-tag='v%(version)s' \
+             --git-builder=DEB_BUILD_OPTIONS=parallel=$(nproc) sbuild --verbose --no-clean-source --chroot=buster-amd64-sbuild \
+             --host=${{ matrix.arch }} --profiles=cross
+            fi
             cd ..
       
       - name: Rename Files in Compliance with Artifacts
+        if: ${{ always() }}
         run: find . -maxdepth 1 -type f -exec sh -c "echo \$(basename {}) | sed -e 's/[ \t:\/\\\"<>|*?]/-/g' -e 's/--*/-/g'| xargs mv {}" \;
       
       - name: Upload artifacts
+        if: ${{ always() }}
         uses: actions/upload-artifact@v3
         with:
           name: Deb packages
