@@ -1,3 +1,9 @@
+mongodb (1:4.0.28-2) experimental; urgency=medium
+
+  * Added builds for amd64 and aarch64
+
+ -- Andrew Harle <46223597+andrewharle@users.noreply.github.com>  Mon, 16 Jan 2023 19:57:15 +0100
+
 mongodb (1:4.0.28-1) experimental; urgency=medium
 
   * New upstream version 4.0.28
